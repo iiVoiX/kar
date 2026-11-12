@@ -74,8 +74,13 @@ static void window_hook(Cpu *c) {
 
 // f_70053832b8 right after it stored the camera's aspect at +0x318 (x19 the camera), which the projection
 // (f_7005384740) reads: a 16:9 camera gets the wanted aspect, so the view grows sideways (Hor+) instead of stretching.
+static int nocam(void) {   // KAR_WIDE_NOCAM=1 (diagnostic): leave the camera aspect alone, to see what the hooks change
+    static int v = -1;
+    if (v < 0) v = getenv("KAR_WIDE_NOCAM") && *getenv("KAR_WIDE_NOCAM") == '1';
+    return v;
+}
 static void aspect_hook(Cpu *c) {
-    if (!want_w || !want_h) return;
+    if (!want_w || !want_h || nocam()) return;
     float *a = (float *)(uintptr_t)(c->x[19] + 0x318);
     if (*a > 1.777f && *a < 1.7785f) *a = (float)want_w / (float)want_h;
 }
@@ -99,7 +104,7 @@ int kar_wide_size(int *w, int *h) {
 // f_7005384740 (the projection) right after it loaded the camera aspect from [x0 + 0x318] into s0: cameras that do not
 // pass through f_70053832b8 (the line-up scene before a race) get the wanted aspect here too.
 static void project_hook(Cpu *c) {
-    if (!want_w || !want_h) return;
+    if (!want_w || !want_h || nocam()) return;
     float *a = (float *)(uintptr_t)(c->x[0] + 0x318);
     {   // KAR_WIDE_LOG=<frame> (diagnostic): from that frame, the aspects the projection sees, each (camera, value) once
         static long long on = -2;
