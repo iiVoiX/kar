@@ -96,6 +96,7 @@ int kar_wide_size(int *w, int *h) {
 
 static int wide_active;
 int kar_wide_active(void) { return wide_active; }   // vk_exec_draw.c: widen the 16:9 pass rectangles
+int kar_wide_output(uint32_t w, uint32_t h) { return wide_active && (int)w == want_w && (int)h == want_h; }   // the output-sized target
 
 void kar_wide_init(void) {
     int set = rt_patch_set("karwide");

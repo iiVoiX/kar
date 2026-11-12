@@ -2955,7 +2955,7 @@ static int kar_wide_on(void) {
     return on;
 }
 static int kar_widen(float x, float y, float w, float h, uint32_t pw, uint32_t ph) {
-    int on = kar_wide_on() && x == 0 && y == 0 && h == (float)ph && w < (float)pw && fabsf(w * 9 - h * 16) <= 9;
+    int on = kar_wide_on() && x == 0 && y == 0 && fabsf(h - (float)ph) <= 1 && w < (float)pw && fabsf(w * 9 - h * 16) <= 18;
     static uint64_t seen[32];
     static int nseen;
     uint64_t key = (uint64_t)pw << 32 | (uint64_t)ph << 16 | (uint64_t)w;

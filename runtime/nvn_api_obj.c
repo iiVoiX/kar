@@ -100,7 +100,8 @@ static void size_watch(Cpu *c, uint32_t w, uint32_t h) {
     left--;
     uint64_t fp = c->x[29], ra[6] = {c->x[30]};
     for (int k = 1; k < 6 && fp && !(fp & 7); k++) { ra[k] = *(const uint64_t *)(uintptr_t)(fp + 8); fp = *(const uint64_t *)(uintptr_t)fp; }
-    rt_log("size watch: %ux%u < %#llx < %#llx < %#llx < %#llx < %#llx < %#llx", w, h, (unsigned long long)ra[0],
+    rt_log("size watch: f%llu %ux%u < %#llx < %#llx < %#llx < %#llx < %#llx < %#llx",
+           (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), w, h, (unsigned long long)ra[0],
            (unsigned long long)ra[1], (unsigned long long)ra[2], (unsigned long long)ra[3], (unsigned long long)ra[4],
            (unsigned long long)ra[5]);
 }
@@ -755,7 +756,17 @@ NVN_API(nvnWindowSetPresentInterval) {
 NVN_API(nvnWindowSetCrop) {
     win_t *o = WN(c);
     int v[4] = {(int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3), (int)arg_x(c, 4)};
-    if (memcmp(o->crop, v, sizeof v)) NVN_LOG("WindowCrop %d,%d %dx%d", v[0], v[1], v[2], v[3]);
+    // Kirby ultrawide (kar_wide.c): the game still crops its window textures to a 16:9 size; with the textures widened
+    // the crop covers their full width, else the present shows only the left 16:9 part with bars beside it.
+    int ww, wh;
+    if (kar_wide_active() && kar_wide_size(&ww, &wh) && v[0] == 0 && v[1] == 0 && v[3] > 0 &&
+        (int64_t)v[2] * 9 == (int64_t)v[3] * 16)
+        v[2] = (int)(((int64_t)v[3] * ww / wh + 1) & ~1ll);
+    if (memcmp(o->crop, v, sizeof v)) {
+        NVN_LOG("WindowCrop %d,%d %dx%d", v[0], v[1], v[2], v[3]);
+        static int told;
+        if (told++ < 8) rt_log("nvn: window crop %d,%d %dx%d", v[0], v[1], v[2], v[3]);
+    }
     memcpy(o->crop, v, sizeof v);
 }
 
