@@ -120,8 +120,16 @@ static void project_hook(Cpu *c) {
                    (unsigned long long)c->x[0], *a, a[1]);
         }
     }
-    if (!(*a > 1.777f && *a < 1.7785f)) return;
-    *a = (float)want_w / (float)want_h;
+    // Cameras with aspect 1 and a perspective field of view (radians 0.3..2.1 or degrees 10..120, not exactly 1) take
+    // the target's aspect on top (the line-up before a race: the hooks above alone left it stretched), so they get
+    // the width factor. Orthographic ones (a size such as 2048 in place of the angle) stay. KAR_WIDE_SQ=0 turns it off.
+    static int sq = -1;
+    if (sq < 0) sq = !(getenv("KAR_WIDE_SQ") && *getenv("KAR_WIDE_SQ") == '0');
+    float fov = a[1];
+    int persp = (fov > 0.3f && fov < 2.1f && fov != 1.0f) || (fov >= 10.0f && fov <= 120.0f);
+    if (sq && *a == 1.0f && persp) *a = (float)want_w / (float)want_h * 9 / 16;
+    else if (!(*a > 1.777f && *a < 1.7785f)) return;
+    else *a = (float)want_w / (float)want_h;
     uint32_t bits;
     memcpy(&bits, a, 4);
     c->v[0] = bits;   // s0, the rest of the vector register zero as after the scalar load
