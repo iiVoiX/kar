@@ -2946,11 +2946,24 @@ static void bind_pipeline(VkExec *ex, VkPipelineBindPoint bp, VkPipeline p) {
     if (!k) B.st_valid = 0;
 }
 
+// Kirby ultrawide (KAR_WIDE=1, RELEASE_PLAN 17.3): the game records its pass rectangles at the 16:9 sizes while the
+// karwide patches make the targets wider. A rectangle from (0,0) with a 16:9 size, the target's height and a smaller
+// width is widened to the target.
+static int kar_wide_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("KAR_WIDE"); on = rt_game_is_kar() && e && *e == '1'; }
+    return on;
+}
+static int kar_widen(float x, float y, float w, float h, uint32_t pw, uint32_t ph) {
+    return kar_wide_on() && x == 0 && y == 0 && h == (float)ph && w < (float)pw && fabsf(w * 9 - h * 16) <= 9;
+}
+
 static void record_fixed(VkExec *ex) {
     VkCommandBuffer cb = ex->cb;
     if (ex->dirty & VK_EXEC_DIRTY_VIEWPORT) {
         float x = 0, y = 0, w = (float)ex->pass_w, h = (float)ex->pass_h;
         if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
+        if (kar_widen(x, y, w, h, ex->pass_w, ex->pass_h)) w = (float)ex->pass_w;
         if (w < 1) w = 1;
         if (h < 1) h = 1;
         VkViewport v = {x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};   // the y flip: negative height
@@ -2959,6 +2972,9 @@ static void record_fixed(VkExec *ex) {
     }
     if (ex->dirty & VK_EXEC_DIRTY_SCISSOR) {
         VkRect2D r = vk_exec_scissor(ex);
+        if (kar_widen((float)r.offset.x, (float)r.offset.y, (float)r.extent.width, (float)r.extent.height, ex->pass_w,
+                      ex->pass_h))
+            r.extent.width = ex->pass_w;
         vkCmdSetScissorWithCount(cb, 1, &r);
         ex->recorded++;
     }
