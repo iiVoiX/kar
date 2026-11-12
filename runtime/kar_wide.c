@@ -8,10 +8,14 @@
 #include "host.h"
 #include "dispatch.h"
 #include "cpu.h"
+#include "nvn_api.h"
+#include "platform/platform.h"
+#include <string.h>
 
 #define SLOT_SIZE 0x340
 #define SLOT_CLASS 0x350
 #define SLOT_WINDOW 0x360
+#define SLOT_ASPECT 0x370
 
 static int want_w, want_h;
 
@@ -53,6 +57,14 @@ static void window_hook(Cpu *c) {
     g[0] = (uint32_t)(((uint64_t)g[1] * want_w / want_h + 8) & ~15u);
 }
 
+// f_70053832b8 right after it stored the camera's aspect at +0x318 (x19 the camera), which the projection
+// (f_7005384740) reads: a 16:9 camera gets the wanted aspect, so the view grows sideways (Hor+) instead of stretching.
+static void aspect_hook(Cpu *c) {
+    if (!want_w || !want_h) return;
+    float *a = (float *)(uintptr_t)(c->x[19] + 0x318);
+    if (*a > 1.777f && *a < 1.7785f) *a = (float)want_w / (float)want_h;
+}
+
 void kar_wide_init(void) {
     if (rt_patch_set("karwide") < 0) return;
     const char *e = getenv("KAR_DISPLAY_RES");
@@ -60,4 +72,37 @@ void kar_wide_init(void) {
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_SIZE, size_hook);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_CLASS, class_hook);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_WINDOW, window_hook);
+    rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_ASPECT, aspect_hook);
+}
+
+// KAR_FIND_F32=<hex>@<frame> (diagnostic, ultrawide camera): once at that frame, every 4-byte-aligned u32 of the
+// readable guest memory below the modules equal to <hex> (e.g. 3fe38e39 = 16/9 as float) with the floats around it, to find the camera's aspect ratio.
+// Called every frame from kar_menu.c menu_tick (game thread).
+void kar_wide_tick(void) {
+    static int state = -1;
+    static uint32_t value;
+    static uint64_t at;
+    if (state < 0) {
+        const char *e = getenv("KAR_FIND_F32");
+        state = e && sscanf(e, "%x@%llu", &value, (unsigned long long *)&at) == 2 ? 1 : 0;
+    }
+    if (state != 1 || __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) < at) return;
+    state = 0;
+    int hits = 0;
+    uint64_t scanned = 0;
+    for (uint64_t a = 0x100000000ull, end; a < 0x7000000000ull; a = end) {   // guest memory below the modules
+        int st = plat_mem_state(a, 0x7000000000ull, &end);
+        if (end <= a) break;
+        if (st != PLAT_PROT_READ && st != PLAT_PROT_RW) continue;
+        scanned += end - a;
+        for (const uint32_t *q = (const uint32_t *)(uintptr_t)a, *e = (const uint32_t *)(uintptr_t)end; q < e; q++)
+            if (*q == value && hits++ < 80) {
+                const float *f = (const float *)q;
+                rt_log("find f32: %#llx: %g %g %g [%g] %g %g %g", (unsigned long long)(uintptr_t)q,
+                       (uint64_t)(uintptr_t)q - a >= 12 ? f[-3] : 0, (uint64_t)(uintptr_t)q - a >= 8 ? f[-2] : 0,
+                       (uint64_t)(uintptr_t)q - a >= 4 ? f[-1] : 0, f[0], q + 1 < e ? f[1] : 0,
+                       q + 2 < e ? f[2] : 0, q + 3 < e ? f[3] : 0);
+            }
+    }
+    rt_log("find f32: %#x: %d hits in %llu MB of guest memory", value, hits, (unsigned long long)(scanned >> 20));
 }

@@ -129,7 +129,9 @@ static void static_record(Cpu *c) {
 static int still_there(int i) { return !memcmp(rec[i].snap, (const void *)(uintptr_t)rec[i].dst, sizeof rec[i].snap); }
 
 // 0x7002fe7230 + 0x10, every frame on the game thread: L/R on the display page switch the mode and set its texts again.
+void kar_wide_tick(void);
 static void menu_tick(Cpu *c) {
+    kar_wide_tick();
     if (!nrec) return;
     for (int i = 0; i < nrec; i++)   // the frame after a set: what the field holds now identifies it later
         if (!rec[i].snapped) { memcpy(rec[i].snap, (const void *)(uintptr_t)rec[i].dst, sizeof rec[i].snap); rec[i].snapped = 1; }

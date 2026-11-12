@@ -199,6 +199,7 @@ static int thaw_fault(uint64_t a) {
 // Mapping changes thaw the regions they touch and run under frz_lock, so no freeze sees them half done.
 static volatile int64_t guest_committed;   // bytes of guest memory committed (vk_memory.c census, 16.9 memory budget)
 int64_t mem_guest_committed(void) { return guest_committed; }
+uint64_t mem_heap_size(void) { return heap_size; }   // committed bytes of the game heap from mem_layout()->heap.base
 
 static void commit(uint64_t a, uint64_t n, const char *what) {
     plat_mutex_lock(&frz_lock);
