@@ -2951,7 +2951,7 @@ static void bind_pipeline(VkExec *ex, VkPipelineBindPoint bp, VkPipeline p) {
 // width is widened to the target.
 static int kar_wide_on(void) {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("KAR_WIDE"); on = rt_game_is_kar() && e && *e == '1'; }
+    if (on < 0) on = rt_game_is_kar() && kar_wide_active();
     return on;
 }
 static int kar_widen(float x, float y, float w, float h, uint32_t pw, uint32_t ph) {
@@ -3501,6 +3501,17 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
                    ex->vp[0][5], ex->has_scissor, ex->scissor.x, ex->scissor.y, ex->scissor.w, ex->scissor.h,
                    s.chmask.mask, s.color.blend_en, (int)s.blend[0].src_rgb, (int)s.blend[0].dst_rgb, count, prim,
                    (int)s.poly.cull, (int)s.poly.front, (int)s.poly.mode, s.ms.enable, s.ms.samples, s.ms.a2c);
+    }
+    {   // KAR_PASS_STATS=<frame> (diagnostic, ultrawide HUD): each draw of that frame by target size, viewport and blending
+        static long at = -2;
+        if (at == -2) { const char *e = getenv("KAR_PASS_STATS"); at = e ? atol(e) : -1; }
+        if (at >= 0 && (long)gfx_counters.frames == at) {
+            static int lines;
+            if (lines++ < 5000)
+                rt_log("pass stats: target %ux%u vp %g,%g %gx%g blend %d count %d", ex->pass_w, ex->pass_h,
+                       ex->has_vp ? ex->vp[0][0] : 0, ex->has_vp ? ex->vp[0][1] : 0, ex->has_vp ? ex->vp[0][2] : 0,
+                       ex->has_vp ? ex->vp[0][3] : 0, s.color.blend_en != 0, count);
+        }
     }
     record_fixed(ex);
     repeat_stats(ex, info);

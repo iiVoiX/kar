@@ -8,6 +8,7 @@
 #include "host.h"
 #include "dispatch.h"
 #include "cpu.h"
+#include "cfg.h"
 #include "nvn_api.h"
 #include "platform/platform.h"
 #include <string.h>
@@ -77,10 +78,33 @@ static void aspect_hook(Cpu *c) {
     if (*a > 1.777f && *a < 1.7785f) *a = (float)want_w / (float)want_h;
 }
 
-void kar_wide_init(void) {
-    if (rt_patch_set("karwide") < 0) return;
+// The display size Kirby is told and widened to: KAR_DISPLAY_RES=WxH, else with the ultrawide setting (cfg
+// TOTK_ULTRAWIDE) an output resolution wider than 16:9 (TOTK_OUTPUT_RES). 1 when there is one.
+int kar_wide_size(int *w, int *h) {
+    int a = 0, b = 0;
     const char *e = getenv("KAR_DISPLAY_RES");
-    if (!e || sscanf(e, "%dx%d", &want_w, &want_h) != 2) want_w = want_h = 0;
+    if (e && *e) sscanf(e, "%dx%d", &a, &b);
+    else if (cfg_bool("TOTK_ULTRAWIDE")) {
+        const char *o = cfg_value("TOTK_OUTPUT_RES");
+        if (o && sscanf(o, "%dx%d", &a, &b) == 2 && (int64_t)a * 9 <= (int64_t)b * 16) a = b = 0;   // 16:9 or narrower
+    }
+    if (a < 640 || b < 360) return 0;
+    if (w) *w = a;
+    if (h) *h = b;
+    return 1;
+}
+
+static int wide_active;
+int kar_wide_active(void) { return wide_active; }   // vk_exec_draw.c: widen the 16:9 pass rectangles
+
+void kar_wide_init(void) {
+    int set = rt_patch_set("karwide");
+    if (set < 0) return;
+    if (!kar_wide_size(&want_w, &want_h)) want_w = want_h = 0;
+    const char *sw = getenv("KAR_WIDE");
+    if ((!sw || !*sw) && want_w && (int64_t)want_w * 9 > (int64_t)want_h * 16) rt_patch_switch(set, 1);   // the setting turns it on
+    wide_active = rt_patch_enabled(set) && want_w;
+    if (wide_active) rt_log("kar wide: %dx%d", want_w, want_h);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_SIZE, size_hook);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_CLASS, class_hook);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_WINDOW, window_hook);

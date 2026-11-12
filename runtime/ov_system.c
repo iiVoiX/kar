@@ -969,10 +969,9 @@ static void ov_display_resolution_event(Cpu *c) {
     uint64_t ev = arg_x(c, 0);
     if (!ev) rt_fatal("nn::oe::GetDefaultDisplayResolutionChangeEvent: null event");
     kern_bind_system_event(c, ev, 0);
-    // KAR_DISPLAY_RES set: report a change once, so the game asks for the size instead of keeping its docked default
+    // A display size from KAR_DISPLAY_RES or the ultrawide setting: report a change once, so the game asks for the size instead of keeping its docked default
     // (ultrawide, RELEASE_PLAN 17.3).
-    const char *e = getenv("KAR_DISPLAY_RES");
-    if (e && *e) kern_signal_system_event(ev);
+    if (kar_wide_size(NULL, NULL)) kern_signal_system_event(ev);
 }
 HOST_OVERRIDE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", ov_display_resolution_event);
 
@@ -983,11 +982,8 @@ HOST_OVERRIDE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11System
 static void ov_display_resolution(Cpu *c) {
     int32_t *w = arg_p(c, 0), *h = arg_p(c, 1);
     int32_t dw = 2560, dh = 1440;
-    const char *e = getenv("KAR_DISPLAY_RES");
-    if (e && *e) {
-        int a = 0, b = 0;
-        if (sscanf(e, "%dx%d", &a, &b) == 2 && a > 0 && b > 0) dw = a, dh = b;
-    }
+    int a, b;
+    if (kar_wide_size(&a, &b)) dw = a, dh = b;   // KAR_DISPLAY_RES, or the ultrawide setting's output size (kar_wide.c)
     if (w) *w = dw;
     if (h) *h = dh;
     rt_log("oe: GetDefaultDisplayResolution -> %dx%d (caller %#llx)", dw, dh, (unsigned long long)c->x[30]);
