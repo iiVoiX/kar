@@ -3493,9 +3493,9 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
         ex->recorded++;
         B.st = s, B.st_valid = 1;
     }
-    if (ex->pass_w == 2560) {   // KAR diagnostic: the final composite's fixed state
+    if (ex->pass_w == 2560 || (kar_wide_on() && ex->pass_w == 3440)) {   // KAR diagnostic: the final composite's fixed state
         static int told;
-        if (told++ < 3)
+        if (told++ < (kar_wide_on() ? 60 : 3))
             rt_log("kar: 2560 draw: vp %d [%g %g %g %g %g %g] scissor %d [%d %d %d %d] chmask %#x blend0 en %#x src %d dst %d "
                    "count %d prim %d cull %d front %d mode %d ms en %d samples %d a2c %d", ex->has_vp, ex->vp[0][0], ex->vp[0][1], ex->vp[0][2], ex->vp[0][3], ex->vp[0][4],
                    ex->vp[0][5], ex->has_scissor, ex->scissor.x, ex->scissor.y, ex->scissor.w, ex->scissor.h,

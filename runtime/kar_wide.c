@@ -40,6 +40,18 @@ static void class_hook(Cpu *c) {
     if (!want_w || !want_h) return;
     uint32_t w = (uint32_t)c->x[0], h = (uint32_t)(c->x[0] >> 32);
     if (!h || w * 9 < h * 16 - 9 || w * 9 > h * 16 + 9) return;   // only 16:9 sizes
+    static char skip[128];   // KAR_WIDE_SKIP=WxH,... (diagnostic): size classes left 16:9, to find the interface target
+    static int skip_read;
+    if (!skip_read) {
+        skip_read = 1;
+        const char *e = getenv("KAR_WIDE_SKIP");
+        if (e) snprintf(skip, sizeof skip, ",%s,", e);
+    }
+    if (skip[0]) {
+        char key[32];
+        snprintf(key, sizeof key, ",%ux%u,", w, h);
+        if (strstr(skip, key)) return;
+    }
     uint32_t nw = (uint32_t)(((uint64_t)h * want_w / want_h + 8) & ~15u);
     if (nw <= w) return;
     static int logged;
