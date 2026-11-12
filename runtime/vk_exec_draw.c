@@ -2972,9 +2972,9 @@ static void record_fixed(VkExec *ex) {
     if (ex->dirty & VK_EXEC_DIRTY_VIEWPORT) {
         float x = 0, y = 0, w = (float)ex->pass_w, h = (float)ex->pass_h;
         if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
-        if (kar_widen(x, y, w, h, ex->pass_w, ex->pass_h)) {   // output target: stretch; interface layer: centre
-            if (kar_wide_output(ex->pass_w, ex->pass_h)) w = (float)ex->pass_w;
-            else x = ((float)ex->pass_w - w) / 2;
+        if (kar_widen(x, y, w, h, ex->pass_w, ex->pass_h)) {   // interface layer: centre; other targets: stretch
+            if (kar_wide_ui(ex->pass_w, ex->pass_h)) x = ((float)ex->pass_w - w) / 2;
+            else w = (float)ex->pass_w;
         }
         if (w < 1) w = 1;
         if (h < 1) h = 1;
@@ -2986,8 +2986,8 @@ static void record_fixed(VkExec *ex) {
         VkRect2D r = vk_exec_scissor(ex);
         if (kar_widen((float)r.offset.x, (float)r.offset.y, (float)r.extent.width, (float)r.extent.height, ex->pass_w,
                       ex->pass_h)) {
-            if (kar_wide_output(ex->pass_w, ex->pass_h)) r.extent.width = ex->pass_w;
-            else r.offset.x = (int32_t)(ex->pass_w - r.extent.width) / 2;
+            if (kar_wide_ui(ex->pass_w, ex->pass_h)) r.offset.x = (int32_t)(ex->pass_w - r.extent.width) / 2;
+            else r.extent.width = ex->pass_w;
         }
         vkCmdSetScissorWithCount(cb, 1, &r);
         ex->recorded++;

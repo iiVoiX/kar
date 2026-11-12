@@ -21,6 +21,7 @@
 #define SLOT_UI 0x3b0
 
 static int want_w, want_h;
+static uint32_t ui_w;   // width the interface layer was given (ui_hook): its rectangles stay 16:9 and centred
 
 static void size_hook(Cpu *c) {
     uint32_t *s = (uint32_t *)(uintptr_t)c->x[0];
@@ -140,8 +141,10 @@ static void project_hook(Cpu *c) {
 // vk_exec_draw.c keeps the layer's 16:9 rectangles centred in it, so the final composite shows the interface unstretched.
 static void ui_hook(Cpu *c) {
     if (!want_w || !want_h || (uint32_t)c->x[8] != 1920 || (uint32_t)c->x[9] != 1080) return;
-    c->x[8] = (uint32_t)(((uint64_t)1080 * want_w / want_h + 8) & ~15u);
+    c->x[8] = ui_w = (uint32_t)(((uint64_t)1080 * want_w / want_h + 8) & ~15u);
 }
+
+int kar_wide_ui(uint32_t w, uint32_t h) { return ui_w && w == ui_w && h == 1080; }
 
 static int wide_active;
 int kar_wide_active(void) { return wide_active; }   // vk_exec_draw.c: widen the 16:9 pass rectangles
