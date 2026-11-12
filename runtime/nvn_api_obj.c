@@ -222,8 +222,19 @@ static void tex_release(tex_t *o) {
 
 // NVNboolean nvnTextureInitialize(NVNtexture *t, const NVNtextureBuilder *b)
 NVN_API(nvnTextureInitialize) {
+    int sw_on = 0;
+    uint64_t sw_ra[4];
     tex_t *o = arg_p(c, 0);
     const tex_builder_t *s = arg_p(c, 1);
+    {   // KAR_SIZE_WATCH: also the texture object each watched builder initialises, to match pass targets (KAR_PASS_STATS)
+        static int want = -1, left = 4000;
+        if (want < 0) { const char *e = getenv("KAR_SIZE_WATCH"); want = e ? atoi(e) : 0; }
+        if (want && s && (int)s->d.width >= want && left-- > 0) {
+            uint64_t fp = c->x[29], ra[4] = {c->x[30]};
+            for (int k = 1; k < 4 && fp && !(fp & 7); k++) { ra[k] = *(const uint64_t *)(uintptr_t)(fp + 8); fp = *(const uint64_t *)(uintptr_t)fp; }
+            sw_on = 1, memcpy(sw_ra, ra, sizeof ra);
+        }
+    }
     if (o->magic == NVN_TEX_MAGIC && o->serial) {   // initialized again without Finalize: release the old serial
         NVN_LOG("texture %p initialized again without Finalize (serial %llu released)", (void *)o,
                 (unsigned long long)o->serial);
@@ -245,6 +256,10 @@ NVN_API(nvnTextureInitialize) {
         nvn_guest_written((uintptr_t)o->mem, o->L.size);
     }
     o->serial = nvn_new_serial();
+    if (sw_on)
+        rt_log("size watch: texture serial %llu %ux%u < %#llx < %#llx < %#llx < %#llx", (unsigned long long)o->serial,
+               o->d.width, o->d.height, (unsigned long long)sw_ra[0], (unsigned long long)sw_ra[1],
+               (unsigned long long)sw_ra[2], (unsigned long long)sw_ra[3]);
     live_put(o);
     NVN_LOG("Texture %p %ux%ux%u lv%u fmt=%#x tgt=%d flags=%#x size=%#llx", (void *)o, o->d.width, o->d.height,
             o->d.depth, o->d.levels, o->d.format, o->d.target, o->d.flags, (unsigned long long)o->L.size);

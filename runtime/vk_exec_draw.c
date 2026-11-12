@@ -2972,7 +2972,10 @@ static void record_fixed(VkExec *ex) {
     if (ex->dirty & VK_EXEC_DIRTY_VIEWPORT) {
         float x = 0, y = 0, w = (float)ex->pass_w, h = (float)ex->pass_h;
         if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
-        if (kar_widen(x, y, w, h, ex->pass_w, ex->pass_h)) w = (float)ex->pass_w;
+        if (kar_widen(x, y, w, h, ex->pass_w, ex->pass_h)) {   // output target: stretch; interface layer: centre
+            if (kar_wide_output(ex->pass_w, ex->pass_h)) w = (float)ex->pass_w;
+            else x = ((float)ex->pass_w - w) / 2;
+        }
         if (w < 1) w = 1;
         if (h < 1) h = 1;
         VkViewport v = {x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};   // the y flip: negative height
@@ -2982,8 +2985,10 @@ static void record_fixed(VkExec *ex) {
     if (ex->dirty & VK_EXEC_DIRTY_SCISSOR) {
         VkRect2D r = vk_exec_scissor(ex);
         if (kar_widen((float)r.offset.x, (float)r.offset.y, (float)r.extent.width, (float)r.extent.height, ex->pass_w,
-                      ex->pass_h))
-            r.extent.width = ex->pass_w;
+                      ex->pass_h)) {
+            if (kar_wide_output(ex->pass_w, ex->pass_h)) r.extent.width = ex->pass_w;
+            else r.offset.x = (int32_t)(ex->pass_w - r.extent.width) / 2;
+        }
         vkCmdSetScissorWithCount(cb, 1, &r);
         ex->recorded++;
     }
@@ -3508,7 +3513,7 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
         if (at >= 0 && (long)gfx_counters.frames == at) {
             static int lines;
             if (lines++ < 5000)
-                rt_log("pass stats: target %ux%u vp %g,%g %gx%g blend %d count %d", ex->pass_w, ex->pass_h,
+                rt_log("pass stats: target serial %llu %ux%u vp %g,%g %gx%g blend %d count %d", ex->rt.n > 0 && ex->rt.color[0] ? (unsigned long long)ex->rt.color[0]->serial : 0ull, ex->pass_w, ex->pass_h,
                        ex->has_vp ? ex->vp[0][0] : 0, ex->has_vp ? ex->vp[0][1] : 0, ex->has_vp ? ex->vp[0][2] : 0,
                        ex->has_vp ? ex->vp[0][3] : 0, s.color.blend_en != 0, count);
         }

@@ -17,6 +17,8 @@
 #define SLOT_CLASS 0x350
 #define SLOT_WINDOW 0x360
 #define SLOT_ASPECT 0x370
+#define SLOT_PROJECT 0x3a0
+#define SLOT_UI 0x3b0
 
 static int want_w, want_h;
 
@@ -94,6 +96,40 @@ int kar_wide_size(int *w, int *h) {
     return 1;
 }
 
+// f_7005384740 (the projection) right after it loaded the camera aspect from [x0 + 0x318] into s0: cameras that do not
+// pass through f_70053832b8 (the line-up scene before a race) get the wanted aspect here too.
+static void project_hook(Cpu *c) {
+    if (!want_w || !want_h) return;
+    float *a = (float *)(uintptr_t)(c->x[0] + 0x318);
+    {   // KAR_WIDE_LOG=<frame> (diagnostic): from that frame, the aspects the projection sees, each (camera, value) once
+        static long long on = -2;
+        static int n;
+        static struct { uint64_t cam; float v; } seen[64];
+        if (on == -2) on = getenv("KAR_WIDE_LOG") ? atoll(getenv("KAR_WIDE_LOG")) : -1;
+        uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        int k = 0, live = on >= 0 && fr >= (uint64_t)on;
+        while (live && k < n && !(seen[k].cam == c->x[0] && seen[k].v == *a)) k++;
+        if (live && k == n && n < 64) {
+            seen[n].cam = c->x[0], seen[n].v = *a, n++;
+            rt_log("kar wide: f%llu projection of %#llx aspect %g fov %g", (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
+                   (unsigned long long)c->x[0], *a, a[1]);
+        }
+    }
+    if (!(*a > 1.777f && *a < 1.7785f)) return;
+    *a = (float)want_w / (float)want_h;
+    uint32_t bits;
+    memcpy(&bits, a, 4);
+    c->v[0] = bits;   // s0, the rest of the vector register zero as after the scalar load
+}
+
+// f_7005b62b40 at 0x7005b642c4: w8 x w9 is the size of the interface layer (HUD, menus, the line-up figures), 1920x1080
+// unless the game asks for another, about to be compared with the current target. The default gets the wanted aspect;
+// vk_exec_draw.c keeps the layer's 16:9 rectangles centred in it, so the final composite shows the interface unstretched.
+static void ui_hook(Cpu *c) {
+    if (!want_w || !want_h || (uint32_t)c->x[8] != 1920 || (uint32_t)c->x[9] != 1080) return;
+    c->x[8] = (uint32_t)(((uint64_t)1080 * want_w / want_h + 8) & ~15u);
+}
+
 static int wide_active;
 int kar_wide_active(void) { return wide_active; }   // vk_exec_draw.c: widen the 16:9 pass rectangles
 int kar_wide_output(uint32_t w, uint32_t h) { return wide_active && (int)w == want_w && (int)h == want_h; }   // the output-sized target
@@ -110,6 +146,8 @@ void kar_wide_init(void) {
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_CLASS, class_hook);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_WINDOW, window_hook);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_ASPECT, aspect_hook);
+    rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_PROJECT, project_hook);
+    rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_UI, ui_hook);
 }
 
 // KAR_FIND_F32=<hex>@<frame> (diagnostic, ultrawide camera): once at that frame, every 4-byte-aligned u32 of the

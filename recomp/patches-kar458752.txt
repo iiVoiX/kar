@@ -433,3 +433,5 @@ site karwide main f344a8 f90003e0 f90003e0 @call:340   # after w8 = [x0+0x10] in
 site karwide main 5b75408 528000e1 528000e1 @call:350   # f_7005b74840 (render-graph size of a class) before its epilogue: x0 = width | height << 32
 site karwide main 4c3e1a0 910443fd 910443fd @call:360   # f_7004c3e180 (creates the window textures) after its prologue: x0 = object, size at +0x3d8
 site karwide main 538397c bd031a67 bd031a67 @call:370   # f_70053832b8 stores the camera aspect (+0x318) the projection reads: Hor+
+site karwide main 5384740 bd431800 bd431800 @call:3a0   # f_7005384740 (projection) loads the camera aspect into s0: every camera (leaf; ret is a C return)
+site karwide main 5b642c4 b940036a b940036a @call:3b0   # f_7005b62b40: interface layer size (w8 x w9, default 1920x1080) before comparing with the current target
