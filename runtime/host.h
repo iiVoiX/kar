@@ -286,6 +286,7 @@ void rt_patch_switch(int set, int on);                     // at run time (live 
                                                            // the next time it runs
 void *rt_patch_page(void);                                 // the page the patched code reads (NULL without the table)
 void kar_menu_init(void);                                  // Kirby options-menu text hook (kar_menu.c), before hostfn_seal
+void kar_wide_init(void);                                  // Kirby ultrawide display-size hook (kar_wide.c), before hostfn_seal
 void dkb_camera_init(void);                                // camera patch callbacks, before hostfn_seal
 void frame_step_init(void);                                // after rt_patches_init: the real-time step's first value
 int frame_rate_self_timed(void);                          // the game steps by measured time (Kirby): presents follow the limit

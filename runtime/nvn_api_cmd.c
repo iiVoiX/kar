@@ -559,11 +559,29 @@ static void set_viewports(cmd_t *o, int first, int n, const float *v) {
     r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
 }
+// KAR_VP_WATCH=<width> (diagnostic, ultrawide 17.3): log viewports of that width with the guest call chain (frame
+// records: [fp] the caller's fp, [fp + 8] its return address), to find where the game takes the size from.
+static void vp_watch(Cpu *c, const float *v) {
+    static int want = -1, left = 40;
+    if (want < 0) { const char *e = getenv("KAR_VP_WATCH"); want = e ? atoi(e) : 0; }
+    if (!want || (int)v[2] != want || left <= 0) return;
+    left--;
+    uint64_t fp = c->x[29], ra[6] = {c->x[30]};
+    for (int k = 1; k < 6 && fp && !(fp & 7); k++) { ra[k] = *(const uint64_t *)(uintptr_t)(fp + 8); fp = *(const uint64_t *)(uintptr_t)fp; }
+    rt_log("vp watch: %g %g %g %g < %#llx < %#llx < %#llx < %#llx < %#llx < %#llx", v[0], v[1], v[2], v[3],
+           (unsigned long long)ra[0], (unsigned long long)ra[1], (unsigned long long)ra[2], (unsigned long long)ra[3],
+           (unsigned long long)ra[4], (unsigned long long)ra[5]);
+}
 // void nvnCommandBufferSetViewports(NVNcommandBuffer *cmd, int first, int n, const float *xywh)
-NVN_API(nvnCommandBufferSetViewports) { set_viewports(cmd_of(c), (int)arg_x(c, 1), (int)arg_x(c, 2), arg_p(c, 3)); }
+NVN_API(nvnCommandBufferSetViewports) {
+    const float *v = arg_p(c, 3);
+    if (v && (int)arg_x(c, 2) > 0) vp_watch(c, v);
+    set_viewports(cmd_of(c), (int)arg_x(c, 1), (int)arg_x(c, 2), v);
+}
 // void nvnCommandBufferSetViewport(NVNcommandBuffer *cmd, int x, int y, int w, int h)
 NVN_API(nvnCommandBufferSetViewport) {
     float v[4] = {(float)(int)arg_x(c, 1), (float)(int)arg_x(c, 2), (float)(int)arg_x(c, 3), (float)(int)arg_x(c, 4)};
+    vp_watch(c, v);
     set_viewports(cmd_of(c), 0, 1, v);
 }
 static void set_scissor(cmd_t *o, int x, int y, int w, int h) { *REC(o, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }

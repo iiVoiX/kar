@@ -82,7 +82,8 @@ NVN_API(nvnTextureBuilderSetDefaults) {
 NVN_API(nvnTextureBuilderSetDevice) { TB(c)->dev = arg_p(c, 1); }
 NVN_API(nvnTextureBuilderSetFlags) { TB(c)->d.flags = (int)arg_x(c, 1); }
 NVN_API(nvnTextureBuilderSetTarget) { TB(c)->d.target = (int)arg_x(c, 1); }
-NVN_API(nvnTextureBuilderSetWidth) { TB(c)->d.width = (uint32_t)arg_x(c, 1); }
+static void size_watch(Cpu *c, uint32_t w, uint32_t h);
+NVN_API(nvnTextureBuilderSetWidth) { TB(c)->d.width = (uint32_t)arg_x(c, 1); size_watch(c, TB(c)->d.width, 0); }
 NVN_API(nvnTextureBuilderSetHeight) { TB(c)->d.height = (uint32_t)arg_x(c, 1); }
 NVN_API(nvnTextureBuilderSetDepth) { TB(c)->d.depth = (uint32_t)arg_x(c, 1); }
 NVN_API(nvnTextureBuilderSetSize1D) {
@@ -90,11 +91,25 @@ NVN_API(nvnTextureBuilderSetSize1D) {
     b->d.width = (uint32_t)arg_x(c, 1);
     b->d.height = b->d.depth = 1;
 }
+// KAR_SIZE_WATCH=<width> (diagnostic, ultrawide 17.3): log each 2D texture size of at least that width and the guest call
+// chain (frame records: [fp] the caller's fp, [fp + 8] its return address), to find where the game picks its sizes.
+static void size_watch(Cpu *c, uint32_t w, uint32_t h) {
+    static int want = -1, left = 40;
+    if (want < 0) { const char *e = getenv("KAR_SIZE_WATCH"); want = e ? atoi(e) : 0; }
+    if (!want || (int)w < want || left <= 0) return;   // every width from KAR_SIZE_WATCH up
+    left--;
+    uint64_t fp = c->x[29], ra[6] = {c->x[30]};
+    for (int k = 1; k < 6 && fp && !(fp & 7); k++) { ra[k] = *(const uint64_t *)(uintptr_t)(fp + 8); fp = *(const uint64_t *)(uintptr_t)fp; }
+    rt_log("size watch: %ux%u < %#llx < %#llx < %#llx < %#llx < %#llx < %#llx", w, h, (unsigned long long)ra[0],
+           (unsigned long long)ra[1], (unsigned long long)ra[2], (unsigned long long)ra[3], (unsigned long long)ra[4],
+           (unsigned long long)ra[5]);
+}
 NVN_API(nvnTextureBuilderSetSize2D) {
     tex_builder_t *b = TB(c);
     b->d.width = (uint32_t)arg_x(c, 1);
     b->d.height = (uint32_t)arg_x(c, 2);
     b->d.depth = 1;
+    size_watch(c, b->d.width, b->d.height);
 }
 NVN_API(nvnTextureBuilderSetSize3D) {
     tex_builder_t *b = TB(c);
