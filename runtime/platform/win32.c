@@ -7,6 +7,8 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <psapi.h>
+#include <tlhelp32.h>
+#include <intrin.h>
 #include <restartmanager.h>
 #include <shellapi.h>
 #include <timeapi.h>
@@ -588,10 +590,38 @@ static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
     if (!what) return EXCEPTION_CONTINUE_SEARCH;
     uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip;
     MODULEINFO mi;
-    if (!GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(NULL), &mi, sizeof mi) ||
-        rip - (uintptr_t)mi.lpBaseOfDll >= mi.SizeOfImage)
-        return EXCEPTION_CONTINUE_SEARCH;   // not our code: leave it to the handler that expects it
-    PlatCrash c = {what, (uint32_t)code, rip, rip - (uintptr_t)mi.lpBaseOfDll, -1, 0};
+    if (!GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(NULL), &mi, sizeof mi))
+        return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t base = (uintptr_t)mi.lpBaseOfDll;
+    PlatCrash c = {what, (uint32_t)code, rip, rip - base, -1, 0};
+    int outside = rip - base >= mi.SizeOfImage;
+    HMODULE ucrt = GetModuleHandleW(L"ucrtbase.dll");
+    MODULEINFO um = {0};
+    if (outside) {
+        // A fault inside the C runtime (memcpy and friends) is a bad argument from our code; other DLLs (drivers)
+        // may expect their own handlers, so leave those alone.
+        if (!ucrt || !GetModuleInformation(GetCurrentProcess(), ucrt, &um, sizeof um) ||
+            rip - (uintptr_t)um.lpBaseOfDll >= um.SizeOfImage)
+            return EXCEPTION_CONTINUE_SEARCH;
+    }
+    {   // Unwind to the frames in this executable: the callers of the faulting host function (lifted code has no
+        // unwind info worth walking past, so the walk stops at the first frame without any).
+        CONTEXT ctx = *ep->ContextRecord;
+        for (int i = 0; i < 64 && ctx.Rip && c.nframes < (int)(sizeof c.frames / sizeof *c.frames); i++) {
+            if ((uintptr_t)ctx.Rip - base < mi.SizeOfImage) c.frames[c.nframes++] = (uintptr_t)ctx.Rip;
+            DWORD64 ib;
+            PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(ctx.Rip, &ib, NULL);
+            if (!fe) { ctx.Rip = *(DWORD64 *)(uintptr_t)ctx.Rsp; ctx.Rsp += 8; continue; }
+            void *hd; DWORD64 ef;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, ib, ctx.Rip, fe, &ctx, &hd, &ef, NULL);
+        }
+        if (outside) {
+            fprintf(stderr, "[crash] fault in ucrtbase.dll+0x%llx, rcx=%llx rdx=%llx r8=%llx\n",
+                    (unsigned long long)(rip - (uintptr_t)um.lpBaseOfDll), (unsigned long long)ep->ContextRecord->Rcx,
+                    (unsigned long long)ep->ContextRecord->Rdx, (unsigned long long)ep->ContextRecord->R8);
+            if (c.nframes) c.rip = c.frames[0], c.offset = c.rip - base;
+        }
+    }
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
         c.access = (int)ep->ExceptionRecord->ExceptionInformation[0], c.addr = ep->ExceptionRecord->ExceptionInformation[1];
     crash_fn(&c);
@@ -1471,4 +1501,234 @@ long plat_child_read(PlatChild *c, void *buf, size_t cap) {
     DWORD got = 0;
     if (!ReadFile(c->out, buf, (DWORD)cap, &got, NULL)) return -1;
     return (long)got;
+}
+
+// ---- KAR_WATCH_WRITE (diagnostic): which code writes a guest range. plat_diag_watch_write protects the range
+// read-only; each write faults here, logs the writing instruction (offset in the exe, mapped to a lifted function with
+// build/<game>/totk.map) once per distinct place, lets the write through with one single step and protects again.
+static uint64_t ww_lo, ww_hi;
+static __thread uint64_t ww_page;   // the page opened for this thread's single step; 0 none
+static uintptr_t ww_seen[64];
+static volatile LONG ww_n;
+static LONG CALLBACK ww_veh(EXCEPTION_POINTERS *ep) {
+    const EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && ww_page) {
+        DWORD old;
+        VirtualProtect((void *)(uintptr_t)ww_page, 4096, PAGE_READONLY, &old);
+        ww_page = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2 || er->ExceptionInformation[0] != 1)
+        return EXCEPTION_CONTINUE_SEARCH;
+    uint64_t a = (uint64_t)er->ExceptionInformation[1];
+    if (a < ww_lo || a >= ww_hi) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip, base = (uintptr_t)GetModuleHandleW(NULL);
+    LONG n = ww_n;
+    int known = 0;
+    for (LONG i = 0; i < n && i < 64; i++) known |= ww_seen[i] == rip;
+    if (!known && n < 64) {
+        ww_seen[InterlockedIncrement(&ww_n) - 1] = rip;
+        extern void fnring_dump(char *out, size_t n);
+        char ring[1200];
+        fnring_dump(ring, sizeof ring);
+        fprintf(stderr, "[host] watch write: %#llx by exe+%#llx; recent guest calls:%s\n", (unsigned long long)a,
+                (unsigned long long)(rip - base), ring);
+    }
+    DWORD old;
+    ww_page = a & ~4095ull;
+    VirtualProtect((void *)(uintptr_t)ww_page, 4096, PAGE_READWRITE, &old);
+    ep->ContextRecord->EFlags |= 0x100;   // trap after this one instruction
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+void plat_diag_watch_write(uint64_t lo, uint64_t len) {
+    if (ww_hi) return;
+    ww_lo = lo, ww_hi = lo + len;
+    AddVectoredExceptionHandler(1, ww_veh);
+    DWORD old;
+    VirtualProtect((void *)(uintptr_t)(lo & ~4095ull), (SIZE_T)(((lo + len + 4095) & ~4095ull) - (lo & ~4095ull)),
+                   PAGE_READONLY, &old);
+    fprintf(stderr, "[host] watch write: %#llx+%#llx protected\n", (unsigned long long)lo, (unsigned long long)len);
+}
+
+// Diagnostic (vk_memory.c census, KAR_MEM_MAP=1): the committed memory of the process by kind, from one VirtualQuery
+// walk: below `guest_limit` (the guest address space), images (exe and DLLs), mapped files, the C heaps' regions, other
+// private memory; and the largest private allocations by base address, so a big block can be traced to its owner.
+void plat_mem_map_report(uint64_t guest_limit, void (*log)(const char *line)) {
+    HANDLE heaps[64];
+    DWORD nh = GetProcessHeaps(64, heaps);
+    uint64_t guest = 0, image = 0, mapped = 0, heap = 0, other = 0;
+    struct { uint64_t base, bytes; } top[15] = {{0}};
+    MEMORY_BASIC_INFORMATION m;
+    uint64_t cur_base = 0, cur_bytes = 0;
+    for (uint8_t *a = NULL; VirtualQuery(a, &m, sizeof m) == sizeof m; a = (uint8_t *)m.BaseAddress + m.RegionSize) {
+        if ((uint64_t)(uintptr_t)m.BaseAddress + m.RegionSize < (uint64_t)(uintptr_t)a) break;
+        if (m.State != MEM_COMMIT) continue;
+        uint64_t base = (uint64_t)(uintptr_t)m.BaseAddress, n = m.RegionSize;
+        if (m.Type == MEM_IMAGE) { image += n; continue; }
+        if (m.Type == MEM_MAPPED) { mapped += n; continue; }
+        if (base < guest_limit) { guest += n; continue; }
+        int is_heap = 0;
+        for (DWORD i = 0; i < nh && !is_heap; i++) is_heap = (uintptr_t)m.AllocationBase == (uintptr_t)heaps[i];
+        if (is_heap) heap += n;
+        else other += n;
+        uint64_t ab = (uint64_t)(uintptr_t)m.AllocationBase;
+        if (ab != cur_base) {
+            if (cur_bytes) {
+                int j = 14;
+                if (cur_bytes > top[j].bytes) {
+                    while (j > 0 && cur_bytes > top[j - 1].bytes) top[j] = top[j - 1], j--;
+                    top[j].base = cur_base, top[j].bytes = cur_bytes;
+                }
+            }
+            cur_base = ab, cur_bytes = 0;
+        }
+        cur_bytes += n;
+    }
+    char line[256];
+    snprintf(line, sizeof line, "mem map: committed guest %.1f MiB, images %.1f MiB, mapped %.1f MiB, process heaps %.1f MiB "
+             "(%lu heaps; malloc's large blocks are in other), other private %.1f MiB", guest / 1048576.0,
+             image / 1048576.0, mapped / 1048576.0, heap / 1048576.0, (unsigned long)nh, other / 1048576.0);
+    log(line);
+    for (int j = 0; j < 15 && top[j].bytes; j++) {
+        // How much of it is in RAM (sampled every 64th page) and what it starts with: content tells the owner.
+        uint64_t pages = top[j].bytes >> 12, step = 64, in = 0, seen = 0;
+        PSAPI_WORKING_SET_EX_INFORMATION wi;
+        for (uint64_t p = 0; p < pages; p += step, seen++) {
+            wi.VirtualAddress = (void *)(uintptr_t)(top[j].base + (p << 12));
+            if (QueryWorkingSetEx(GetCurrentProcess(), &wi, sizeof wi) && wi.VirtualAttributes.Valid) in++;
+        }
+        uint8_t head[16] = {0};
+        MEMORY_BASIC_INFORMATION hm;
+        if (VirtualQuery((void *)(uintptr_t)top[j].base, &hm, sizeof hm) == sizeof hm && hm.State == MEM_COMMIT &&
+            !(hm.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            memcpy(head, (void *)(uintptr_t)top[j].base, 16);
+        snprintf(line, sizeof line, "mem map:   private allocation at %#llx: %.1f MiB committed, %.0f%% resident, "
+                 "starts %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+                 (unsigned long long)top[j].base, top[j].bytes / 1048576.0, seen ? 100.0 * in / seen : 0.0,
+                 head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7], head[8], head[9], head[10],
+                 head[11], head[12], head[13], head[14], head[15]);
+        log(line);
+        // KAR_MEM_MAP_DUMP=<dir>: 1 MiB from the start and 1 MiB from the middle of the four largest, for offline study.
+        const char *dir = getenv("KAR_MEM_MAP_DUMP");
+        if (dir && *dir && j < 4) {
+            for (int part = 0; part < 2; part++) {
+                uint64_t off = part ? (top[j].bytes / 2) & ~0xFFFFull : 0, n = 1 << 20;
+                if (off + n > top[j].bytes) continue;
+                char path[512];
+                snprintf(path, sizeof path, "%s/blk%d_%s.bin", dir, j, part ? "mid" : "head");
+                FILE *f = fopen(path, "wb");
+                if (!f) continue;
+                for (uint64_t o = 0; o < n; o += 4096) {   // page by page: a page given back reads as zeros
+                    uint8_t pg[4096] = {0};
+                    MEMORY_BASIC_INFORMATION pm;
+                    uint8_t *a = (uint8_t *)(uintptr_t)(top[j].base + off + o);
+                    if (VirtualQuery(a, &pm, sizeof pm) == sizeof pm && pm.State == MEM_COMMIT &&
+                        !(pm.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+                        memcpy(pg, a, 4096);
+                    fwrite(pg, 1, 4096, f);
+                }
+                fclose(f);
+            }
+        }
+    }
+}
+
+// Diagnostic (KAR_THREAD_CPU=1, vk_memory.c census every 600 frames): each thread's share of one core since the previous
+// call, from QueryThreadCycleTime against the cycles of the interval on this core's clock, with the thread's name; the
+// busiest first. A thread near 100% is what holds the frame rate.
+void plat_thread_cpu_report(void (*log)(const char *line)) {
+    static struct { DWORD tid; ULONG64 cyc; } prev[512];
+    static int nprev;
+    static ULONG64 prev_tsc;
+    static double tsc_per_ns;
+    static LARGE_INTEGER prev_qpc;
+    LARGE_INTEGER q, f;
+    QueryPerformanceCounter(&q);
+    QueryPerformanceFrequency(&f);
+    ULONG64 tsc = __rdtsc();
+    if (prev_tsc && q.QuadPart > prev_qpc.QuadPart)
+        tsc_per_ns = (double)(tsc - prev_tsc) / ((double)(q.QuadPart - prev_qpc.QuadPart) * 1e9 / (double)f.QuadPart);
+    double window_cyc = prev_tsc ? (double)(tsc - prev_tsc) : 0;
+    struct { DWORD tid; ULONG64 cyc; double pct; wchar_t name[48]; } cur[512];
+    int n = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te = {.dwSize = sizeof te};
+    DWORD pid = GetCurrentProcessId();
+    for (BOOL ok = Thread32First(snap, &te); ok && n < 512; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != pid) continue;
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        ULONG64 c = 0;
+        QueryThreadCycleTime(h, &c);
+        cur[n].tid = te.th32ThreadID, cur[n].cyc = c, cur[n].pct = 0, cur[n].name[0] = 0;
+        PWSTR d = NULL;
+        if (SUCCEEDED(GetThreadDescription(h, &d)) && d) { wcsncpy(cur[n].name, d, 47), cur[n].name[47] = 0; LocalFree(d); }
+        CloseHandle(h);
+        for (int i = 0; i < nprev && window_cyc > 0; i++)
+            if (prev[i].tid == cur[n].tid) cur[n].pct = 100.0 * (double)(c - prev[i].cyc) / window_cyc;
+        n++;
+    }
+    CloseHandle(snap);
+    for (int i = 0; i < n; i++) prev[i].tid = cur[i].tid, prev[i].cyc = cur[i].cyc;
+    nprev = n, prev_tsc = tsc, prev_qpc = q;
+    if (window_cyc <= 0) return;
+    for (int k = 0; k < 10; k++) {   // the ten busiest
+        int best = -1;
+        for (int i = 0; i < n; i++) if (cur[i].pct >= 0 && (best < 0 || cur[i].pct > cur[best].pct)) best = i;
+        if (best < 0 || cur[best].pct < 3) break;
+        char line[160];
+        snprintf(line, sizeof line, "threads: %5.1f%% tid %lu %ls", cur[best].pct, (unsigned long)cur[best].tid,
+                 cur[best].name[0] ? cur[best].name : L"(unnamed)");
+        log(line);
+        cur[best].pct = -1;
+    }
+    (void)tsc_per_ns;
+}
+
+// Native text for the boot screen (boot_screen.c): utf8 drawn with the system's UI font (GDI, antialiased) into an
+// RGBA buffer, blended in the colour rgb (0xRRGGBB). x is the left edge, or the centre when center is set; y the top.
+void plat_text_draw(uint8_t *rgba, int w, int h, int x, int y, int px, uint32_t rgb, const char *utf8, int center) {
+    wchar_t text[256];
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, text, 256);
+    if (n <= 1) return;
+    HDC dc = CreateCompatibleDC(NULL);
+    HFONT font = CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HGDIOBJ oldf = SelectObject(dc, font);
+    SIZE sz;
+    GetTextExtentPoint32W(dc, text, n - 1, &sz);
+    int tw = sz.cx + 4, th = sz.cy + 4;
+    BITMAPINFO bi = {.bmiHeader = {.biSize = sizeof bi.bmiHeader, .biWidth = tw, .biHeight = -th, .biPlanes = 1,
+                                   .biBitCount = 32, .biCompression = BI_RGB}};
+    void *bits = NULL;
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (bmp && bits) {
+        HGDIOBJ oldb = SelectObject(dc, bmp);
+        memset(bits, 0, (size_t)tw * th * 4);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        TextOutW(dc, 2, 2, text, n - 1);
+        GdiFlush();
+        int x0 = center ? x - tw / 2 : x;
+        const uint8_t *src = bits;
+        for (int j = 0; j < th; j++) {
+            int yy = y + j;
+            if (yy < 0 || yy >= h) continue;
+            for (int i = 0; i < tw; i++) {
+                int xx = x0 + i;
+                if (xx < 0 || xx >= w) continue;
+                unsigned a = src[(j * tw + i) * 4 + 1];   // white text on black: any channel is the coverage
+                if (!a) continue;
+                uint8_t *d = rgba + ((size_t)yy * w + xx) * 4;
+                d[0] = (uint8_t)((d[0] * (255 - a) + ((rgb >> 16) & 255) * a) / 255);
+                d[1] = (uint8_t)((d[1] * (255 - a) + ((rgb >> 8) & 255) * a) / 255);
+                d[2] = (uint8_t)((d[2] * (255 - a) + (rgb & 255) * a) / 255);
+            }
+        }
+        SelectObject(dc, oldb);
+    }
+    if (bmp) DeleteObject(bmp);
+    SelectObject(dc, oldf);
+    DeleteObject(font);
+    DeleteDC(dc);
 }

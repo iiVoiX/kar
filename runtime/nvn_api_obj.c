@@ -37,6 +37,15 @@ NVN_API(nvnTexturePoolRegisterTexture) {
     if (!nvn_dpool_snapshot(arg_p(c, 0), 1u << 20, &pool)) rt_fatal("nvn: invalid texture descriptor pool");
     gfx_backend()->texture_register(&pool, (int)arg_x(c, 1), arg_p(c, 2), arg_p(c, 3));
 }
+// void nvnTexturePoolRegisterImage(const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v):
+// an image descriptor lives in the same texture pool, and nvnDeviceGetImageHandle hands out the id itself, so the id
+// is registered as RegisterTexture registers it and an image bind (OP_BIND_IMG) resolves it the same way (Kirby Air
+// Riders registers images at boot)
+NVN_API(nvnTexturePoolRegisterImage) {
+    dpool_ref pool;
+    if (!nvn_dpool_snapshot(arg_p(c, 0), 1u << 20, &pool)) rt_fatal("nvn: invalid texture descriptor pool");
+    gfx_backend()->texture_register(&pool, (int)arg_x(c, 1), arg_p(c, 2), arg_p(c, 3));
+}
 // NVNboolean nvnSamplerPoolInitialize(NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t offset, int n)
 NVN_API(nvnSamplerPoolInitialize) {
     dpool_t p = {arg_p(c, 1), (int64_t)arg_x(c, 2), (int32_t)arg_x(c, 3)};
@@ -442,10 +451,25 @@ static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
     for (int i = 0; i < n; i++) {   // NVN 2 stages are lowered to the NVN 1 shape (nvn2_lower.cpp)
         const uint8_t *ctl = next[i].control, *code = (const uint8_t *)(uintptr_t)next[i].data, *nctl, *ncode;
         gfx_shader_nvn2_dump(ctl, code);   // only with DKB_SHADER_DUMP
-        if (gfx_shader_is_nvn2(ctl) && nvn2_lower(ctl, code, &nctl, &ncode))
-            next[i] = (NVNshaderData){(NVNbufferAddress)(uintptr_t)ncode, nctl};
+        if (ctl && !gfx_shader_is_nvn2(ctl)) {
+            static int told;
+            uint32_t w[8];
+            memcpy(w, ctl, sizeof w);
+            if (told++ < 6)
+                rt_log("nvn: SetShaders stage %d of %d: control %p is not NVN 2: %08x %08x %08x %08x %08x %08x %08x %08x "
+                       "code %p", i, n, (const void *)ctl, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], (const void *)code);
+        }
+        if (gfx_shader_is_nvn2(ctl)) {
+            // A stage that does not lower is dropped: its raw control is ~0xd8 bytes, and every reader of
+            // sd[].control (vk_exec_draw.c find_stage) takes the NVN 1 shape, reading +0x704 and +0x714 past its end.
+            if (nvn2_lower(ctl, code, &nctl, &ncode)) next[i] = (NVNshaderData){(NVNbufferAddress)(uintptr_t)ncode, nctl};
+            else next[i] = (NVNshaderData){0, NULL};
+        }
         ctl = next[i].control;
         code = (const uint8_t *)(uintptr_t)next[i].data;
+        uint32_t stage_id;
+        if (ctl && code && !gfx_shader_is_nvn2(ctl) && (memcpy(&stage_id, ctl + 0x714, 4), stage_id == 5))
+            gfx_shader_prefetch_cs(ctl, code);   // NVN stage 5: compute; loaded and its pipeline built before it dispatches
         // Raw NVN2 controls have a different compact layout. Only the host's
         // explicitly tagged legacy-shaped controls are copied here.
         if (!ctl || !code || gfx_shader_is_nvn2(ctl) ||
@@ -727,7 +751,15 @@ NVN_API(nvnWindowSetCrop) {
 // 2nd or 3rd tick would only add latency and 50 ms frames.
 #define VSYNC_HZ 60ull
 static uint64_t present_period(const win_t *o) {
-    if (frame_step_realtime()) return frame_step_cap_ns();
+    // KAR_PACE_HZ=<n> (diagnostic, 16.11): present at n per second whatever the game's interval, to measure whether
+    // the game's clock follows frames or wall time (the race timer against the wall time of two shots).
+    static int pace_hz = -1;
+    if (pace_hz < 0) pace_hz = getenv("KAR_PACE_HZ") ? atoi(getenv("KAR_PACE_HZ")) : 0;
+    static long long pace_from = -1;
+    if (pace_from < 0) pace_from = getenv("KAR_PACE_FROM") ? atoll(getenv("KAR_PACE_FROM")) : 0;
+    if (pace_hz > 0 && (long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) >= pace_from)
+        return 1000000000ull / (uint64_t)pace_hz;
+    if (frame_step_realtime() || frame_rate_self_timed()) return frame_step_cap_ns();
     return (o->interval > 0 ? (uint64_t)o->interval : 1ull) * 1000000000ull / VSYNC_HZ;
 }
 

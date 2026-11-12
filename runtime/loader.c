@@ -20,12 +20,14 @@ uint64_t hostfn_register_observer(const char *name, GuestFn fn, uint64_t origina
 enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
        DT_INIT = 12, DT_FINI = 13, DT_JMPREL = 23, DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27,
        DT_FINI_ARRAYSZ = 28, DT_RELRSZ = 0x23, DT_RELR = 0x24, DT_GNU_HASH = 0x6ffffef5 };
-enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 };
+enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027, R_TLSDESC = 1031 };
 enum { K_RELATIVE, K_ABS64, K_GLOB_DAT, K_JUMP_SLOT, K_COUNT };
 enum { STB_WEAK = 2, STT_FUNC = 2 };
 
 typedef struct { uint32_t name; uint8_t info, other; uint16_t shndx; uint64_t value, size; } Elf64Sym;
 typedef struct { uint64_t off, info; int64_t addend; } Elf64Rela;
+
+#define LDR_MAX_MODS (MOD_COUNT + 8)   // the ExeFS modules, then NROs mapped at nn::ro::LoadModule (ldr_map_nro)
 
 // How a symbol of a relocation was bound.
 enum { RES_UNSET, RES_GUEST, RES_OVERRIDE, RES_OBSERVER, RES_WEAK, RES_STUB };
@@ -47,11 +49,11 @@ typedef struct {
     uint64_t *plt_slot, *plt_stub, nplt;   // PLT stubs sorted by GOT slot (ldr_plt_stub), built on first use
     // statistics
     uint64_t kinds[K_COUNT], sym_import, sym_own;
-    uint32_t imports, import_to[MOD_COUNT], weak_unresolved, strong_unresolved;
+    uint32_t imports, import_to[LDR_MAX_MODS], weak_unresolved, strong_unresolved;
     uint32_t init_off;
 } Mod;
 
-static Mod mods[MOD_COUNT];
+static Mod mods[LDR_MAX_MODS];
 static int nmods;
 static uint64_t identity_refs, stubs;
 static int *ovr_used, *obs_used;   // per linked table entry, plus probe overrides counted separately
@@ -87,7 +89,9 @@ uint8_t *ldr_read_verified(const char *dir, const char *file, size_t *len) {
     char hex[65];
     rt_sha256(p, *len, d);
     hex32(d, hex);
-    if (strcmp(hex, want)) rt_fatal("loader: %s has SHA-256 %s, expected %s", path, hex, want);
+    if (strcmp(hex, want))
+        rt_fatal("loader: %s has SHA-256 %s, expected %s: this build is for game version %s (%s); extract that "
+                 "version's ExeFS, or rebuild for yours", path, hex, want, rt_game_display, rt_game_target);
     return p;
 }
 
@@ -315,6 +319,15 @@ static void unresolved_stub(Cpu *c) {
     rt_fatal("call to unresolved import %s from %s", hostfn_name(c->pc), ldr_describe(c->x[30] - 4, lr, sizeof lr));
 }
 
+// The resolver of an R_AARCH64_TLSDESC slot. Kirby Air Riders' subsdk1 (NVIDIA NGX) carries one such relocation
+// (symbol 0, addend 0: its own TLS block) but no code loads that slot and none reads tpidr_el0, so it is never
+// called; the runtime gives modules no ELF TLS blocks. If a game does call one, stop with where it came from.
+static void tlsdesc_unsupported(Cpu *c) {
+    char lr[96];
+    rt_fatal("TLS descriptor resolver called from %s: ELF TLS is not supported", ldr_describe(c->x[30] - 4, lr,
+                                                                                               sizeof lr));
+}
+
 static void mark_used(int observers, const char *name) {
     int n = hostfn_table_size(observers);
     for (int i = 0; i < n; i++)
@@ -357,6 +370,17 @@ static void relocate_table(Mod *m, const Elf64Rela *r, uint64_t n) {
             rt_fatal("loader: %s relocation %llu writes +%#llx, outside the data segment", m->pub.name,
                      (unsigned long long)i, (unsigned long long)r[i].off);
         uint64_t v;
+        if (type == R_TLSDESC) {
+            // A descriptor is two words: the resolver, then its argument (tlsdesc_unsupported says why)
+            if (r[i].off > m->pub.size - 16)
+                rt_fatal("loader: %s TLS descriptor %llu at +%#llx runs past the module", m->pub.name,
+                         (unsigned long long)i, (unsigned long long)r[i].off);
+            ST64(base + r[i].off, hostfn_register("<loader tlsdesc>", tlsdesc_unsupported));
+            ST64(base + r[i].off + 8, (uint64_t)r[i].addend);
+            rt_log("%s: TLS descriptor at +%#llx (symbol %u, addend %lld) bound to a fatal resolver", m->pub.name,
+                   (unsigned long long)r[i].off, si, (long long)r[i].addend);
+            continue;
+        }
         if (type == R_RELATIVE) {
             m->kinds[K_RELATIVE]++;
             v = base + (uint64_t)r[i].addend;
@@ -466,6 +490,76 @@ void ldr_load(const char *exefs_dir) {
                (unsigned long long)m->pub.base, (unsigned long long)m->pub.size,
                (unsigned long long)(m->nrela + m->njmprel + m->relr_count), m->imports);
     }
+}
+
+// ---- NROs (nn::ro::LoadModule)
+// An NRO file is its own memory image: .text (holding the NRO header at 0x10), .rodata and .data uncompressed at the
+// offsets the header gives at 0x20/0x28/0x30, .bss size at 0x38, MOD0 offset at 4 as in an NSO. The lifted code
+// (recomp/gen.py --nro) was placed at an rt_nro_layout base, so the image goes exactly there; it is matched by its
+// image size, the one thing the layout records. Relocations resolve as the boot modules' did (overrides first, then
+// the loaded modules in order); the only host function an NRO may bind is one the boot modules already registered.
+static PlatMutex nro_lock = PLAT_MUTEX_INIT;
+
+const RtLoaded *ldr_map_nro(const void *image, size_t len) {
+    const uint8_t *raw = image;
+    if (!raw || len < 0x80 || memcmp(raw + 0x10, "NRO0", 4)) rt_fatal("loader: nn::ro::LoadModule image is not an NRO");
+    uint32_t off[3], sz[3];
+    for (int i = 0; i < 3; i++) {
+        memcpy(&off[i], raw + 0x20 + i * 8, 4);
+        memcpy(&sz[i], raw + 0x24 + i * 8, 4);
+        if ((uint64_t)off[i] + sz[i] > len) rt_fatal("loader: NRO segment %d runs past the %zu-byte image", i, len);
+    }
+    uint32_t bss;
+    memcpy(&bss, raw + 0x38, 4);
+    uint64_t size = ((uint64_t)off[2] + sz[2] + bss + 0xFFF) & ~0xFFFull;
+    plat_mutex_lock(&nro_lock);
+    const RtLayoutEntry *lay = NULL;
+    for (int i = 0; i < rt_nro_layout_count && !lay; i++)
+        if (rt_nro_layout[i].size == size) lay = &rt_nro_layout[i];
+    if (!lay) rt_fatal("loader: no lifted NRO of image size %#llx (recomp/gen.py --nro; %d lifted)",
+                       (unsigned long long)size, rt_nro_layout_count);
+    for (int i = 0; i < nmods; i++)
+        if (mods[i].pub.base == lay->base) {   // mapped already: the same image again
+            plat_mutex_unlock(&nro_lock);
+            return &mods[i].pub;
+        }
+    if (nmods == LDR_MAX_MODS) rt_fatal("loader: more than %d modules", LDR_MAX_MODS);
+    if (!plat_mem_commit(lay->base, size)) rt_fatal("loader: cannot commit NRO %s at %#llx", lay->name,
+                                                    (unsigned long long)lay->base);
+    for (int i = 0; i < 3; i++) memcpy((void *)(uintptr_t)(lay->base + off[i]), raw + off[i], sz[i]);
+    Mod *m = &mods[nmods];
+    memset(m, 0, sizeof *m);
+    for (int i = 0; i < 3; i++) m->seg_off[i] = off[i], m->seg_size[i] = sz[i];
+    m->pub.name = lay->name;
+    m->pub.base = lay->base;
+    m->pub.size = size;
+    m->pub.text_end = off[0] + sz[0];
+    m->pub.data_off = off[2];
+    if (m->pub.data_off & 0xFFF) rt_fatal("loader: NRO %s data segment is not page aligned", lay->name);
+    parse_dynamic(m);
+    make_hash(m);
+    make_funcs(m);
+    m->res_plain = calloc(m->nsyms ? m->nsyms : 1, sizeof(Res));
+    m->res_jump = calloc(m->nsyms ? m->nsyms : 1, sizeof(Res));
+    if (!m->res_plain || !m->res_jump) rt_fatal("loader: resolution table allocation");
+    relocate_table(m, m->rela, m->nrela);
+    relocate_table(m, m->jmprel, m->njmprel);
+    relocate_relr(m);
+    count_imports(m);
+    m->pub.ctor_flag = decode_ctor_flag(m);
+    seal(m);
+    __atomic_store_n(&nmods, nmods + 1, __ATOMIC_RELEASE);
+    plat_mutex_unlock(&nro_lock);
+    rt_log("loaded NRO %s at %#llx size %#llx: %llu relocations, %u imports", m->pub.name,
+           (unsigned long long)m->pub.base, (unsigned long long)size,
+           (unsigned long long)(m->nrela + m->njmprel + m->relr_count), m->imports);
+    return &m->pub;
+}
+
+uint64_t ldr_module_symbol(const RtLoaded *pub, const char *name) {
+    for (int i = 0; i < nmods; i++)
+        if (&mods[i].pub == pub) return module_symbol(&mods[i], name);
+    return 0;
 }
 
 // ---- lookups

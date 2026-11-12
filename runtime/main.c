@@ -28,6 +28,8 @@
 #include "aoc_romfs.h"
 #include "cfg.h"
 #include "host.h"
+#include "nvn_api.h"
+#include "ipc.h"
 #include "platform/platform.h"
 #include "sha256.h"
 
@@ -110,7 +112,8 @@ static void log_open(int game) {
     if (cut && (size_t)(cut - dir) + sizeof "/logs" <= sizeof dir) {
         strcpy(cut, "/logs");
         plat_file_mkdir_p(dir);
-        const char *base = rt_game_version ? "totk" : "dkb";   // Bananza logs to dkb.log, TotK to totk.log
+        // Bananza logs to dkb.log, TotK to totk.log, Kirby Air Riders to kar.log
+        const char *base = rt_game_version ? "totk" : rt_game_is_kar() ? "kar" : "dkb";
         for (int i = LOG_KEEP - 1; i > 0; i--) {   // totk.3.log -> totk.4.log, ..., totk.log -> totk.1.log
             if (i > 1) snprintf(from, sizeof from, "%s/%s.%d.log", dir, base, i - 1);
             else snprintf(from, sizeof from, "%s/%s.log", dir, base);
@@ -158,7 +161,195 @@ const RtConfig *rt_config(void) { return &cfg; }
 
 // ---- runtime services the generated code calls (cpu.h)
 volatile int g_fnprof = 0;
-void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) { (void)addr, (void)lr, (void)x0; }
+// KAR_FNWATCH=<hex guest function>[,<hex>...] (diagnostic, sets g_fnprof): each distinct (function, return address,
+// x1) seen in a 60-frame window is logged once with the frame, so the calls of two game phases can be compared (the
+// render-graph passes of the intro and of the race: f_7005823d40 takes the pass in x1). g_fnwatch_last: the x1 of the
+// last call of the first watched function, for other diagnostics (nvn_api_cmd.c KAR_DIAG_RT1024).
+__thread uint64_t g_fnwatch_last;   // per thread: the render graph runs passes on several threads
+__thread uint64_t g_fnwatch_graph;  // x0 of the last f_7005827c20 on this thread (the render graph being run)
+static uint64_t fnw_addr[8];
+static int fnw_n;
+// KAR_FNCOUNT=<frame>,<frame>,... (diagnostic, D8): calls per guest function, counted from the start, written at each
+// listed frame to E:/kirby/fncount_<frame>.txt ("addr count" lines), so two game phases can be compared offline
+// (functions that run every frame in the intro and never in the race). Open addressing, 2^21 slots.
+#define FNC_N (1u << 21)
+static struct { volatile uint64_t addr, n; } *fnc;
+static uint64_t fnc_at[8];
+static int fnc_k, fnc_nat;
+static volatile int32_t fnc_dumping;
+static void fnc_dump(uint64_t frame) {
+    char path[96];
+    snprintf(path, sizeof path, "E:/kirby/fncount_%llu.txt", (unsigned long long)frame);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    for (uint32_t i = 0; i < FNC_N; i++)
+        if (fnc[i].addr) fprintf(f, "%llx %llu\n", (unsigned long long)fnc[i].addr, (unsigned long long)fnc[i].n);
+    fclose(f);
+    rt_log("fncount: frame %llu written to %s", (unsigned long long)frame, path);
+}
+static void fnc_hit(uint64_t addr) {
+    uint32_t i = (uint32_t)((addr >> 2) * 0x9E3779B1u) & (FNC_N - 1);
+    for (;;) {
+        uint64_t a = fnc[i].addr;
+        if (a == addr) break;
+        if (!a) {
+            uint64_t z = 0;
+            if (__atomic_compare_exchange_n(&fnc[i].addr, &z, addr, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED) || z == addr) break;
+            continue;
+        }
+        i = (i + 1) & (FNC_N - 1);
+    }
+    __atomic_add_fetch(&fnc[i].n, 1, __ATOMIC_RELAXED);
+    if (fnc_k < fnc_nat) {
+        uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (fr >= fnc_at[fnc_k] && !__atomic_exchange_n(&fnc_dumping, 1, __ATOMIC_ACQUIRE)) {
+            if (fnc_k < fnc_nat && fr >= fnc_at[fnc_k]) fnc_dump(fnc_at[fnc_k]), fnc_k++;
+            __atomic_store_n(&fnc_dumping, 0, __ATOMIC_RELEASE);
+        }
+    }
+}
+
+// KAR_WATCH_PASS=1 (D8): each thread keeps the last 24 guest functions it entered with their return addresses, which
+// the write watch (platform/win32.c) prints for the thread that wrote: the game code around a write.
+static int fnring_on;
+static __thread uint64_t fnring[24][2];
+static __thread unsigned fnring_i;
+static __thread uint64_t pass_obj;   // x0 of the last f_7005856740 component recording (f_70058497c0) on this thread
+void fnring_dump(char *out, size_t n) {
+    size_t o = 0;
+    if (pass_obj) {   // the component: object, vtable, and its "render this frame?" method (vtable + 0x10)
+        const uint64_t *ob = ipc_guest(pass_obj, 8);
+        const uint64_t *vt = ob ? ipc_guest(ob[0], 0x40) : NULL;
+        o += (size_t)snprintf(out, n, " [component %llx vtable %llx query f_%llx]", (unsigned long long)pass_obj,
+                              ob ? (unsigned long long)ob[0] : 0ull, vt ? (unsigned long long)vt[2] : 0ull);
+    }
+    for (unsigned k = 0; k < 24 && o + 40 < n; k++) {
+        unsigned i = (fnring_i - 1 - k) % 24;
+        if (!fnring[i][0]) break;
+        o += (size_t)snprintf(out + o, n - o, " f_%llx<%llx", (unsigned long long)fnring[i][0], (unsigned long long)fnring[i][1]);
+    }
+    if (!o && n) out[0] = 0;
+}
+
+// KAR_TRACE_FRAMES=<frame>,<frame>,... (diagnostic, D8): every guest function entry of those whole frames (all threads)
+// with its return address, x0, x1 and the thread, appended to E:/kirby/trace_<frame>.bin (40-byte records:
+// fn, lr, x0, x1, thread id), so two frames can be compared offline as often as needed after one run.
+static uint64_t trc_at[8], trc_to[8], trc_lo, trc_hi = ~0ull;   // frame ranges; KAR_TRACE_RANGE=<lo>-<hi> guest addresses
+static int trc_n;
+static FILE *trc_f;
+static PlatMutex trc_mu;
+static void trc_hit(uint64_t addr, uint64_t lr, uint64_t x0, uint64_t x1) {
+    if (addr < trc_lo || addr >= trc_hi) return;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int want = 0;
+    for (int i = 0; i < trc_n; i++) want |= fr >= trc_at[i] && fr <= trc_to[i];
+    if (!want) return;
+    // One file for every traced frame: threads see the frame counter change at different moments, so per-frame files
+    // were reopened (and emptied) at each flip. Each record carries its frame and thread.
+    uint64_t r[5] = {addr, lr, x0, x1, fr | (uint64_t)plat_thread_id() << 32};
+    plat_mutex_lock(&trc_mu);
+    if (!trc_f && (trc_f = fopen("E:/kirby/trace.bin", "wb"))) rt_log("trace: writing E:/kirby/trace.bin");
+    if (trc_f) fwrite(r, sizeof r, 1, trc_f);
+    plat_mutex_unlock(&trc_mu);
+}
+
+// KAR_DUMP_OPTCAT=1 (diagnostic, 15.x): the display options page (f_7002ff66a0) calls f_7003005440 for each of its
+// categories with the category entry (0x1e0 bytes, id at +8) in x1: each distinct entry is logged once as hex.
+static int optcat_on;
+static void optcat_dump(uint64_t e) {
+    static uint64_t seen[32];
+    static int n;
+    for (int i = 0; i < n; i++) if (seen[i] == e) return;
+    if (n < 32) seen[n++] = e;
+    const uint32_t *w = ipc_guest(e, 0x1e0);
+    if (!w) return;
+    char line[700];
+    for (int part = 0; part < 4; part++) {
+        int o = snprintf(line, sizeof line, "optcat: %llx +%03x:", (unsigned long long)e, part * 0x78);
+        for (int k = part * 30; k < part * 30 + 30 && k < 120; k++) o += snprintf(line + o, sizeof line - o, " %08x", w[k]);
+        rt_log("%s", line);
+    }
+}
+
+void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0, uint64_t x1) {
+    if (trc_n) trc_hit(addr, lr, x0, x1);
+    if (optcat_on && addr == 0x7003005440ull) optcat_dump(x1);
+    if (fnring_on) {
+        fnring[fnring_i % 24][0] = addr, fnring[fnring_i % 24][1] = lr, fnring_i++;
+        if (addr == 0x70058497c0ull) pass_obj = x0;
+    }
+    if (fnc) fnc_hit(addr);
+    int k = 0;
+    while (k < fnw_n && fnw_addr[k] != addr) k++;
+    if (k == fnw_n) return;
+    if (k == 0) g_fnwatch_last = x1;
+    if (addr == 0x7005827c20ull) g_fnwatch_graph = x0, x1 = x0;   // this function's key is its graph (x0)
+    if (addr == 0x70058497c0ull || addr == 0x7005859540ull) {   // D8: the component (x0) and its vtable, as the key
+        const uint64_t *ob = ipc_guest(x0, 8);
+        x1 = ob ? ob[0] : 0;   // vtable: one line per component type and caller per window
+    }
+    // f_7005827c20 (render-graph pass loop, Kirby Air Riders): every 60 frames log its pass list: x19 = [x0];
+    // fixed passes at x19+0x18..0x24, the range [x19+0x10, x19+0x14) of indices into [[x19]+0xa68] (16-byte entries,
+    // pass pointer at +8)
+    if (addr == 0x7005827c20ull) {
+        static uint64_t last_w = ~0ull;
+        uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (fr / 60 != last_w) {
+            last_w = fr / 60;
+            const uint64_t *p0 = ipc_guest(x0, 8);
+            const uint32_t *g = p0 ? ipc_guest(p0[0], 0x28) : NULL;
+            const uint64_t *own = g ? ipc_guest(p0[0], 8) : NULL;
+            const uint64_t *arr = own ? ipc_guest(own[0] + 0xa68, 8) : NULL;
+            if (g && arr) {
+                char t[600];
+                int o = snprintf(t, sizeof t, "fixed %d %d %d %d range %u-%u:", (int)g[6], (int)g[7], (int)g[8], (int)g[9], g[4], g[5]);
+                for (uint32_t i = g[4]; i < g[5] && i < g[4] + 40 && o < (int)sizeof t - 20; i++) {
+                    const uint64_t *e = ipc_guest(arr[0] + 16ull * i + 8, 8);
+                    o += snprintf(t + o, sizeof t - o, " %llx", e ? (unsigned long long)e[0] : 0ull);
+                }
+                rt_log("fnwatch: frame %llu pass list %s", (unsigned long long)fr, t);
+            }
+        }
+    }
+    static struct { uint64_t a, lr, x1; } seen[512];
+    static int nseen;
+    static uint64_t window = ~0ull;
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), w = frame / 60;
+    static PlatMutex m = PLAT_MUTEX_INIT;
+    plat_mutex_lock(&m);
+    if (w != window) window = w, nseen = 0;
+    int i = 0;
+    while (i < nseen && !(seen[i].a == addr && seen[i].lr == lr && seen[i].x1 == x1)) i++;
+    if (i == nseen && nseen < 512) {
+        seen[nseen++] = (typeof(seen[0])){addr, lr, x1};
+        rt_log("fnwatch: frame %llu f_%llx from %#llx x1 %#llx", (unsigned long long)frame, (unsigned long long)addr,
+               (unsigned long long)lr, (unsigned long long)x1);
+    }
+    plat_mutex_unlock(&m);
+}
+static void fnwatch_init(void) {
+    const char *e = getenv("KAR_FNWATCH");
+    for (char *q = (char *)e; q && *q && fnw_n < 8; q += *q == ',') fnw_addr[fnw_n++] = strtoull(q, &q, 16);
+    if (fnw_n) g_fnprof = 1;
+    const char *c = getenv("KAR_FNCOUNT");
+    for (char *q = (char *)c; q && *q && fnc_nat < 8; q += *q == ',') fnc_at[fnc_nat++] = strtoull(q, &q, 10);
+    if (fnc_nat && (fnc = calloc(FNC_N, sizeof *fnc))) g_fnprof = 1;
+    if (getenv("KAR_WATCH_PASS") && *getenv("KAR_WATCH_PASS") == '1') fnring_on = 1, g_fnprof = 1;
+    const char *t = getenv("KAR_TRACE_FRAMES");
+    for (char *q = (char *)t; q && *q && trc_n < 8; q += *q == ',') {
+        trc_at[trc_n] = trc_to[trc_n] = strtoull(q, &q, 10);
+        if (*q == '-') trc_to[trc_n] = strtoull(q + 1, &q, 10);
+        trc_n++;
+    }
+    const char *tr = getenv("KAR_TRACE_RANGE");
+    if (tr && *tr) {
+        char *q;
+        trc_lo = strtoull(tr, &q, 16);
+        if (*q == '-') trc_hi = strtoull(q + 1, NULL, 16);
+    }
+    if (trc_n) g_fnprof = 1;
+    if (getenv("KAR_DUMP_OPTCAT") && *getenv("KAR_DUMP_OPTCAT") == '1') optcat_on = 1, g_fnprof = 1;
+}
 
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
     char at[128], lr[128];
@@ -319,6 +510,8 @@ static void check_modules(const RtModule *mods, int n) {
         const RtLayoutEntry *l = NULL;
         for (int k = 0; k < rt_layout_count; k++)
             if (!strcmp(rt_layout[k].name, m->name)) l = &rt_layout[k];
+        for (int k = 0; k < rt_nro_layout_count && !l; k++)   // a lifted NRO, mapped at nn::ro::LoadModule
+            if (!strcmp(rt_nro_layout[k].name, m->name)) l = &rt_nro_layout[k];
         CHECK(l && l->base == m->base && l->size == m->size, "%s: linked base/size differ from the layout", m->name);
 
         uint64_t bad = 0, bad_neg = 0;
@@ -492,6 +685,7 @@ static void portable_paths(RtConfig *c) {
 
 int main(int argc, char **argv) {
     mem_init();   // first: claim the guest address space before anything else can land there; reads totk.ini
+    fnwatch_init();
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     plat_crash_hook(crash_handler);
@@ -579,3 +773,5 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
     return usage(argv[0]);
 }
+
+int rt_game_is_kar(void) { return !strncmp(rt_game_target, "kar", 3); }

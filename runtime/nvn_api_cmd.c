@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "gfx.h"
+#include "ipc.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
@@ -501,6 +502,40 @@ NVN_API(nvnCommandBufferSetRenderTargets) {
     }
     r->depth = tex_pin(dt);
     copy_view(&r->dview, &r->has_dview, dv);
+    // KAR_DIAG_RT1024=1 (diagnostic): a 1024x1024 d16 depth target (Kirby Air Riders' top-down shadow map, drawn in the
+    // intro only) logs the game's call chain: the return address and up to 6 frame-pointer links, for finding the
+    // code that decides to render it
+    static int rt_diag = -1;
+    if (rt_diag < 0) rt_diag = getenv("KAR_DIAG_RT1024") ? atoi(getenv("KAR_DIAG_RT1024")) : 0;
+    if (rt_diag && r->depth && r->depth->d.width == 1024 && r->depth->d.height == 1024 && r->depth->d.format == 0x32 &&
+        ((uintptr_t)r->depth->mem == 0x5d0a00000ull || rt_diag == 2)) {   // the shadow map; =2: any 1024 d16 target
+        static int n_logged;
+        static uint64_t last_mem_frame;
+        uint64_t fr_now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (n_logged++ < 40 || (rt_diag == 2 && fr_now / 120 != last_mem_frame && (last_mem_frame = fr_now / 120, 1))) {
+            char t[256];
+            extern __thread uint64_t g_fnwatch_last, g_fnwatch_graph;
+            int o = snprintf(t, sizeof t, "mem %#llx frame %llu graph %#llx pass %#llx lr %#llx", (unsigned long long)(uintptr_t)r->depth->mem, (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), (unsigned long long)g_fnwatch_graph, (unsigned long long)g_fnwatch_last, (unsigned long long)c->x[30]);
+            uint64_t fp = c->x[29];
+            for (int k = 0; k < 6 && fp && !(fp & 7) && o < (int)sizeof t - 24; k++) {
+                const uint64_t *f = ipc_guest(fp, 16);
+                if (!f) break;
+                o += snprintf(t + o, sizeof t - o, " < %#llx", (unsigned long long)f[1]);
+                fp = f[0];
+            }
+            rt_log("nvn: 1024 d16 depth target set: %s", t);
+            // KAR_WATCH_PASS=1 (D8): a write watch on the pass object's pages from now, to find the code that
+            // records the shadow pass (platform/win32.c plat_diag_watch_write logs each writing place once)
+            if (g_fnwatch_last && getenv("KAR_WATCH_PASS") && *getenv("KAR_WATCH_PASS") == '1')
+                plat_diag_watch_write(g_fnwatch_last & ~0xfffull, 0x2000);
+            const uint64_t *po = g_fnwatch_last ? ipc_guest(g_fnwatch_last, 64) : NULL;
+            if (po)
+                rt_log("nvn:   pass object %llx %llx %llx %llx %llx %llx %llx %llx", (unsigned long long)po[0],
+                       (unsigned long long)po[1], (unsigned long long)po[2], (unsigned long long)po[3],
+                       (unsigned long long)po[4], (unsigned long long)po[5], (unsigned long long)po[6],
+                       (unsigned long long)po[7]);
+        }
+    }
 }
 // void nvnCommandBufferClearColor(NVNcommandBuffer *cmd, int index, const float *rgba, int mask)
 NVN_API(nvnCommandBufferClearColor) {
@@ -587,6 +622,15 @@ NVN_API(nvnCommandBufferSetRenderEnableConditional) {
 }
 // void nvnCommandBufferBindProgram(NVNcommandBuffer *cmd, const NVNprogram *program, int stages)
 NVN_API(nvnCommandBufferBindProgram) {
+    {   // KAR diagnostic: the distinct (null program, stage mask) pairs the game binds
+        static uint64_t seen[2];
+        int z = !arg_p(c, 1), m = (int)arg_x(c, 2) & 63;
+        if (!(__atomic_fetch_or(&seen[z], 1ull << m, __ATOMIC_RELAXED) >> m & 1)) {
+            char lr[96];
+            rt_log("nvn: BindProgram %s stages %#x (first such, from %s)", z ? "NULL" : "program", m,
+                   ldr_describe(c->x[30] - 4, lr, sizeof lr));
+        }
+    }
     *REC(cmd_of(c), OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){arg_p(c, 1), (int)arg_x(c, 2)};
 }
 // void nvnCommandBufferBind{Blend,Color,ChannelMask,Multisample,Polygon,DepthStencil}State(NVNcommandBuffer *cmd,
@@ -810,6 +854,11 @@ NVN_API(nvnCommandBufferDrawElementsInstanced) {
 // draws with vkCmdDrawIndexedIndirect from the pool buffer (nxnative hle_nvn.c, SavageWindRecomp cmdbuf.c)
 NVN_API(nvnCommandBufferDrawElementsIndirect) {
     *REC(cmd_of(c), OP_DRAW_IDX_IND, p_draw_idx_ind) = (p_draw_idx_ind){(int)arg_x(c, 1), (int)arg_x(c, 2), arg_x(c, 3), arg_x(c, 4)};
+}
+// void nvnCommandBufferDrawArraysIndirect(NVNcommandBuffer *cmd, NVNdrawPrimitive prim, NVNbufferAddress indirect): as
+// DrawElementsIndirect without indices, vkCmdDrawIndirect from the pool buffer at replay
+NVN_API(nvnCommandBufferDrawArraysIndirect) {
+    *REC(cmd_of(c), OP_DRAW_IND, p_draw_ind) = (p_draw_ind){(int)arg_x(c, 1), 0, arg_x(c, 2)};
 }
 // void nvnCommandBufferDispatchCompute(NVNcommandBuffer *cmd, int x, int y, int z): caller = the game's return address
 NVN_API(nvnCommandBufferDispatchCompute) {
@@ -1099,6 +1148,7 @@ const char *nvn_op_name(uint32_t op) {
         "DRAW_IDX", "DISPATCH", "BARRIER", "SET_TEX_POOL", "SET_SAMP_POOL", "COPY_B2T", "COPY_STRIDE", "BLEND_COLOR",
         "COPY_T2B", "BIND_IMG", "COPY_T2T", "RESET_COUNTER", "CLEAR_TEX", "DEPTH_CLAMP", "RENDER_ENABLE",
         "RASTER_DISCARD", "RENDER_COND", "PRIM_RESTART", "DRAW_IDX_IND", "DISPATCH_IND", "CLEAR_BUF", "PUSH_CONST", "WAIT_SYNC",
+        "DRAW_IND",
     };
     _Static_assert(sizeof names / sizeof *names == OP_COUNT_, "one name per op");
     return op < OP_COUNT_ ? names[op] : "?";

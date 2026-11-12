@@ -37,7 +37,7 @@ static struct { uint64_t packets, words, drains, fallbacks, drain_ns, full_waits
 enum {
     R_PAD, R_BeginQuery, R_BeginRendering, R_BindDescriptorSets, R_BindIndexBuffer, R_BindPipeline, R_BindVertexBuffers2,
     R_BlitImage, R_ClearAttachments, R_ClearColorImage, R_ClearDepthStencilImage, R_CopyBuffer, R_CopyBufferToImage,
-    R_CopyImage, R_CopyImageToBuffer, R_Dispatch, R_DispatchIndirect, R_Draw, R_DrawIndexed, R_DrawIndexedIndirect,
+    R_CopyImage, R_CopyImageToBuffer, R_Dispatch, R_DispatchIndirect, R_Draw, R_DrawIndexed, R_DrawIndexedIndirect, R_DrawIndirect,
     R_EndQuery, R_EndRendering, R_FillBuffer, R_PipelineBarrier2, R_PushConstants, R_ResetQueryPool, R_ResolveImage,
     R_SetBlendConstants, R_SetCullMode, R_SetDepthBias, R_SetDepthBiasEnable, R_SetDepthCompareOp, R_SetDepthTestEnable,
     R_SetDepthWriteEnable, R_SetFrontFace, R_SetPrimitiveRestartEnable, R_SetPrimitiveTopology,
@@ -284,6 +284,9 @@ FIXED(DrawIndexed, (VkCommandBuffer cb, uint32_t n, uint32_t i, uint32_t f, int3
       uint32_t n, i, f; int32_t v; uint32_t fi)
 #define PACK_DrawIndexedIndirect *a = (A_DrawIndexedIndirect){b, o, n, s}
 FIXED(DrawIndexedIndirect, (VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t s), (cb, b, o, n, s),
+      VkBuffer b; VkDeviceSize o; uint32_t n, s)
+#define PACK_DrawIndirect *a = (A_DrawIndirect){b, o, n, s}
+FIXED(DrawIndirect, (VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, uint32_t n, uint32_t s), (cb, b, o, n, s),
       VkBuffer b; VkDeviceSize o; uint32_t n, s)
 #define PACK_EndQuery *a = (A_EndQuery){p, q}
 FIXED(EndQuery, (VkCommandBuffer cb, VkQueryPool p, uint32_t q), (cb, p, q), VkQueryPool p; uint32_t q)
@@ -615,6 +618,7 @@ static void exec_packet(uint32_t op, void *p) {
     F(Draw, a->n, a->i, a->f, a->fi)
     F(DrawIndexed, a->n, a->i, a->f, a->v, a->fi)
     F(DrawIndexedIndirect, a->b, a->o, a->n, a->s)
+    F(DrawIndirect, a->b, a->o, a->n, a->s)
     F(EndQuery, a->p, a->q)
     F(FillBuffer, a->b, a->o, a->n, a->v)
     F(ResetQueryPool, a->p, a->f, a->n)

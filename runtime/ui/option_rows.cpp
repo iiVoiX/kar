@@ -243,7 +243,7 @@ bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value
 
 void opt_group(UiTextId title) {
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", menu_text(title));
+    ImGui::TextColored(ImGui::GetStyleColorVec4(ImGuiCol_TabSelectedOverline), "%s", menu_text(title));   // the theme's accent
 }
 
 void opt_text(UiTextId text, bool warn) {

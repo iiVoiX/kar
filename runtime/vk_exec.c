@@ -616,6 +616,110 @@ void vk_exec_pass_begin(VkExec *ex) {
     ex->in_pass = 1;
 }
 
+// The newest single-sample colour render target per format (vk_exec_rt_newest), noted when its pass ends: the
+// missing-upscale fallback of vk_exec_draw.c (upscale_fill) blits from it.
+#define RT_NEWEST_N 16
+static struct { VkImage image; VkFormat format; uint32_t w, h; uint64_t stamp; uint8_t storage; } rt_newest[RT_NEWEST_N];
+
+// Images the replay has drawn into (colour attachments, storage images, copy destinations; clears do not count), with
+// the gfx frame of the latest draw. The missing-upscale fallback leaves alone what was drawn in the last few frames.
+// Open addressing over the VkImage handle; a full table stops adding new images.
+#define DRAWN_N (1u << 16)
+static struct { uint64_t h, frame; } drawn_set[DRAWN_N];
+static uint32_t drawn_count;
+
+static uint32_t drawn_find(uint64_t h, int add) {
+    for (uint32_t i = (uint32_t)((h * 0x9E3779B97F4A7C15ull) >> 48), n = 0; n < DRAWN_N; i = (i + 1) & (DRAWN_N - 1), n++) {
+        if (drawn_set[i].h == h) return i;
+        if (!drawn_set[i].h) {
+            if (!add || drawn_count >= DRAWN_N - DRAWN_N / 4) return UINT32_MAX;
+            drawn_set[i].h = h, drawn_count++;
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+void vk_exec_note_drawn(VkImage image) {
+    uint64_t h = (uint64_t)(uintptr_t)image;
+    uint32_t i = h ? drawn_find(h, 1) : UINT32_MAX;
+    if (i != UINT32_MAX) drawn_set[i].frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+}
+
+int vk_exec_was_drawn(VkImage image) {   // within the last 8 frames
+    uint64_t h = (uint64_t)(uintptr_t)image;
+    uint32_t i = h ? drawn_find(h, 0) : UINT32_MAX;
+    if (i == UINT32_MAX) return 0;
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    return now - drawn_set[i].frame <= 8;
+}
+
+static void rt_note_image(const VkTexImage *img, uint64_t stamp, int storage) {
+    if (img->samples != 1 || !(img->aspect & VK_IMAGE_ASPECT_COLOR_BIT)) return;
+    int slot = -1;
+    for (int i = 0; i < RT_NEWEST_N && slot < 0; i++)
+        if (rt_newest[i].format == img->format && rt_newest[i].w == img->width && rt_newest[i].h == img->height) slot = i;
+    if (slot < 0) {   // the oldest entry goes
+        slot = 0;
+        for (int i = 1; i < RT_NEWEST_N; i++)
+            if (rt_newest[i].stamp < rt_newest[slot].stamp) slot = i;
+    }
+    __atomic_store_n(&rt_newest[slot].image, VK_NULL_HANDLE, __ATOMIC_RELEASE);
+    rt_newest[slot].format = img->format;
+    rt_newest[slot].w = img->width, rt_newest[slot].h = img->height, rt_newest[slot].stamp = stamp;
+    rt_newest[slot].storage = (uint8_t)storage;
+    __atomic_store_n(&rt_newest[slot].image, img->image, __ATOMIC_RELEASE);
+}
+
+static void rt_note_newest(const VkExecTarget *t, uint64_t stamp) {
+    if (t->img) vk_exec_note_drawn(t->img->image);
+    if (t->image) vk_exec_note_drawn(t->image);
+    if (t->img && t->image == t->img->image) rt_note_image(t->img, stamp, 0);
+}
+
+// A storage image bound for a dispatch or draw counts as written now. Kirby Air Riders' scene can end in a compute
+// pass (a resolve writing the 1536x864 rgb10a2 image); noting only render passes left the newest target of that size
+// a G-buffer image (normals in rgb10a2), and the upscale fallback showed it as a rainbow picture for the whole run.
+void vk_exec_rt_note_storage(const VkTexImage *img) {
+    vk_exec_note_drawn(img->image);
+    if (img->type == VK_IMAGE_TYPE_2D) rt_note_image(img, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1, 1);
+}
+
+// A texture's image goes to the dead list when the game drops it (vk_memory.c vk_defer_image, any thread): it must
+// not stay a blit source, or a later fallback blit reads a destroyed image (device lost at boot, where textures come
+// and go). The slot's handle is cleared atomically; the replay thread re-reads it before use.
+void vk_exec_rt_forget(VkImage image) {
+    for (int i = 0; i < RT_NEWEST_N; i++)
+        if (__atomic_load_n(&rt_newest[i].image, __ATOMIC_ACQUIRE) == image)
+            __atomic_store_n(&rt_newest[i].image, VK_NULL_HANDLE, __ATOMIC_RELEASE);
+}
+
+VkImage vk_exec_rt_newest(VkFormat format, uint32_t max_w, uint32_t dst_w, uint32_t dst_h, uint64_t min_stamp,
+                          uint32_t *w, uint32_t *h) {
+    int best = -1;
+    for (int i = 0; i < RT_NEWEST_N; i++) {
+        if (!__atomic_load_n(&rt_newest[i].image, __ATOMIC_ACQUIRE) || rt_newest[i].format != format ||
+            rt_newest[i].w >= max_w || rt_newest[i].stamp < min_stamp)
+            continue;
+        // same aspect ratio within 2 %
+        double a = (double)rt_newest[i].w * dst_h, b = (double)rt_newest[i].h * dst_w;
+        if (a > b * 1.02 || b > a * 1.02) continue;
+        if (best < 0 || rt_newest[i].stamp > rt_newest[best].stamp ||
+            (rt_newest[i].stamp == rt_newest[best].stamp && rt_newest[i].w > rt_newest[best].w)) best = i;
+    }
+    if (best < 0) return VK_NULL_HANDLE;
+    *w = rt_newest[best].w, *h = rt_newest[best].h;
+    static VkImage last;   // diagnostic: each change of source, the first 24
+    static int changes;
+    VkImage cur = __atomic_load_n(&rt_newest[best].image, __ATOMIC_ACQUIRE);
+    if (cur != last && changes++ < 24)
+        rt_log("vk_exec: upscale source %p %ux%u written by %s, frame %llu", (void *)cur, *w, *h,
+               rt_newest[best].storage ? "a storage bind" : "a render pass",
+               (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+    last = cur;
+    return __atomic_load_n(&rt_newest[best].image, __ATOMIC_ACQUIRE);
+}
+
 void vk_exec_pass_end(VkExec *ex) {
     if (!ex->in_pass) return;
     vk_exec_oq_pass_end(ex);
@@ -628,7 +732,8 @@ void vk_exec_pass_end(VkExec *ex) {
     if (vk_dump_armed) vk_dump_pass_end(ex);
     uint64_t stamp = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1;
     for (int i = 0; i < 8; i++)
-        if (ex->color[i].image) vk_texture_gpu_written(ex->color[i].tex), tfr_note(&ex->color[i], stamp);
+        if (ex->color[i].image) vk_texture_gpu_written(ex->color[i].tex), tfr_note(&ex->color[i], stamp),
+                                rt_note_newest(&ex->color[i], stamp);
     if (ex->depth.image) vk_texture_gpu_written(ex->depth.tex), tfr_note(&ex->depth, stamp);
 }
 
@@ -873,8 +978,17 @@ int vk_exec_read_buffer(VkExec *ex, uint64_t addr, uint64_t size, void *out) {
     return result == VK_SUCCESS;
 }
 
+// KAR_REPLAY_PROF=1 (diagnostic): time per op kind; a submission whose replay takes over 100 ms logs its three
+// largest kinds plus the memory sync around the walk (record_impl), to find what the frame-time "replay" spikes are.
+static int rp_on = -1;
+static uint64_t rp_ns[OP_COUNT_ + 2];   // + mirror/usnap begin, mirror/usnap end
+static uint32_t rp_n[OP_COUNT_ + 2];
+extern uint64_t vk_rp_sub[4], vk_rp_sh[5], gfx_rp[10], gfx_pf_why[3];   // vk_exec_draw.c: op_dispatch split into shader, pipeline, binding, the rest
 static void walk(VkExec *ex, const op_hdr *h, int depth) {
+    if (rp_on < 0) rp_on = getenv("KAR_REPLAY_PROF") && *getenv("KAR_REPLAY_PROF") == '1';
     for (;;) {
+        uint64_t rp_t0 = rp_on ? plat_now_ns() : 0;
+        unsigned rp_op = h->op < OP_COUNT_ ? h->op : 0;
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
         const void *a = nvn_op_payload(h);
@@ -936,7 +1050,9 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_BARRIER: vk_exec_barrier(ex); break;
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DISPATCH_IND:
-            if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND) vk_exec_frame.draws_seen++, split_draws++;
+        case OP_DRAW_IND:
+            if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND || h->op == OP_DRAW_IND)
+                vk_exec_frame.draws_seen++, split_draws++;
             if (h->op == OP_DISPATCH || h->op == OP_DISPATCH_IND) vk_exec_frame.dispatches++, split_draws++;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
         case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
@@ -953,6 +1069,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         default: rt_fatal("vk: op %s has no replay handler", nvn_op_name(h->op));
         }
         if (split_draws >= split_n) maybe_split(ex);
+        if (rp_on && rp_op != OP_CALL) rp_ns[rp_op] += plat_now_ns() - rp_t0, rp_n[rp_op]++;
         h = nvn_op_next(h);
     }
 }
@@ -976,7 +1093,10 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     part_t0 = kern_now_ns();
     x_here = 1;
     int memory = n || work;
+    uint64_t rp_start = rp_on > 0 ? plat_now_ns() : 0;
+    if (rp_on > 0) memset(rp_ns, 0, sizeof rp_ns), memset(rp_n, 0, sizeof rp_n), memset(vk_rp_sub, 0, sizeof vk_rp_sub), memset(vk_rp_sh, 0, sizeof vk_rp_sh), memset(gfx_rp, 0, sizeof gfx_rp), memset(gfx_pf_why, 0, sizeof gfx_pf_why);
     if (memory) vk_mem_mirror_begin(), vk_usnap_begin(handles, n, fence);
+    if (rp_on > 0) rp_ns[OP_COUNT_] = plat_now_ns() - rp_start;
     if (work) work(ex, context);
     else {
         for (int i = 0; i < n; i++) {
@@ -987,7 +1107,46 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     vk_exec_pass_end(ex);
     x_here = 0;
     if (ex->recorded) vk_exec_barrier(ex);   // later submissions see this one's writes
+    uint64_t rp_e0 = rp_on > 0 ? plat_now_ns() : 0;
     if (memory) ex->recorded += vk_mem_mirror_end(ex->cb, fence), vk_usnap_end(fence);   // VRAM mirror bytes the GPU wrote go back to guest memory
+    if (rp_on > 0) {
+        rp_ns[OP_COUNT_ + 1] = plat_now_ns() - rp_e0;
+        uint64_t total = plat_now_ns() - rp_start;
+        // Window average (every 600 frames): replay ms per frame and how much of it bind_resources took, a measure
+        // that does not depend on where in the race a frame number falls (16.4a).
+        static uint64_t win_ns, win_f0, win_bind0;
+        extern uint64_t vk_rp_bind_ns;
+        uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        win_ns += total;
+        if (!win_f0) win_f0 = f, win_bind0 = vk_rp_bind_ns;
+        if (f >= win_f0 + 600) {
+            rt_log("replay prof: frames %llu-%llu: replay %.2f ms per frame, bind_resources %.2f ms",
+                   (unsigned long long)win_f0, (unsigned long long)f, win_ns / 1e6 / (double)(f - win_f0),
+                   (vk_rp_bind_ns - win_bind0) / 1e6 / (double)(f - win_f0));
+            win_ns = 0, win_f0 = f, win_bind0 = vk_rp_bind_ns;
+        }
+        if (total > 100000000ull) {
+            int top[3] = {-1, -1, -1};
+            for (int k = 0; k < OP_COUNT_ + 2; k++)
+                for (int j = 0; j < 3; j++)
+                    if (top[j] < 0 || rp_ns[k] > rp_ns[top[j]]) {
+                        for (int m = 2; m > j; m--) top[m] = top[m - 1];
+                        top[j] = k;
+                        break;
+                    }
+            char t[300];
+            int o = 0;
+            for (int j = 0; j < 3; j++) {
+                int k = top[j];
+                const char *nm = k == OP_COUNT_ ? "mem-begin" : k == OP_COUNT_ + 1 ? "mem-end" : nvn_op_name((unsigned)k);
+                o += snprintf(t + o, sizeof t - o, " %s %.1f ms (%u)", nm, rp_ns[k] / 1e6, k < OP_COUNT_ ? rp_n[k] : 1);
+            }
+            rt_log("replay prof: frame %llu submission %.1f ms:%s | dispatch shader %.1f pipe %.1f bind %.1f rest %.1f | cs answers %.1f lockwait %.1f get %.1f miss %llu/%llu | req %.1f get_one %.1f disk %.1f (%llu) xlate %.1f (%llu) | read %.1f check+reflect %.1f | why nostored %llu queued %llu other %llu", (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), total / 1e6, t,
+                   vk_rp_sub[0] / 1e6, vk_rp_sub[1] / 1e6, vk_rp_sub[2] / 1e6, vk_rp_sub[3] / 1e6,
+                   vk_rp_sh[0] / 1e6, vk_rp_sh[1] / 1e6, vk_rp_sh[2] / 1e6, (unsigned long long)vk_rp_sh[3], (unsigned long long)vk_rp_sh[4],
+                   gfx_rp[0] / 1e6, gfx_rp[1] / 1e6, gfx_rp[2] / 1e6, (unsigned long long)gfx_rp[6], gfx_rp[3] / 1e6, (unsigned long long)gfx_rp[7], gfx_rp[8] / 1e6, gfx_rp[9] / 1e6, (unsigned long long)gfx_pf_why[0], (unsigned long long)gfx_pf_why[1], (unsigned long long)gfx_pf_why[2]);
+        }
+    }
     if (ex->nviews) {
         ViewList *l = malloc(sizeof *l + sizeof(VkImageView) * (size_t)ex->nviews);
         if (!l) rt_fatal("vk: out of memory");

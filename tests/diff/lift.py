@@ -32,8 +32,11 @@ from lifter import Lifter, Unsupported, bits
 from nso import Nso
 
 BUF_MID = BUF + 0x10000
-# Test load addresses, below 2^39 and clear of BUF.
-BASES = {'main': 0x7000000000, 'subsdk0': 0x7008000000, 'sdk': 0x7010000000}
+# Test load addresses, below 2^39 and clear of BUF. One 256 MiB slot per module: a main larger than 128 MiB (Kirby Air
+# Riders, 147 MiB) would otherwise overlap subsdk0, and games ship more than one subsdk.
+BASES = {'main': 0x7000000000, **{f'subsdk{i}': 0x7010000000 + i * 0x10000000 for i in range(10)},
+         'sdk': 0x70B0000000}
+OTHER_BASE = 0x70C0000000   # any other module tested on its own, such as an NRO copied under a plain name
 
 
 def is_mem(w):
@@ -172,7 +175,7 @@ def main():
     names = args.modules.split(',')
     if args.coverage:
         for name in names:
-            coverage(name, Nso(str(args.exefs / name)), BASES[name])
+            coverage(name, Nso(str(args.exefs / name)), BASES.get(name, OTHER_BASE))
         print(f'({time.time() - t0:.0f}s)')
         return 0
 
@@ -181,7 +184,7 @@ def main():
     images, picks, unsupported = [], [], Counter()
     for name in names:
         nso = Nso(str(args.exefs / name))
-        base = BASES[name]
+        base = BASES.get(name, OTHER_BASE)
         img = work / f'{name}.img'
         img.write_bytes(bytes(nso.image))
         images.append((base, img, nso.image))

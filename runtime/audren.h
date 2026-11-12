@@ -8,6 +8,11 @@
 #include "ipc.h"
 #include "platform/platform.h"
 
+// audout.c: the port menu's gain (TOTK_VOLUME, 0 while unfocused with TOTK_MUTE_UNFOCUSED) for every output, and the
+// SDL playback device TOTK_AUDIO_DEVICE names (the system default otherwise).
+float audio_menu_gain(void);
+uint32_t audio_pick_device(void);
+
 typedef struct {
     int32_t sample_rate, sample_count, mix_buffer_count, submix_count, voice_count, sink_count, effect_count,
         performance_frame_count;

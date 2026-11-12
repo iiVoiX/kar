@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "nvn_api.h"
 #include "cfg.h"
 #include "fs.h"
 #include "host.h"
@@ -663,6 +664,14 @@ uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uin
         if (r <= 0) rt_fatal("RomFS read failure at %#llx", (unsigned long long)(base + offset + done));
         done += (uint64_t)r;
     }
+    // KAR_LOG_ASSET_READS=1 (diagnostic, 15.x): each read with the frame, the file's start in the image and the range,
+    // so reads while a menu opens can be mapped to the asset catalog (Asset/assets.cat) offline.
+    static int lar = -1;
+    if (lar < 0) lar = getenv("KAR_LOG_ASSET_READS") && *getenv("KAR_LOG_ASSET_READS") == '1';
+    if (lar)
+        rt_log("asset read: frame %llu file %#llx off %#llx size %#llx",
+               (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), (unsigned long long)base,
+               (unsigned long long)offset, (unsigned long long)done);
     *out = done;
     return 0;
 }
@@ -707,13 +716,55 @@ uint32_t romfs_entry_type(int *out, const char *path) {
     return FS_R_PATH_NOT_FOUND;
 }
 
+// One child of the listed folder: a file, or the folder its path continues into (reported once: the index is sorted,
+// so every path below one subfolder is contiguous; *last holds the subfolder reported last). As plat_fs_list's
+// callback: add returns 0 to stop, so does this; 1 goes on.
+static int list_one(const char *rest, uint64_t size, char *last, size_t last_cap,
+                    int (*add)(const char *, int, uint64_t, void *), void *ctx) {
+    const char *slash = strchr(rest, '/');
+    if (!slash) return add(rest, PLAT_FS_FILE, size, ctx);
+    size_t k = (size_t)(slash - rest);
+    if (k >= last_cap) return 1;   // a folder name nn::fs could not hold anyway: skipped
+    if (!strncmp(last, rest, k) && last[k] == '\0') return 1;   // reported already
+    memcpy(last, rest, k);
+    last[k] = '\0';
+    return add(last, PLAT_FS_DIR, 0, ctx);
+}
+
+// nn::fs::OpenDirectory on the RomFS (Kirby Air Riders lists app:/Asset at boot): the immediate children of the
+// folder, from the sorted index and then the overlay's added files. A replaced file reports its overlay's size.
+uint32_t romfs_list(const char *path, int (*add)(const char *name, int kind, uint64_t size, void *ctx), void *ctx) {
+    const char *p = romfs_path_relative(mount_name, path);
+    if (!p) return FS_R_PATH_NOT_FOUND;
+    char folder[4096];
+    if (snprintf(folder, sizeof folder, "%s%s", p, *p ? "/" : "") >= (int)sizeof folder) return FS_R_INVALID;
+    size_t n = strlen(folder);
+    if (n && !folder_exists(folder)) return FS_R_PATH_NOT_FOUND;
+    char last[1024] = "";
+    for (uint64_t i = lower(folder); i < file_count; i++) {
+        Entry e = entry(i);
+        const char *name = entry_name(e);
+        if (strncmp(name, folder, n)) break;
+        uint32_t ov = overlay_slot(i);
+        if (!list_one(name + n, ov ? overlays[ov - 1].size : e.size, last, sizeof last, add, ctx)) return 0;
+    }
+    last[0] = '\0';
+    for (size_t k = added_lower(folder); k < nadded && !strncmp(added[k], folder, n); k++) {
+        uint32_t ov = overlay_slot(file_count + k);
+        if (!list_one(added[k] + n, ov ? overlays[ov - 1].size : 0, last, sizeof last, add, ctx)) return 0;
+    }
+    return 0;
+}
+
 // ---- overrides
 // nn::Result nn::fs::MountRom(const char *name, void *cache, size_t cache_size)
 static void ov_mount_rom(Cpu *c) { ret_x(c, romfs_mount(arg_p(c, 0))); }
-// nn::Result nn::fs::QueryMountRomCacheSize(size_t *out): no cache needed, the host reads the image directly
+// nn::Result nn::fs::QueryMountRomCacheSize(size_t *out): the host reads the image directly and ignores the cache
+// MountRom gets, but the size stays non-zero: Kirby Air Riders allocates it and traps (udf) when the size is 0.
+// Bananza allocates and passes it the same way, so a small buffer changes nothing there.
 static void ov_query_cache(Cpu *c) {
     uint64_t *out = arg_p(c, 0);
-    if (out) *out = 0;
+    if (out) *out = 0x4000;
     ret_x(c, out ? 0 : FS_R_INVALID);
 }
 // void nn::fs::InitializeForApplication(): SDK-internal; opens the index instead of the fs service session
@@ -725,3 +776,10 @@ static void ov_initialize(Cpu *c) {
 HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKcPvm", ov_mount_rom);
 HOST_OVERRIDE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", ov_query_cache);
 HOST_OVERRIDE("_ZN2nn2fs24InitializeForApplicationEv", ov_initialize);
+
+// nn::fs::detail::IsEnabledAccessLog(), with and without a log-type mask: the SDK asks fsp-srv, which is not
+// emulated (nn::fs is answered at the function level). Kirby Air Riders reaches it from nn::fs::SetAllocator at boot.
+// The access log is off, as on a retail console.
+static void ov_access_log_off(Cpu *c) { c->x[0] = 0; }
+HOST_OVERRIDE("_ZN2nn2fs6detail18IsEnabledAccessLogEv", ov_access_log_off);
+HOST_OVERRIDE("_ZN2nn2fs6detail18IsEnabledAccessLogEj", ov_access_log_off);

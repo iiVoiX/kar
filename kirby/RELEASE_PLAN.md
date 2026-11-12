@@ -1,0 +1,318 @@
+# Release-Plan: Kirby Air Riders Recomp bis 100 % stabil
+
+Stand 2026-11-11. Fortschritt grob: **~70 %** (der erweiterte Plan zählt mehr offene Punkte).
+Details zu jedem Punkt: `HANDOFF.md`, `PLAN.md`, `KIRBY_RECOMP_PLAN.md`.
+
+Jeder Punkt ist eine von zwei Arten:
+- **[OHNE]**: geht ohne Spielstart (Code, Bauen, Analyse, Doku). Das kann ich jederzeit machen, auch wenn du spielst,
+  nur das Bauen kostet kurz CPU.
+- **[SPIEL]**: braucht einen Spielstart zum Testen oder Messen. Nur, wenn du nicht spielst.
+
+Status: ✅ fertig · 🔧 gebaut, ungetestet · ⬜ offen
+
+## Arbeitsweise (ab 2026-11-11, vom Nutzer verlangt): systematisch, nicht raten
+
+Jeder Fehler wird gleich behandelt:
+1. **Messbares Kriterium festlegen**: was genau ist falsch, woran sieht man „richtig“ (Zahl oder Vergleichsbild).
+2. **Datenfluss rückwärts verfolgen**: vom falschen Ausgabewert zu seinen Eingaben, Knoten für Knoten. Pro Knoten
+   **eine Messung** (Override, Dump, Log), Ergebnis in eine Tabelle (Knoten, gemessen, erwartet, ok?).
+3. **Der erste Knoten, dessen Eingaben stimmen, dessen Ausgabe aber nicht, ist die Ursache.** Erst dann wird
+   etwas geändert, und zwar genau dort.
+4. **Gegenprüfen** mit derselben Messung und dem Vergleichsbild; Ergebnis eintragen.
+5. Keine Änderung „auf Verdacht“ ohne Messung, die sie begründet; Diagnose-Schalter bleiben aus.
+
+## Übersicht (Stand 2026-11-11 abends)
+
+| Abschnitt | ✅ fertig | 🔧 gebaut/in Arbeit | ⬜ offen |
+|---|---|---|---|
+| 1. Bildfehler | 10 | 1 | 1 |
+| 2. Fehlende Icons und UI | 3 | 1 | 1 |
+| 3. Stabilität | 2 | 0 | 6 |
+| 4. Performance | 1 | 1 | 6 |
+| 5. Bildqualität und Optionen | 2 | 0 | 1 |
+| 6. Release-Vorbereitung | 5 | 0 | 2 |
+| 7. Mehrspieler und Spielmodi | 0 | 0 | 6 |
+| 8. Eingabe | 2 | 0 | 3 |
+| 9. Audio | 2 | 2 | 2 |
+| 10. Spielstände und Daten | 3 | 0 | 1 |
+| 11. Fenster und System | 0 | 0 | 5 |
+| 12. Testautomatik | 2 | 0 | 3 |
+| 13. Verteilung | 2 | 0 | 2 |
+| 14. Video-Einstellungen im Spiel-Menü | 4 | 3 | 9 |
+| 15. Echtes Einstellungsmenü im Spiel | 0 | 0 | 9 |
+| 16. Performance-Architektur | 0 | 0 | 8 |
+| **Summe** | **38** | **8** | **65** |
+
+Heute erledigt: Höhlen-Leuchten (1.3), dunkles Kirby + flaues Bild (1.10, Array-Fix 512), Validation (1.9),
+Replay-Dialog (3.1), Vorschaukarte (2.3), ungültige Shader (P7/Patch 0026), portabler Ordner (10.3), Anleitung (13.1),
+Ausgabegerät (9.6), F12-Screenshot (14.16). Jetzt dran: D8 Schattenkarte (1.11). Untersuchungsprotokolle: `RELEASE_PLAN_ARCHIV.md`.
+
+## Jetzt dran (Detailplan, Reihenfolge fest)
+
+Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davor.
+
+| # | Schritt | Messung (wie) | Kriterium „fertig“ | Status |
+|---|---|---|---|---|
+| D1 | **Array-Größe festlegen**: wie viele Elemente benutzt das Spiel wirklich? | `KAR_ARR_N=1024` (`arr1024`): Absturz (4122 Deskriptoren > 4096, 18,8 GB Speicher) → neue Messung `KAR_ARR_SCAN=1` (liest die Handle-Puffer über das Array-Ende hinaus, `scan1`): höchstes belegtes Element **416** in c4/c5/c6 (Puffer 32 KB) | N = 512 | ✅ gemessen → Test N=512 |
+| D2 | **Startlinie Runde 2 nach der Eishöhle** (Nutzer-Meldung) | Bilder Frame 4800–6800 mit N=512 (`arr512`) | sieht aus wie Runde 1 / Konsole | ✅ Runde 2 und 3 durchgehend richtig (Höhle, Wiesen, Kirby pink) |
+| D3 | Standard `KAR_ARR_N` auf das Ergebnis von D1 setzen, Diagnose-Log behalten | `arr512`: 40–48 fps (mit 256: 45–47) | Bild ok, fps ≥ 45 | ✅ Standard 512 (gfx_shader.c arr_n); fps knapp darunter → als Leistungspunkt in 4.x |
+| D4 | **Kirby dunkel auf 1 von 8 Bildern** (arrdef, N=256) | Bilder mit N=512 (`arr512`, 11 Bilder Runde 2–3) | Kirby überall wie Konsole | ✅ mit 512 nicht mehr: alle 11 richtig, im Wald etwas schattiger (plausibel) |
+| D5 | **1.10 flaues Bild** neu messen (Bild ist seit dem Array-Fix viel heller) | `console_ref/match3.py` Startlinie (`dull4`): Mittel 178–199 (Konsole 188–199, vorher ~130), p5 100–127 (Konsole 122–150, vorher ~45), Sättigung 0,36–0,50 (Konsole 0,34–0,46) | Abweichung < 10 % | ✅ Mittel < 5 %; dunkelste Stellen noch ~15 % dunkler (Rest unter 1.10) |
+| D6 | **P7**: 3 Shader mit ungültigem SPIR-V | Ursache: TXQ fragt Komponente 2 (Tiefe/Schichten) einer 2D-Textur ab, Übersetzer extrahierte sie aus einem vec2. Patch `0026-texture-query-size-missing-component.patch` (liefert 1 wie die Hardware); Lauf `p7run` + spirv-val | spirv-val 0 Fehler | ✅ 8589 Shader, 0 ungültig |
+| D7 | Menü-Optionen im Spiel prüfen (9.5, 9.6, 14.13, 14.16) | Lauf `d7` | Option wirkt | ✅ 9.6 und 14.16 automatisch bestätigt; 9.5 (Stumm bei Alt-Tab) und 14.13 (Voreinstellung im Menü wählen) brauchen einen Handtest durch den Nutzer |
+| D8 | 1.11 Schattenkarte (1024er d16, „Dach über mir“-Karte) | (a) im Rennen 0 Schreibzugriffe (`shw5`), (b) ~200× pro Rennframe gelesen (Dump f3300), (c) kein verspätetes GPU-Ergebnis (`shw6`, Import-Modus), (d) Aufrufkette `f_7004c2c620` ← `f_7005823d40` (Pass) ← `f_7005827c20` (Pass-Schleife eines Render-Graph-Auftrags) ← Frame-Schleife (`rt1024`), (e) Matrix c4[92..95] ändert sich im Rennen mit Position/Fahrtrichtung (`mat1`) → **echter Fehler**, (f) Schatten-Pass läuft im Intro jedes Frame (zeichnet nur alle ~32 Frames), ab Rennstart nie mehr (`fnw3`); Pass- und Auftragsobjekte werden pro Frame neu angelegt (`fnw4/5`), daher kein fester Bezug | Karte wird im Rennen alle ~32 Frames neu gezeichnet | 🔧 Ursache liegt im Frame-Aufbau des Spiels (wer den Schatten-Auftrag pro Frame einreiht). Weiter gemessen (`fnw6`): Aufträge erzeugt `f_70058236c0` (aufgerufen bei 0x700582cfc8) aus `[ctx+0xa80]`-Bereichen über das Pass-Array `[ctx+0xa68]`; das „Pass-Objekt“ ist ein pro Frame aufgezeichneter Befehlsstrom des Spiels (Pakete wie 0x100000003/0xdb4/0x2080000c9) → die Schatten-Befehle zeichnet eine Spielkomponente beim Szenen-Update auf und tut das im Rennen nicht mehr. Nächster Schritt: diese Komponente per Ghidra finden (Erzeuger der Pakete mit dem 1024er-Ziel) und ihre Bedingung lesen; vorher dekompilieren (Ghidra, toolchain\ghidra) und die Bedingung lesen; Werkzeuge: `KAR_FNWATCH=<fn,…>` (Funktionseintritt + x0/x1, main.c), `KAR_DIAG_RT1024=1`. **2026-11-12:** Aufrufzähler `KAR_FNCOUNT=<frames>` (main.c, Dateien E:/kirby/fncount_<frame>.txt): Karte gezeichnet nur Frames 2625/2662/2692 (Limit 60), Szenenwechsel bei ~2708 (Szenen-Aufbaufunktionen `f_700565efbc` u. a. laufen dort), danach nie mehr. Ausgeschlossen: großer Compute-Shader (`KAR_CS_SPV_MAX=0`: unverändert). Nächster Schritt: Schreiber der Pass-Liste `[ctx+0xa80]`/`[ctx+0xa68]` pro Frame finden (Schreib-Watchpoint `KAR_WATCH_WRITE` oder Ghidra) und dessen Bedingung für den Schatten-Pass lesen; Verdacht: eine Abfrage (Fence/Query/Zähler) liefert bei uns anderes als auf der Konsole. Docs-Suche (docs/, refs/nx2navi/docs, refs/switch2recomp): Hinweis maxwell.md 21 (Einheit der GPU-Zeitstempel unverifiziert, Engine steuert Auflösung/Qualität nach GPU-Zeit) → getestet `KAR_TS_IDEAL=1` (keine GPU-Zeit): Karte weiter nur im Intro → ausgeschlossen. Occlusion-Queries (maxwell 1.4/4.2) sind umgesetzt (vk_exec_xfer.c oq_report), noch nicht als Ursache geprüft. **Watchpoint/Trace (2026-11-12):** Schatten-Befehlsstrom wird von `f_7005859540` (allgemeiner Ansichts-Recorder, vtable+0x30 der Komponente …75f40, Aufruf über `f_70058497c0` aus der Komponenten-Schleife `f_7005856740`) geschrieben; Komponenten-Abfrage `f_700578dc2c` liefert immer 1; Recorder läuft im Intro 10×, im Rennen 11× pro Frame weiter. Werkzeuge: `KAR_WATCH_PASS=1` (Watchpoint auf Pass-Objekt + Ring der letzten Gastaufrufe), `KAR_WATCH_ADDR`, `KAR_TRACE_FRAMES=a-b,…` + `KAR_TRACE_RANGE` (eine Datei E:/kirby/trace.bin, 40-Byte-Sätze; Auswertung tools/trace_views*.py), `KAR_DIAG_RT1024=2` (jedes 1024er-d16-Ziel mit Adresse). Ausgeschlossen: Karte an neue Adresse verlegt (im Rennen gar kein 1024er-d16-Ziel). Adressen wechseln je Lauf. Nächster Schritt: im Trace (E:/kirby/trace.bin vorhanden, Frames 2600–2710 + 3400–3402) die Ansicht finden, die im Schatten-Frame das Tiefenziel setzt (Aufruf mit 1024er-Ziel-Objekt), und deren Daten im Renn-Frame vergleichen. Offline-Auswertung (tools/trace_onlyin.py, E:/kirby/trace_counts.pkl): Aufrufe nur in Schatten-Frames gehen über allgemeine Rückruf-Listen (`f_7000f6dc20`) bzw. Ressourcen-Laden (`f_70010ea1dc`) → keine eindeutige Entscheidungsstelle. **Einordnung:** Die Karte ist laut früherer Messung eine „Dach über mir“-Karte (von oben), im Rennen meldet sie „überall Licht“; sichtbare Wirkung höchstens unter Überdachungen (zu hell). Konsolenbild (nintendo.com Floria) zeigt keine Schlagschatten, nur den Fahrzeugschatten (haben wir auch) → ob die Konsole die Karte im Rennen neu zeichnet, ist ohne Konsolenaufnahme unter einer Überdachung nicht belegbar. **Zurückgestellt** bis zu einem Konsolenvergleich an so einer Stelle |
+
+## 1. Bildfehler (Blocker für Release)
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 1.1 | Regenbogen-Läufe: Ursache war ein übersprungenes Ganzzahl-Löschen (0) auf Float-Datentexturen; behoben in `clear_tex`, 8/8 sauber (Fix #37) | SPIEL | ✅ |
+| 1.2 | Regenbogen-Nacharbeit: nicht mehr nötig (Ursache war 1.1) | – | ✅ |
+| 1.3 | Kirby leuchtet in der Höhle: BEHOBEN (Patch 0025, Übersetzer findet die lokalen Licht-Datensätze; vorher lieferte die globale Lade-Hilfsfunktion immer 0). Siehe Arbeitsplan R11 | OHNE + SPIEL | ✅ |
+| 1.4 | Direct-Shader (41): echte Texturen wieder standardmäßig an (`KAR_POOL_ARR=0` schaltet aus); mit Fix #37 4/4 sauber | SPIEL | ✅ |
+| 1.5 | 82 Compute-Shader mit Handles außerhalb ihrer Tabelle (bekommen nichts). Hauptfall: Handle-Wort bei c0+0xE0. Versuch `KAR_C0_TEX=1` im Test: die Wörter sind zur Laufzeit 0, die Slots also wirklich leer; Hypothese widerlegt, bleibt aus. Abgeschlossen: das Spiel bindet dort nichts, auf der Konsole läsen sie dieselben leeren Slots | OHNE + SPIEL | ✅ |
+| 1.6 | 3D-Rauschtextur als 2D-Array: im Validation-Lauf (1.9) nicht gemeldet | SPIEL | ✅ |
+| 1.7 | Separate Sampler: kein echter Fehler. Alle 16.182 Fälle sind kombiniert, die Laufzeit setzt Textur und Sampler richtig zusammen; die Dump-Ausgabe war irreführend und ist korrigiert | OHNE | ✅ |
+| 1.8 | Belichtung/Bloom gegen Konsolen-Screenshots prüfen | SPIEL | ✅ gemessen (2026-11-12, `console_ref/match3.py`, Startlinie): helle Stellen p95 232–254 vs. Konsole 232–249 → Belichtung/Spitzlichter im Rahmen; Bloom sichtbar (Boost-Tore leuchten); dunkle Stellen p5 ~20 % zu dunkel → Rest unter 1.10. Der nicht gebaute 6,3-MB-Compute-Shader ist kein Bloom (vermutlich der neuronale Hochskalierer, ersetzt durch unser Hochskalieren). Szenen-Korrelation nur 0,13–0,48: für eine genaue Aussage bräuchte es Konsolenbilder derselben Stelle |
+| 1.10 | Bild wirkt flau/zu dunkel: mit dem Array-Fix (KAR_ARR_N=512) Startlinie Mittel 178–199 wie Konsole 188–199 (vorher 130), Sättigung passt; Rest: dunkelste Stellen ~15 % dunkler (`dull4`) | OHNE | ✅ (Rest beobachten) |
+| 1.9 | Validation-Lauf (Rennen, nach Patch 0025, `E:\kirby\val2`): keine Fehler, nur 2 Warnungen: Descriptor-Pool ohne SAMPLER-Typ (behoben, vk_exec_draw.c Pool-Größen) und Fragment schreibt Location 0 ohne Farbziel (harmlos, Leistungshinweis). Menü/City Trial noch nicht | SPIEL | ✅ Rennen |
+| 1.11 | Sonnen-Schattenkarte (1024er, fs Slot 2) wird nur im Intro gezeichnet, im Rennen nie; die Matrix folgt aber dem Spieler, Schatten stimmen also nicht (Szene eher zu dunkel). Gezeigt mit `KAR_ALT_SHADOW=3600:c:1024` | SPIEL | 🔧 Weiter nicht gezeichnet (letzter Schreibzugriff Frame 2682, Intro). Die Karte sagt im Rennen praktisch „überall Licht“ (Gegentest shw4) → es fehlen Schatten, das Bild wird dadurch nicht dunkler. Im Rennen gibt es keinen Pass auf 0x5d0a00000 (Dump f3300); die 512er d16-Pässe sind Figuren-Vorschauen, keine Schatten |
+| 1.10 | 59 Tessellation-Stufen ohne Übersetzung: nicht sichtbar, kein einziges Draw in Menü/Rennen ausgelassen | OHNE | ✅ |
+
+## 2. Fehlende Icons und UI
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 2.1 | Tastensymbole (Ersatzschrift), Original-Schrift aus eigenem Dump möglich | — | ✅ |
+| 2.2 | Graues/blaues Quadrat oben links hinter der Minikarte: gibt es auch auf der Konsole (nintendo.com air_ride-Screenshot) → kein Fehler. Seit Patch 0025 fehlt es bei uns in hud1/r11fix → prüfen, ob es nur zeitweise erscheint oder ob 0025 es kaputt macht | SPIEL | 🔧 |
+| 2.3 | Menü-Vorschaukarte zeigt nur Platzhalter (Video/Render-to-Texture). Nach Patch 0025 (`E:\kirby\menu5`, f00900): Modus-Karte „Rennen“ zeigt ein echtes Streckenbild, Streckenauswahl mit Vorschaubildern. Vermutlich behoben, Nutzer bestätigt noch | SPIEL (Dump) | ✅? |
+| 2.6 | **Leere Sprechblase** über dem gewählten Symbol der Hauptmenü-Leiste (Online/Controller/…/Optionen): weißes Feld ohne Text (gefunden 2026-11-12, `E:\kirby\menu3`). Vermutlich fehlender Text-/Schrift-Draw oder Texthandle | SPIEL | ⬜ |
+| 2.4 | Unbekannte Symbol-Codes ins Font-Skript eintragen (sobald sie auftauchen): wartet auf Fund, übersprungen | OHNE | ⬜ |
+| 2.5 | Sprache im Port-Menü einstellbar: gibt es schon („Game language“, Automatisch = Deutsch bei Kirby, Neustart nötig) | — | ✅ |
+
+## 3. Stabilität
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 3.1 | „About Replays“-Hinweis nach dem Rennen durchklicken | SPIEL | ⬜ |
+| 3.2 | Alle Modi durchspielen: City Trial, Top Ride, Road Trip, Optionen, Speichern/Laden | SPIEL | ⬜ |
+| 3.3 | Fehlende Systemdienste (FATAL „service not implemented“) je nach Fund ergänzen | OHNE (nach Fund) | ⬜ |
+| 3.4 | Langzeittest 60 Minuten: Abstürze, Speicherwachstum, Ruckler | SPIEL | ⬜ |
+| 3.5 | Echter Controller: Belegung, Vibration, Pause, Hot-Plug | SPIEL (du) | ⬜ |
+| 3.6 | Neues Testskript für den frischen deutschen Spielstand | OHNE + SPIEL | ⬜ |
+| 3.7 | Absturzbericht: steht schon im Log (`logs\kar.log`, letzte 5 Läufe), Datei heißt jetzt `kar.log` statt `dkb.log` | OHNE | ✅ |
+| 3.8 | Code-Review der heutigen Änderungen (`pool_patch`, `pool_fill`, `shadow_dummy`): 1 Fehler behoben | OHNE | ✅ |
+
+## 4. Performance
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 4.1 | Speicher: Boot-Vorbau aus (29 → 24 GB privat, 12 GB RAM) | — | ✅ |
+| 4.2 | Ruckler im ersten Rennen (1%-Low 7 fps): Pipelines beim ersten Start/Install vorbauen | OHNE + SPIEL | ✅ über 16.1a: Compute-Prefetch + Nutzungslisten; Rennen 1% low 42–51 fps (ab Sitzung 2) |
+| 4.3 | Gezielter Vorbau nur der Rennen-Pipelines statt aller (RAM sparen) | OHNE + SPIEL | ✅ `pipeline-used.bin`/`cs-used.bin` (nur in den letzten 8 Sitzungen Benutztes): 186 statt 3373 Grafik-Pipelines |
+| 4.4 | CPU-Profil eines warmen Rennens (`TOTK_PROFILE`), Top-Funktionen optimieren | SPIEL, dann OHNE | ⬜ |
+| 4.5 | Pro Draw: Descriptor-Updates/Textur-Lookups (Pool-Arrays schreiben 64 Descriptoren) | OHNE + SPIEL | ⬜ |
+| 4.6 | GPU: Barrieren um die Hochskalierung reduzieren | OHNE + SPIEL | ⬜ |
+| 4.7 | Speicher-Zensus pro Subsystem im Log (gab es, jetzt mit Prozess-Gesamtwert), dann größte Posten senken | OHNE + SPIEL | 🔧 |
+| 4.8 | Pipeline-Cache-Datei (~1 GB) wird beim Start komplett gelesen | OHNE + SPIEL | ✅ eigener Pipeline-Cache für kar* aus (Treiber-Cache genügt), −1,1 GiB, kein 20-s-Speichern mehr |
+
+## 5. Bildqualität und Optionen
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 5.1 | FSR1-Hochskalierung statt DLSS | — | ✅ |
+| 5.2 | Schärfen (RCAS) für den DLSS-Ersatz: läuft (im Test geprüft), standardmäßig aus, an nur mit selbst gesetztem Schärfe-Regler | OHNE + SPIEL | ✅ |
+| 5.3 | Einstellungen im Port-Menü: Auflösung, Vollbild, V-Sync, FPS-Limit gibt es schon (DKB-Menü); bei Kirby noch prüfen | SPIEL | ⬜ |
+
+## 6. Release-Vorbereitung (alles OHNE)
+
+| # | Punkt | Status |
+|---|---|---|
+| 6.1 | Diagnose-Ausgaben hinter Schalter (`KAR_DIAG`); Draw-Statistik schreibt nur noch bei ausgelassenen Draws | ✅ |
+| 6.2 | Fix-Protokoll und `docs/kirby-running.md` aktuell halten (neue Schalter): Stand 2026-11-09 eingetragen | ✅ |
+| 6.3 | Kirby-spezifischen Code sauber von DKB trennen (`kar*`-Abfragen bündeln) | ✅ **Umgesetzt 2026-11-12** (Bau ok; 13 Stellen → `rt_game_is_kar()`, nur die zwei versionsgenauen `kar458752`-Abfragen in nvn_api_dlss.c bleiben). **Plan:** was: die 15 verstreuten `strncmp(rt_game_target, "kar"…)` durch eine Funktion `rt_game_is_kar()` (host.h, main.c) ersetzen. warum: eine Stelle statt 15 Kopien, später leicht in eigenes Repo/eigene Datei zu trennen. wie: rein mechanisch, Verhalten unverändert; Prüfung = Bau ohne Fehler. |
+| 6.4 | README für das Kirby-Ziel: `docs/kirby-running.md` aktualisiert (Was geht, bekannte Lücken, Log-Pfad) | ✅ |
+| 6.5 | `tools/check_content.py`: sauber, neue Datendateien enthalten nur Hashes/Patch-Tabelle wie bei DKB | ✅ |
+| 6.6 | Lizenzen: FSR1-Eintrag deckt jetzt auch `kar_upscale.comp` ab | ✅ |
+| 6.7 | Umzug in dein eigenes Repo (du committest) | ⬜ |
+
+## 7. Mehrspieler und Spielmodi
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 7.1 | Lokaler Splitscreen (2–4 Spieler): mehrere Ansichten, mehrere Controller | SPIEL | ⬜ |
+| 7.2 | Online/LAN abschalten bzw. sauber als „nicht verfügbar“ melden (kein Absturz beim Öffnen) | OHNE + SPIEL | ⬜ |
+| 7.3 | City Trial: Stadt mit vielen Objekten (Performance, fehlende Effekte) | SPIEL | ⬜ |
+| 7.4 | Top Ride (Draufsicht-Modus) und Road Trip (Story) einmal komplett | SPIEL | ⬜ |
+| 7.5 | Zwischensequenzen und Videos (Film-Decoder `ov_movie2.c`) in allen Modi | SPIEL | ⬜ |
+| 7.6 | Replays ansehen und speichern | SPIEL | ⬜ |
+
+## 8. Eingabe
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 8.1 | Tastatur-Belegung dokumentiert (`docs/kirby-running.md`) | OHNE | ✅ |
+| 8.2 | Tasten umbelegen im Port-Menü: gibt es schon (Steuerungs-Tab) | — | ✅ |
+| 8.3 | Xbox-, PlayStation- und Switch-Pro-Controller (Tastensymbole passend zum Pad?) | SPIEL (du) | ⬜ |
+| 8.4 | Mehrere Controller gleichzeitig für Splitscreen | SPIEL (du) | ⬜ |
+| 8.5 | Gyro/Bewegungssteuerung, falls das Spiel sie nutzt | SPIEL (du) | ⬜ |
+
+## 9. Audio
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 9.1 | Ton funktioniert (AudioOut → SDL3, 6 Kanäle) | — | ✅ |
+| 9.2 | Knackser/Aussetzer bei Rucklern (Puffer 250 ms) messen | SPIEL | ⬜ |
+| 9.3 | Lautstärke-Regler im Port-Menü wirkt jetzt auch bei Kirby (AudioOut) | OHNE + SPIEL | 🔧 |
+| 9.4 | Ton läuft bei Alt-Tab/minimiert weiter oder pausiert sauber | SPIEL | ⬜ |
+| 9.5 | Ton-Tab: „Im Hintergrund stumm“ (`TOTK_MUTE_UNFOCUSED`, sofort): AudioOut- und Renderer-Pegel × 0, solange das Fenster keinen Fokus hat. Warum: heute läuft der Ton bei Alt-Tab voll weiter (9.4). Hilft: übliche PC-Option, auch für 9.4 | OHNE + SPIEL | 🔧 gebaut, im Menü sichtbar (menutest4); Tastendruck/Gerätewechsel noch von Hand testen |
+| 9.6 | Ton-Tab: „Ausgabegerät“ (`TOTK_AUDIO_DEVICE`, Gerätename, Standard = Windows-Standard, nach Neustart): Liste aus SDL3 `SDL_GetAudioPlaybackDevices`, beim Öffnen gesuchtes Gerät statt Default. Warum: Headset/Lautsprecher wählen ohne Windows umzustellen | OHNE + SPIEL | ✅ getestet (`d7`): unbekannter Name → Log „not found: system default“, Wiedergabe auf dem Standardgerät |
+
+## 10. Spielstände und Daten
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 10.1 | Speicherort, Journal-Speichern und 3 Backups in `docs/kirby-running.md` dokumentiert | OHNE | ✅ |
+| 10.2 | Absturz während des Speicherns: Spielstand bleibt heil (Journal-Prinzip testen) | SPIEL | ⬜ |
+| 10.3 | Profil-Ordner portabel (neben der Exe) für Release: vorhanden, Paket-Skript für kar.exe angepasst (Plan P4) | OHNE | ✅ |
+| 10.4 | Falsche Spielversion: Hash-Prüfung gab es, Meldung nennt jetzt die passende Version | OHNE | ✅ |
+
+## 11. Fenster und System
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 11.1 | Vollbild/Fenster wechseln (Alt+Enter), Größe ändern, mehrere Monitore | SPIEL | ⬜ |
+| 11.2 | Alt-Tab, Minimieren, Energiesparmodus/Standby | SPIEL | ⬜ |
+| 11.3 | Andere GPUs: AMD und Intel (bisher nur NVIDIA getestet) | SPIEL (andere PCs) | ⬜ |
+| 11.4 | Mindestanforderungen festlegen (RAM, VRAM, GPU) nach Messungen | OHNE nach SPIEL | ⬜ |
+| 11.5 | Windows 10 prüfen | SPIEL (anderer PC) | ⬜ |
+
+## 12. Testautomatik (damit nichts wieder kaputtgeht)
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 12.1 | Ein Skript für „N Rennen, Screenshots, Log auswerten“: `tools/kar_race_test.ps1` (startet nicht, solange Wardogs läuft) | OHNE | ✅ |
+| 12.2 | Automatischer Regenbogen-/Schwarzbild-Check: `tools/kar_shot_check.py`, Median-Helligkeit pro Lauf, an 10 bekannten Läufen geeicht (10/10 richtig) | OHNE | ✅ |
+| 12.3 | Validation-Layer-Lauf als fester Test vor jedem Release | OHNE + SPIEL | ⬜ |
+| 12.4 | Testskripte für jeden Modus (Menüpfade für frischen und alten Spielstand) | OHNE + SPIEL | ⬜ |
+| 12.5 | Langzeit-Soak über Nacht mit Speicher- und fps-Protokoll | SPIEL | ⬜ |
+
+## 13. Verteilung
+
+| # | Punkt | Art | Status |
+|---|---|---|---|
+| 13.1 | Ablauf für Nutzer: eigener Dump → Extraktion → Build → Start: `docs/kirby-running.md` „From your own dump to a running game“ (Plan P5) | OHNE | ✅ |
+| 13.2 | Installer/Paket ohne Spieldaten (DKB hat `tools/package_build.py`) | OHNE | ⬜ **Befund 2026-11-12:** `tools/package_build.py` packt kar.exe bereits (portabler Ordner, enthält aber ExeFS = Spielcode → nur privat). Paket *ohne* Spieldaten = Installer, der beim Nutzer aus seinem Dump hebt und baut: `installer/` kennt nur Bananza (bananza.py 842 Zeilen: Prüfen → Daten → Übersetzer → Lift → Bau). Für Kirby nötig: Spielerkennung (Titel 040077201BE50000, Update 458752), `extract_nup`, gen.py mit `--patches recomp/patches-kar458752.txt` + `--nro effectscript=…EffectScript.nro`, gepacktes RomFS (kar458752-packed). Aufwand ~1 Tag, rein OHNE; laut Reihenfolge erst bei Release (6.x/13.x). |
+| 13.3 | Shader- und Pipeline-Cache beim ersten Start mit Fortschrittsanzeige vorbauen | OHNE + SPIEL | ⬜ |
+| 13.3a | **Ladebildschirm „Pipelines laden“ beim Start** wie Hookshot/NX2navi (Nutzer-Foto 2026-11-12: Logo, Version, Balken „Loading pipelines – Loading the shader cache“). Heute läuft unser Vorbau unsichtbar (Grafik-Vorbau aus `pipeline-used.bin` ~0,1–3 s, Compute-Prefetch im Hintergrund aus `cs-used.bin`). Wie (Nutzer: **kein ImGui, alles nativ**): eigener Startbildschirm direkt im Vulkan-Präsentationspfad (gfx_present.c): Hintergrund/Logo als beim Build erzeugtes Bild, Balken und Text über eigene Rechtecke/Glyphen-Atlas (eigener kleiner Shader), mit Fortschritt aus vk_pipeline.c prewarm und gfx_shader.c Prefetch; beim ersten Start (leerer Treiber-Cache) wichtig, da dann Minuten **Umgesetzt (ungetestet, 2026-11-12):** gfx_present.c Abschnitt „boot screen“: Thread zeichnet auf der CPU (Verlauf, Titel, Statuszeile, Balken, Prozent; Text nativ über GDI `plat_text_draw` in platform/win32.c), Upload über die Upload-Batches, Anzeige mit `vk_present_image`; Fortschritt aus `gfx_shader_prewarm_progress` (Shader) und `vk_pipeline_prewarm_progress` (Pipelines); Start/Stopp in boot.c um den Vorbau; `TOTK_BOOT_SCREEN=0` aus | sichtbarer Fortschritt, Spiel startet danach ohne Ruckler | OHNE + SPIEL | 🔧 |
+| 13.4 | Changelog: `docs/kirby-changelog.md` | OHNE | ✅ |
+
+## 14. Video-Einstellungen im Spiel-Menü (Wunsch)
+
+Ziel: ein Tab „Video“ im Einstellungsmenü (Esc/F1), in dem alles Bildrelevante an einer Stelle steht, jede Option
+mit deutscher Beschreibung und dem Hinweis, ob sie sofort wirkt oder einen Neustart braucht. Ein Teil existiert schon
+im DKB-Tab „Bildschirm“, wirkt aber bei Kirby nicht überall oder ist nicht geprüft.
+
+| # | Option | Heute | Art | Status |
+|---|---|---|---|---|
+| 14.1 | Tab „Video“ anlegen, Kirby-relevante Optionen dorthin, Rest unter „Erweitert“ | Tab heißt auf Deutsch „Video“; Umsortieren offen | OHNE + SPIEL | 🔧 |
+| 14.2 | Ausgabe-Auflösung (Liste der Monitor-Auflösungen + eigene) | `OUTPUT_RES`, Neustart | OHNE + SPIEL | ⬜ |
+| 14.3 | Fenstermodus: Fenster / randloses Vollbild / exklusives Vollbild | `FULLSCREEN` (randlos), F11 | OHNE + SPIEL | ⬜ |
+| 14.4 | V-Sync an/aus/adaptiv (Present-Modus fifo/mailbox/immediate verständlich benannt) | `VK_PRESENT` | OHNE + SPIEL | ⬜ |
+| 14.5 | FPS-Limit 30/60/120/144/Monitor (Spiel läuft intern mit 60: höhere Werte prüfen) | `FPS_LIMIT` | SPIEL | ⬜ |
+| 14.6 | Interne Auflösung (Spiel rendert 1536×864 für DLSS): Stufen 67 %/80 %/100 % | fehlt | OHNE + SPIEL | ⬜ |
+| 14.7 | Upscaler: FSR 1 / bilinear, Schärfe-Regler | `UPSCALER`, `SHARPNESS` (wirkt jetzt auch bei Kirby, 🔧) | SPIEL | 🔧 |
+| 14.8 | Anzeige-Auflösung, die das Spiel sieht (heute fest 2560×1440, `KAR_DISPLAY_RES`) | nur Umgebungsvariable | OHNE + SPIEL | ⬜ |
+| 14.9 | Helligkeit/Kontrast/Sättigung/Gamma | `COLOR_*` (DKB), bei Kirby prüfen | SPIEL | ⬜ |
+| 14.10 | Seitenverhältnis/Ultrawide, HUD-Position | `ASPECT`, `ULTRAWIDE`, `HUD_POSITION` (DKB), bei Kirby prüfen | SPIEL | ⬜ |
+| 14.11 | Leistungsanzeige (fps, Frametime) | `PERF_OVERLAY`, F10 | SPIEL | ⬜ |
+| 14.12 | GPU-Auswahl bei mehreren Grafikkarten | `GPU_INDEX` | — | ✅ |
+| 14.13 | Voreinstellungen „Leistung / Ausgewogen / Qualität / Benutzerdefiniert“ (`TOTK_VIDEO_PRESET`): setzt interne Auflösung, Upscaler und Schärfe auf einmal; Ändern einer der drei Zeilen macht „Benutzerdefiniert“ (wie das Farbprofil). Warum: ein Klick statt drei Zeilen für Spieler ohne Grafikwissen | `menu.cpp tab_screen` | OHNE + SPIEL | 🔧 gebaut, im Menü sichtbar (menutest4); Tastendruck/Gerätewechsel noch von Hand testen |
+| 14.16 | Bildschirmfoto per F12 (`TOTK_SCREENSHOT_KEY`, An/Aus im Video-Tab): Swapchain-Bild als PNG nach `screenshots\kar-<Datum>.png` neben der exe (Capture-Puffer aus gfx_present.c existiert schon für den Menütest). Warum: Bilder ohne Overlay/Snipping-Tool, auch für Fehlerberichte | `gfx_present.c`, `menu_win.cpp` | OHNE + SPIEL | ✅ getestet (`d7`, Test-Schalter `KAR_SCREENSHOT_AT=<frame>`): `screenshots\kar-20261111-220206.png` 3440×1440 geschrieben |
+| 14.14 | Menütexte auf Deutsch | `ui_text.c text_de`, Menüsprache Deutsch (auto bei deutschem Windows), im Spiel geprüft | OHNE | ✅ |
+| 14.15 | Port-Menü im Kirby-Farbstil (Übergang, bis 15 fertig ist) | `menu.cpp style_init`, nur kar* | OHNE | ✅ |
+
+## 15. Echtes Einstellungsmenü im Spiel (Wunsch, Ziel)
+
+**Vorgabe Nutzer (2026-11-12): kein ImGui, alles nativ – einzige Ausnahme die Leistungsanzeige (F10).** Betrifft das Port-Menü (F1, heute `ui/menu.cpp` auf ImGui), den Ladebildschirm (13.3a) und jede neue Oberfläche. **Zweite Vorgabe: Design 1:1 wie Kirby** (Schrift, Farben, Formen, Animationen aus dem Spiel; eigene Bildschirme wie der Ladebildschirm übernehmen den Stil des Spiels, der heutige rosa Ladebildschirm ist ein Platzhalter). Ziel bleibt das echte Spielmenü (15.1–15.9); wo das nicht reicht, eigene native Darstellung im Vulkan-Präsentationspfad (eigener Shader, Schrift-Atlas aus dem Build), kein ImGui.
+
+Ziel: Die Port-Einstellungen (Auflösung, Fenstermodus, V-Sync, FPS-Limit, interne Auflösung, Upscaler, Schärfe,
+Farbe, Lautstärke, Steuerung) erscheinen **im eigenen Optionen-Menü von Kirby Air Riders**, mit der Schrift, dem Layout,
+den Animationen und der Auswahl-Logik des Spiels, nicht als Overlay darüber. Das ImGui-Overlay (14) bleibt nur als
+Notfall-/Entwicklermenü (Taste) erhalten.
+
+Aufwand: Wochen, nicht Tage. Risiko: ein Spiel-Update kann Hooks und Layouts brechen (wir unterstützen aber nur 1.3.3).
+Keine Spieldateien im Repo: Layouts/Texte werden zur Laufzeit gepatcht oder aus dem Dump des Nutzers erzeugt.
+
+| # | Schritt | Art | Status |
+|---|---|---|---|
+| 15.1 | Optionen-Bildschirm des Spiels finden: Szene/Layout-Dateien (romfs, Layout-Format bestimmen), zuständige Klassen im Code (Menü-Stack, Listen-Widget, Einträge), wie ein Eintrag Wert und Text bekommt | OHNE (romfs/Code lesen) + SPIEL (Log) | 🔧 **Befund 2026-11-12:** Spieldaten in HAL-Archiven (`Asset/assets.cat` = Hash-Katalog ohne Namen, `assets_a000.dat` 16,6 GB), Engine „phx“. Textschlüssel im Hauptmodul: Optionen-Szene `OptionSequenceScene` (Code `f_700491f160`, `f_70049369e4`, `f_7004938a10`, `f_70049393e4`, `f_7004b7b6b4`), Kategorien Disp/Ctrl/Snd/Net/MyName/Del/Acc (`Mnu_Opt_*`, z. B. Disp: Helligkeit gesamt/weiß/schwarz/UI, Farbfilter, HUD, Kamera, Bewegungsübelkeit, Textgröße). Hauptmenü-Untermenü (Net/Etc/Coll/News/Opt) baut `f_700494ad9c` (virtuelle Aufrufe je Eintrag, Textsuche vermutlich `f_7001127350`); Anzeige-Seite `f_7004a97e40` (`Mnu_Header_Opt_Disp`, `Mnu_Opt_Disp_Brt`). Weg ins Menü per Skript (`tools/menu_opt.txt`: Hauptmenü → Leiste → Zahnrad = Optionen; `menu_disp.txt` öffnet „Barrierefreiheit“ mit großen Listen-Schaltflächen „Controller“/„Anzeigeeinstellungen“ + Unterreitern – passendes Vorbild für eigene Einträge). Seitentexte stehen nicht im Code, sondern in den Layout-Dateien (HAL-Archiv, Hash-Namen) → Einbau ins echte Spielmenü heißt: Archiv-/Layoutformat und Widget-Klassen der Engine „phx“ entschlüsseln (groß, viele Sitzungen). Trace beim Öffnen liegt vor (E:/kirby/trace.bin, Frames 1835–1880). **Asset-Format entschlüsselt (Nutzerwahl: echter Einbau):** `assets.cat` = „PARC“ v4, Tabelle 0x2e0b64c–0x3ef54cc, 277 114 Einträge à 64 Byte (16 Byte Typ-ID, u32 0, u32 zstd-Flag, u64 Versatz in assets_a000.dat, u64 gespeichert, u64 entpackt, 16 Byte Kennung); Werkzeuge `E:/kirby/tools/kar_assets.py` (Katalog, Entpacken, Suche) und `kar_msbt.py` (Texte). Texte: MSBT (`MsgStdBn`), deutsche Datenbank 4231 Texte (z. B. `Mnu_Opt_Acc_Top_Ctrl`=„Controller“, `Mnu_Opt_Acc_Top_Disp`=„Anzeigeeinstellungen“; das Spiel hat eigene HDR-Option `Mnu_Opt_Disp_Brt_Hdr` und Helligkeit je TV/Handheld). Seite „Barrierefreiheit“ = Prefab „Pfab“ v4 (4,3 MB, Versatz 0x3abe96380, gespeichert als E:/kirby/options.pfab), binäres Entity-Komponenten-Format (Typen als Hashes). Prefab-Lader im Code (Kennung 0x62616650): `f_70048deb40`, `f_70048e000c` (neben dem Menücode), `f_70050b7968`, `f_70050cd220`. Pfab-Kopf: Kennung, Version 4, 16-Byte-Typ-ID (Lader vergleicht sie mit einem registrierten Typ), dann vier Anzahlen 90 / 4252 / 3759 / 298, Datenbeginn 0x40, zwei Versätze am Ende (0x42a334/0x42a338: Hash-Tabelle); Lader liest bei +0x1c eine Anzahl ×8 und legt Tabellen an. Textschlüssel stehen in den Komponentendaten (z. B. Schaltfläche „Controller“ `Mnu_Opt_Acc_Top_Ctrl` bei 0x1a4158, „Anzeigeeinstellungen“ bei 0x1a419c). **Pfab-Aufbau (aus `f_70048deb40`):** +0x18 = Anzahl Archetypen (90), Tabelle ab Versatz aus +0x2c (0x40), je 0x88 Byte: 0x80 Byte Bitmaske der Komponenten-Typen (Bitindex = Typ), u32 Anzahl Entities (Summe 4252 = Kopffeld +0x1c), u32 Versatz des Datenblocks (0x3010 … 0x429ed5, dicht gepackt, mit Zeichenketten variabler Länge). Archetypbasiertes Entity-System. UI-Komponenten der Engine (Typnamen im Code): `phx::GameUITextComponent`, `GameUIClickableComponent`, `GameUIAutoLayoutGroupComponent`/`ChildTag`, `GameUILayoutComponent`, `ChildNode`/`ParentNode`, `GameUIPicture(9Slice)Component` u. a.; Menü-Logik ist C++ (`OptionSequenceScene`), keine Spiel-Komponenten. Trace beim Öffnen von „Barrierefreiheit“: einmalig `f_700494a8e8`, `f_700494a6e4`, `f_700495e6d8`, `f_7004a09360`, `f_7004a08b94`, `f_7004a08c68` (Bereich 0x7004a0… = Kandidat Seiten-Controller). Seiten-Handler beim Öffnen enthalten keine Schlüssel (datengesteuert). **Anzeige-Seite ist tabellengesteuert:** `f_700300b4e0`/`f_700300d3c0` holen den Hilfetext über die Zeilen-ID `[Eintrag+0x34]` aus der Tabelle bei 0x70089defe8 (ID 0 `Mnu_Opt_Disp_Hud_Help`, 1 `…Brt_Help`, 2–5 `…ColorFilter_Off/1/2/3_Help`), danach Code-Adressen (vermutlich Handler je Zeile). Datenblock 0x70089dea00–0x70089df000: vtables der Anzeige-Seite (Code 0x2fe…–0x301…) und **Kategorien-Tabelle 0x70089ded40** mit 5 Reitern (`Mnu_Opt_Disp_Hud_Cat_Vis/Hud/Brt/Camera/ScrSick`) → Ziel: 6. Reiter „PC-Grafik“. Seitenaufbau `f_7002ff66a0` (3897 Zeilen) läuft über die Kategorie-IDs 1–5 (u32-Liste 0x7005e10d9c–0x7005e10db0) und sucht je ID den Eintrag in der Kategorienliste des Seitenobjekts (Vektor +0x21d8/+0x21e0, 0x1e0 Byte je Eintrag, ID bei +8). 6. Reiter braucht: ID 6 (Patch der Schleifengrenze auf eigene Liste über die Patch-Tabelle), 0x1e0-Eintrag mit ID 6, Reiter/Zeilen im Prefab. (Diese 5 Kategorien gehören zur Unterseite „Info-Anzeigen“.) **Einbauort festgelegt:** Seite „Anzeige“ (Skript `tools/menu_anz.txt`, Bild E:/kirby/menu6/run1/f02050.png): zwei Kacheln (Info-Anzeigen, Helligkeit) + Liste mit Symbol/Bezeichnung/Wertfeld (Schriftgröße, Einsteigertipps, Checklisten-Tipps, VS. Splitscreen, Farbfilter) → eigene Zeilen „Auflösung“, „Bildrate“, „Hochskalierung“ im selben Stil. Zuständig `f_700300b4e0`/`f_700300d3c0` (Hilfetexte der Zeilen). `f_700300d3c0` (919 Zeilen) verarbeitet die Liste fest mit 5 Zeilen (IDs 0–4, Abbruch bei >4): je Zeile ein Codeblock mit `f_7001973140`/`f_7001973d00`(…, ID) am globalen Optionsobjekt 0x70092bc000, am Ende `switch` (Sprungtabelle) wählt Hilfetext nach ID+Wert (TextSize, NoviceGuide On/Off, Checker On/Off, Sep V/H). → Eigene Zeilen brauchen eigenen Codeblock (Ersatzfunktion der Laufzeit für `f_700300d3c0` bzw. Zusatzaufruf) mit derselben Zeilen-Schnittstelle. `f_7001973140`/`f_7001973d00` = allgemeine Helfer (Referenzzähler, „hat Entity Komponente X“ über vtable+0x148, Typ-IDs global 0x700923b850/0x700923e1c8) → Zeilen sind Prefab-Entities, Code setzt nur Werte. Alle Zeilen-/Werttexte sind MSBT-Schlüssel (`Mnu_Opt_Disp_TextSize`=Schriftgröße, `_NoviceGuide`, `_Checker`, `_Sep` H/V, `_ColorFilter` 1–3, jeweils `_Help`). **Zwei Wege:** A) Prefab um Zeilen-Entities erweitern (Komponentenformat komplett nötig); B) „PC-Grafik“-Modus auf der Anzeige-Seite: Taste schaltet um, dieselben 5 Zeilen zeigen unsere Optionen über abgefangene Textsuche + Haken in `f_700300d3c0` (Werte lesen/setzen) – 1:1 Kirby-Optik ohne neue Entities. Empfehlung B zuerst. **Textsuche gefunden:** `f_7000001600(label, slots)` = MSBT-Label-Hash (h=h*0x492+c), `f_7000001300(msbt, label)` = Beschriftungssuche (LBL1 → Text-Index), ein Aufrufer. Haken für B: im PC-Modus Schlüssel der 5 Zeilen auf eigene Schlüssel umbiegen; eigene Texte per erweiterter MSBT (RomFS-Auslieferung, zstd) oder direkter Text-Abholung. **Text-Abholung:** `f_70011302c0(service, label)` ruft die Suche an 0x7001130310 und 0x70011303f8 (`bl f_7000001300`) und gibt deren Ergebnis zurück = **Zeiger auf UTF-16-Text** (0 → Ersatztext 0x7005de53fa); `f_7001130140` = „Text vorhanden?“. **Entwurf Weg B:** (1) Patch-Set `karmenu` (recomp/patches-kar458752.txt): beide `bl` → `bl <Patch-Seite+Slot>`, Host-Funktion (Muster runtime/dkb_camera.c `rt_register_host`) liefert im PC-Modus für umgebogene Schlüssel Zeiger auf eigene UTF-16-Texte in der Patch-Seite (+0x400…), sonst Original `f_7000001300`; (2) PC-Modus-Taste auf der Anzeige-Seite; (3) Werte: die 5 Zeilen speichern ihre Werte im Optionsobjekt des Spiels (0x70092bc000) und wirken teils sofort (Farbfilter, Schriftgröße) → beim Umschalten Spielwerte sichern, Zeilen als Stellvertreter für unsere Einstellungen nutzen (Wertebereich je Zeile 2–4), beim Verlassen übernehmen und Spielwerte zurückschreiben; Sofortwirkung im PC-Modus unterdrücken (zu prüfen). **Plan (1), 2026-11-12:** was: Text-Haken an 0x7001130310/0x70011303f8. warum: `bl` zur Patch-Seite 0x70093c0000 ist außer Reichweite (Abstand 130 MiB > 128 MiB). wie: neues Ersatzwort `@call:<Versatz>` in recomp/patches.py/gen.py = Aufruf der Seite+Versatz ohne ARM-Kodierung (gelifteter Code braucht keine Reichweite; nur als letztes Wort), Host-Funktion in runtime/kar_menu.c-Teil von dkb_camera-Muster (Slot +0x300), Set `karmenu` KAR_MENU Standard 1. Prüfen: Generator neu (nur main_0104.c ändert sich), Bau, Bild der Anzeige-Seite mit ersetztem Zeilentext. **Stand (1):** gebaut, Haken aktiv (Log `patches: karmenu on`); Bildprüfung offen (Menütests nur mit `TOTK_FPS_LIMIT=60`, bei 144 läuft menu_anz.txt aus dem Takt). **Befund Reiter:** Anzeige-Seite zeigt oben Reiter „Allgemein“ = `Mnu_Opt_Disp_OptMode_Cmn` (steht nur im Prefab, nicht im Code). Controller-Seite hat echte Modi (`Mnu_Opt_Ctrl_OptMode_Cmn`/`_MyName_Str`, L/R-Hinweise `_L_Guide`/`_R_Guide`), Code `f_70030155e0` (Modus-Flags Seite+0x8c0/0x8c1, Text setzen `f_7001127350(Textkomponente+0x98, Label, 0x18, 0)`, Name `f_7001974280`). → Natives Design für PC-Modus: Reiter „Allgemein“ ↔ „PC-Grafik“ per L/R wie Controller-Seite; Reitertext über den Text-Haken (`Mnu_Opt_Disp_OptMode_Cmn`). Offen: werden Texte nur beim Seitenaufbau geholt (dann Neuaufbau/erneutes Setzen über `f_7001127350` nötig)? → Messung KAR_MENU_LOG auf der Anzeige-Seite. **(1) ✅ verifiziert 2026-11-12** (E:/kirby/menu11/anzeige_aufloesung.png: Zeile zeigt „Auflösung“ im Spielstil). **Messung:** Seite holt jeden Text nur beim Aufbau (je 1–2×, Bild ~1907–1931); `f_700300d3c0` läuft auf der Seite gar nicht (frühere Zuordnung falsch); Text setzen = `f_7001127350(Ziel, Label, Länge, 0)`, 12 Aufrufe beim Aufbau; `0x7002fe7230` läuft jedes Bild ab Start (Szenen-Takt, Spiel-Thread). **Plan (2):** was: Umschalten „Allgemein“ ↔ „PC-Grafik“ mit L/R auf der Anzeige-Seite. warum: Texte werden nur beim Aufbau gesetzt → nach dem Umschalten selbst neu setzen. wie: Stelle A `f_7001127350`+0xc (`add x29`, danach `@call:310`) merkt sich (Ziel, Label) der Anzeige-Schlüssel; Stelle B `0x7002fe7230`+0x10 (`@call:320`) = Takt: L/R-Flanke (input_poll) schaltet `pc_mode`, setzt die gemerkten Texte über `rt_call(f_7001127350)` neu (Register gesichert); Text-Haken liefert im PC-Modus eigene Texte (Reiter „PC-Grafik“, Zeilen Auflösung/Bildrate/Hochskalierung/V-Sync/Fenstermodus). Schutz gegen freigegebene Seite: 32-Byte-Abbild des Ziels nach dem Setzen, nur bei Gleichheit neu setzen. Prüfen: Skript menu_anz + R, Bild. **Stand (2), 2026-11-12 (zurückgestellt, Nutzer: erst wichtige Punkte):** drei Stellen gebaut (`@call:310` Aufzeichnung in `f_7001127350` = Wertfelder/Hilfen, `@call:320` Takt in `0x7002fe7230`, `@call:330` Aufzeichnung in `f_70011333c0(Label-String, Textfeld)` = feste Prefab-Texte: Zeilennamen, Reiter, „Zurücksetzen“). Tasten über `input_game_buttons()` (ov_input.c, neu; `input_poll` hat Nebenwirkungen). Befunde: kurze Strings: Länge = 23 − Byte 0x17 (behoben, ungetestet); Gültigkeitsprüfung per 32-Byte-Abbild taugt nicht (Feld enthält Zeiger, die sich ändern) → stattdessen Seiten-Lebenszeit erkennen (z. B. Seitenobjekt/Destruktor oder Neuaufbau-Zähler) — offen. Testskript `E:/kirby/tools/menu_anz_r.txt` (Anzeige + R bei 2100/2300). Nächster Schritt: (1) bauen (Generator neu, Patch-Tabelle) und einen Zeilentext sichtbar ersetzen; Einbauweg: abgewandeltes Prefab beim Lesen über die RomFS-Schicht ausliefern (eigene Schaltfläche „PC-Grafik“ als Kopie von „Anzeigeeinstellungen“) + Code-Haken für ihre Aktion |
+| 15.2 | Laufzeit-Hook auf das Aufbauen der Optionsliste (übersetzte Funktion in `generated/` über `recomp`-Patch oder Hook-Tabelle): eigene Einträge anhängen | OHNE + SPIEL | ⬜ |
+| 15.3 | Eintragstypen des Spiels nutzen: Umschalter (An/Aus), Auswahl (◀ Wert ▶), Schieberegler; Texte über die Textdatenbank des Spiels (eigene Text-IDs einspielen, de/en) | OHNE + SPIEL | ⬜ |
+| 15.4 | Werte an die Port-Einstellungen binden (`cfg_set`/`cfg_value`), sofort wirkend wo möglich, sonst Hinweis „nach Neustart“ im Stil des Spiels | OHNE | ⬜ |
+| 15.5 | Neue Unterseite „Video“ (falls die Liste zu lang wird): eigener Menüpunkt im Optionen-Menü, der eine weitere Liste des Spiels öffnet | OHNE + SPIEL | ⬜ |
+| 15.6 | Steuerung/Tastenbelegung: zuerst nur ein Eintrag „Tastenbelegung…“, der das Port-Menü öffnet; später eigene Seite | OHNE + SPIEL | ⬜ |
+| 15.7 | Controller-, Maus- und Tastatur-Navigation genau wie im Spiel; Spiel speichert die eigenen Optionen weiter, unsere gehen in die Port-Konfig | SPIEL | ⬜ |
+| 15.8 | Absicherung: wenn Hook oder Layout nicht passt (andere Version), Einträge weglassen und das Overlay (14) anbieten, nie abstürzen | OHNE | ⬜ |
+| 15.9 | Test über alle Menüwege: Hauptmenü → Optionen, Pause im Rennen → Optionen, City Trial | SPIEL | ⬜ |
+
+Zwischenschritt, falls 15 länger dauert: das Overlay wie das Spielmenü gestalten (schräge Banner, Kartenlayout,
+Spielschrift aus dem Dump wie beim Tastensymbol-Font) und aus dem Pause-Menü des Spiels heraus öffnen.
+
+## 16. Performance-Architektur (Ziel: sehr performant, auch auf schwacher Hardware wie Ryzen 7 4750G)
+
+Prinzip: die Arbeit pro Draw auf der CPU fast auf null bringen, indem Vulkan so arbeitet wie die Switch-GPU (Texturen
+über Handles in einer Tabelle, Puffer über rohe Adressen). Beseitigt zugleich die Fehlerklasse „zu kleine Arrays /
+geratene Puffergrenzen“. Jeder Schritt wird vorher und nachher gemessen (Profil Render-/Spiel-Thread, fps,
+Replay-CPU-Zeit pro Frame).
+
+| # | Schritt | Kriterium | Art | Status |
+|---|---|---|---|---|
+| 16.0 | **Referenz SwitchRECOMP** (`refs/switch2recomp`, gelesen 2026-11-11): (a) dieselbe dmsh/MacNativeGames-Erbschaft wie wir; ihr Shader-ABI (`runtime/nvn/gfx/dmsh_abi.h`) beschreibt fertige Lösungen für unsere Rate-Lücken: `gmem_map` (Pool-Tabelle als Puffer unter cbuf-Slot 0xFF, Binärsuche, Zugriff per Physical-Storage-Pointer = Buffer Device Address, dazu Schreib-Log der GPU-Seiten) und `tex_pool`/`samp_pool` (Textur-/Sampler-Pool als Array, indexiert über die ID = Bindless); der Übersetzer liegt dort nur als fertige DLL vor. (b) Ihr Weg `renderer=vulkan` speist **Grafik-Methoden auf GPU-Ebene in Edens Vulkan-GPU** (`runtime/edenvk`, nur ~590 Zeilen Glue: map/unmap, method, draw, compute, present) – also Edens Buffer-/Textur-Cache und Shader-Übersetzer, die Kirby korrekt darstellen. Option für uns: statt eigener Bindless/BDA-Umbauten Eden als GPU-Backend anbinden (bräuchte GPU-Befehlsströme statt unserer NVN-API-Ebene) | Bewertung Eden-Backend (2026-11-11): SwitchRECOMP arbeitet auf GPU-Ebene (LLE): der NVN-Treiber des Spiels läuft mit, schickt Befehlspuffer über nvdrv/GPFIFO, ihre Laufzeit parst die Befehle (gpu.c, gpu_engines.c, Ampere→Maxwell, Makros, QMD) und gibt sie an Edens Engines. Wir arbeiten eine Ebene höher (NVN-API ersetzt, kein nvdrv/host1x/GPFIFO vorhanden). Laut ihrem CHANGELOG ist der Switch-2-Pfad unerprobt („no real Switch 2 shader has run yet“). Umstieg = NVN-HLE aufgeben, nvdrv (Switch-2-NvRmGpu), host1x, GPFIFO, Ampere-Engines, Eden video_core bauen: Monate, hohes Risiko, Leistung auf Eden-Niveau. **Empfehlung**: nicht umsteigen; deren ABI-Muster (gmem_map, tex_pool/samp_pool) in unseren Übersetzer/Laufzeit übernehmen (16.2/16.3); Eden-Backend als Rückfalloption | OHNE (Bewertung) | ✅ bewertet |
+| 16.1 | Baseline messen: Profil (`TOTK_PROFILE_RENDER`), fps, Replay-CPU-ms pro Frame im Rennen; später auch auf dem 4750G | Zahlen in dieser Tabelle | SPIEL | 🔶 |
+| 16.1a | **Ursache der Replay-Spitzen (300–650 ms)** gemessen mit `KAR_REPLAY_PROF=1` (vk_exec.c record_impl/walk, Zeit je Befehlsart; op_dispatch und gfx_shader_get aufgeteilt): 85–96 % der Spitze ist DISPATCH; davon ~70 % `shader_for` → `gfx_shader_get` → **Laden fertiger Compute-Shader von der Platte** (5–21 neue Schlüssel pro Spitzen-Frame, ~14 ms je Stück, 0 Übersetzungen, Lock 0), ~25 % Compute-Pipeline-Bau für diese neuen Shader. Grund: Shader-Cache des Dev-Builds = 100 585 Einzeldateien, **keine** `shader-cache.pack`. **Was/Warum/Wie:** Pack bauen (`tools/pack_shader_cache.py --keep`), gleiche Messung wiederholen; Ergebnis Pack: hilft nicht (14,5 GB kalt, Lesen 75 % / reflect 25 %). Eigentlicher Befund (offline, `tools/csvariants.py`, `tools/spvops.py`): 3256 Compute-Programme mit je ~1 Variante, aktuelle Compute-SPIR-V im Median **~1 MB** (7k Variablen, 17k Loads, 2k Bereichsvergleiche = Kandidaten-Prüfungen globaler Zugriffe; Verkleinerung = 16.3 BDA). Prewarm lädt nur Grafik (4704), Compute-Eingaben nur geprüft. **Was:** Compute-Prefetch bei `nvnProgramSetShaders`. **Warum:** erster Dispatch liest ~1 MB + baut Pipeline im Replay. **Wie:** gfx_shader_prefetch_cs: Hintergrund-Thread, Index gespeicherte CS-Eingaben (Hash Control+Code → Eingabe-ID), lädt Shader, Rückruf startet vk_pipeline_compute_async; Deckel `KAR_CS_PREFETCH_MB` (1024), `KAR_CS_PREFETCH=0` aus. **Messung 1 (rprof7):** 1% low 4,4–6,6 → 12,7 fps, Frames >100 ms ~42/50 s → 10/38 s; Deckel 1024 MB nach 1200 Shadern voll (2220 Programme ohne gespeicherte Eingabe = nie dispatcht). Rest: Shader jenseits des Deckels; Dispatch wartet hinter Prefetch-Warteschlange auf Pipeline (bis 337 ms) → Deckel 4096 (rprof12): 1% low 29 fps, aber 20,2 GiB privat. Fehler gefunden+behoben: Warteschlange verwarf Programme über 1024 (jetzt wachsend). SPIR-V nach Pipeline-Bau freigeben (`gfx_shader_drop_spirv`, Nachladen in `gfx_shader_spirv`, `KAR_CS_DROP_SPIRV=0` aus) + Gegendruck am Deckel statt Überspringen. **rprof15 (Standard 1024 MB): Rennen 1% low 35,1 fps, 0 Frames > 50 ms, Mittel 55,9 fps** (Ausgangslage 4–7 fps). Speicher: privat 17,6 GiB vs. 11,9 ohne Prefetch → zu viel für 16.9; Ursache ~5000 Compute-Pipelines + 1-GB-Puffer; nächster Schritt: Anteile trennen (Deckel 128), dann nur die nötigen Programme vorladen | Spitzen-Frames: disk-Zeit ≪ 1 ms je Shader; 1% low steigt | OHNE + SPIEL | 🔶 |
+| 16.2 | **Bindless-Texturen**: ein großer Deskriptor-Satz bildet Textur-/Sampler-Pool des Spiels 1:1 ab (nur bei Änderungen aktualisiert), Shader lesen per Handle-Index; ersetzt Material-Arrays und Handle-Übersetzung pro Draw | `bind_resources`/`tex_info` nicht mehr oben im Profil; Bild unverändert | OHNE + SPIEL | ⬜ |
+| 16.3 | **Buffer Device Address** für alle globalen Speicherzugriffe (Plan P3a–P3f) | keine Kandidaten-Hilfsfunktionen mehr (stubscan), Bild unverändert | OHNE + SPIEL | ⬜ |
+| 16.4a | **Messung vor dem Umbau (2026-11-12, Limit 144, Rennen ~66–70 fps):** kein Thread ausgelastet (`KAR_THREAD_CPU=1`, platform/win32.c `plat_thread_cpu_report`): vk recorder 61 %, Spiel-Threads 39–58 %. Render-Thread des Spiels: ~55 % Submit (Replay `walk` läuft auf ihm), ~39 % wartet im SDK auf den Logik-Thread → Gleichschritt, Engpass ist die Kette, nicht ein Kern. **Was/Warum/Wie:** vorhandenes `TOTK_REPLAY_ASYNC=1` (vk_backend.c: Submit/Present nur einreihen, eigener Replay-Thread, Spiel max. 1 Bild voraus) messen; erwartet: Spiel-Thread frei → mehr fps; Risiko laut NX2navi gelegentlich dunkler/flackernder Frame. **Ergebnis:** `TOTK_REPLAY_ASYNC=1` schlechter (56 statt 66–70 fps), bleibt aus. GPU im Rennen 6–8 ms/Bild (`TOTK_TRACE=perf`), Menüs schaffen 144. **Schritt 1 umgesetzt:** Material-Arrays (512 Einträge) per Block statt Wort für Wort lesen (vk_exec_draw.c `ubo_block`, auch `arr_sig_words`), leere Elemente kopieren den einmal gebauten Dummy-Deskriptor (`KAR_ARR_BLOCK=0` = alter Weg). A/B (`KAR_REPLAY_PROF=1`, neue Fensterzeile „replay X ms per frame, bind_resources Y“): Rennen Replay 12,06 → **9,55 ms**, bind_resources 8,45 → 6,11 ms. Schritt 2 (Inhalts-Cache für Descriptor-Sätze, `KAR_DS_CACHE`) **verworfen**: Fahrzeug-Vorschau im Menü zerhackt (g_std/g_noblk vs. g_nodc sauber), kein messbarer Gewinn → standardmäßig aus. Blocklesen geprüft: Bild sauber. Nächster Schritt: 16.2 Bindless (beseitigt Deskriptor-Schreiben und Textur-Suche pro Draw) | fps Rennen ↑, Bilder sauber | SPIEL | 🔶 |
+| 16.4 | **Replay parallel**: Befehlspuffer des Spiels auf mehreren Threads übersetzen (Secondary Command Buffers) | Replay-CPU-Zeit pro Frame sinkt mit Kernzahl | OHNE + SPIEL | ⬜ |
+| 16.5 | **Speicher direkt teilen** (Import-Modus) statt spiegeln, sobald 16.2/16.3 stehen | kein Spiegel-Abgleich im Profil; gleiche Bilder | SPIEL | ⬜ |
+| 16.6 | Feinarbeit nach Profil (Shader-Vorbau 13.3, heiße Spiel-Funktionen) | 60 fps stabil auf 5950X + RTX 4090 | SPIEL | ⬜ |
+| 16.7 | **Frame Generation** (AMD FSR 3, Open Source) als Menüoption für 120 fps Anzeige; Spiellogik bleibt 60 Hz | 120 fps angezeigt, Eingabe ok | OHNE + SPIEL | ⬜ |
+| 16.9 | **Zielsystem (Nutzer, 2026-11-12): Ryzen 7 4750G mit 32 GB RAM oder weniger** (iGPU teilt den RAM). Budget: Prozess privat ≤ 8 GiB, Arbeitsspeicher ≤ 6 GiB, kein Feature darf RAM gegen Glätte tauschen ohne Deckel (z. B. Compute-Prefetch 16.1a: SPIR-V nach Pipeline-Bau freigeben). Heute: 15,3 GiB privat / 9,8 GiB Arbeitsspeicher (rprof14) → größte Posten per Speicher-Zensus (4.7) finden und senken Beobachtung Soak-Anfang (soak1, mehrere Rennen, Frame 9000–12600): privat 17,4–18,5 GiB bei Arbeitsspeicher 7,6–7,9 GiB → privat wächst über Rennen (Commit für VRAM/Pipelines), prüfen | Budget eingehalten im Rennen | OHNE + SPIEL | ⬜ |
+| 16.10 | **Realistische Ziele + Hebel (Messung rmem2, 2026-11-12).** Speicher bei Frame 1800: privat 17,8 GiB = Gast-Speicher ≤ 4,6 GB (Untergrenze, das Spiel braucht das) + Vulkan VRAM 5,7 GB (VMA 2,1 GB, Rest Importe/Pipelines/Treiber) + Host-Heap 0,9 GB + Grafik-SPIR-V 0,5 GB + Pipeline-Cache 1,2→2 GB + kar.exe 0,4 GB + Rest ~3 GB unbekannt. **Hebel Speicher, Reihenfolge nach Wirkung/Aufwand:** (a) Pipeline-Cache-Datei nicht komplett im RAM halten/nicht 2 GB groß werden lassen (Compute-Pipelines raus, Treiber-Cache genügt) ~1–2 GB; (b) Grafik-SPIR-V nach Pipeline-Bau freigeben wie Compute ~0,5 GB; (c) Texturen BC-komprimiert statt entpackt (17.16) ~1 GB+; (d) VMA-Vorab-Blöcke (Headroom 256 MiB je Typ) nur auf dGPU ~0,5 GB; (e) Spiegel statt Import doppelt (16.5); (f) Rest ~3 GB aufschlüsseln. **< 8 GB ist knapp, aber erreichbar** (Untergrenze Gast 4,6 + Texturen/Puffer ~1,5 + exe 0,4 ≈ 6,5 GB). **Ziele fps:** RTX 4090 3440×1440: Spiellogik läuft fest mit 60 Hz → erst stabile 60 (heute Rennen Mittel 55, CPU-gebunden im Replay: 16.2–16.4), dann Frame Generation 2x = 120 fps; **144 nur mit FG 3x (RTX 50) oder entsperrter Spiellogik (Spiel-Patch, unsicher)** → Ziel 120 fest, 144 als Forschung. 4750G: 30 fps realistisch bei ~720p intern + FSR, nach 16.3 (Compute-Shader ~1 MB SPIR-V voller Bereichsprüfungen kosten GPU-Zeit); 60 nur mit 16.2–16.4 und niedriger Auflösung Ergebnisse: (a) eigener Pipeline-Cache für kar* standardmäßig aus (`KAR_APP_PIPELINE_CACHE=1` an): rmem4 privat 16,7 GiB (vorher 17,8), **Rennen 1% low 51,3 fps, Mittel 60,0, 0 Frames > 25 ms**; ohne Boot-Vorbau (rmem3) privat 13,8 GiB, Rennen 1% low 38 → die 3373 vorgebauten Grafik-Pipelines kosten ~2,9 GiB (~0,9 MB je Pipeline) → nächster Hebel: Vorbau gezielt (4.3) bzw. Pipeline-Speicher je Pipeline senken. Compute-Prefetch-Puffer Standard 128 MB (rprof16, gleich glatt). Weitere Messungen (rmem7–rmem12): VRAM-Vorab-Blöcke für kar* aus (−0,9 GB, gleich glatt), Grafik-SPIR-V nach Vorbau frei (Aufschub 5 s): privat 15,1 GiB. Speicherkarte (`KAR_MEM_MAP=1`, platform/win32.c `plat_mem_map_report`): 10,5 GB „sonstiger privater Speicher“, davon 4× ~1 GB = **Arenen des NVIDIA-Treibers** (Inhalt: Compiler-Interna, `__cuda_sm70_*`), wachsen mit der Zahl erzeugter Pipelines (nicht mit Builder-Threads: `KAR_CS_WORKERS=1` gleich); 240 MB = Dispatch-Tabelle. **Gebaut vs. benutzt bis Frame 1800: Compute 2399/97, Grafik 3373/161** (~0,85 MB Treiber-RAM je Pipeline). **Was/Warum/Wie nächster Schritt:** Nutzungsliste über Sitzungen (wie NX2navi „play cache“): `cs-used.bin` (Eingabe-IDs, die ein Dispatch nutzte, mit Sitzungszähler); Prefetch nur für in den letzten 8 Sitzungen genutzte; danach dasselbe für den Grafik-Vorbau (`pipeline-keys.bin` filtern). Erwartung: ~6 GB weniger. **Umgesetzt + gemessen:** `cs-used.bin` (gfx_shader.c, Prefetch nur genutzte Compute-Eingaben der letzten 8 Sitzungen, `KAR_CS_PREFETCH_ALL=1` alles) und `pipeline-used.bin` (vk_pipeline.c `pu_note`/`pu_save`, Vorbau nur genutzte Einträge, `KAR_PIPE_PREWARM_ALL=1` alles; nur kar*). Ab Sitzung 2: Vorbau 186 statt 3373, Start 0,9 s statt 1,8 s; Sitzung 3 (rmem15): **privat 10,6 GiB, Arbeitsspeicher 6,7 GiB, Rennen 1% low 42,1 / Mittel 57,9 fps, 1 Frame > 50 ms** (Streuung zwischen Läufen ±10 fps 1% low; Rest-Spitzen in der Ladephase; Rennen-Spitzen 35–41 ms = Replay-CPU → 16.2–16.4). Aufschlüsselung rmem16: Gast 4,75 GB, exe/DLLs 0,69, NVIDIA-Arenen 1,3 (vorher 4), Dispatch-Tabelle 0,24, ~4,4 GB 32-MB-Blöcke zu 1 % resident = Commit-Deckung für VRAM (Windows zählt VRAM aufs Commit-Limit), VRAM-Treibernutzung 3,3 GB. **Auf der 4090 zählt der Arbeitsspeicher: 6,7 GiB < 8.** Auf dem 4750G ist VRAM = RAM: geschätzt Gast 4,75 + exe 0,7 + Treiber + VRAM-Inhalt ~3 → ~9–10 GB; weitere Hebel dort: Texturen BC-komprimiert (17.16), kleinere interne Auflösung (Render-Ziele), Dispatch-Tabelle zweistufig (−0,2), Messung auf dem Gerät selbst (AMD-Treiber hat andere Arenen). Hinweis: `kar_shot_check` meldet bei hellen Szenen (Median 0,79–0,89) fälschlich RAINBOW (rmem4 f04500 geprüft: sauber) | Werte je Hebel gemessen | OHNE + SPIEL | 🔶 |
+| 16.11 | **Hohe Bildraten ohne Frame Generation (Weg für 144 fps auf 4090):** DKB hat das schon für Bananza (`docs/dkb-frame-rate.md`): Option „Spielgeschwindigkeit folgt der Uhr“ (`DKB_REALTIME`), Patch des Frame-Zeit-Reglers des Spiels (Patch-Tabelle, Werte 30–360 fps, getestet bis 240 auf RTX 5090; Host-Taktgeber `runtime/frame_rate.c` aus TotK). Für Kirby: dessen Regler (Präsentationsintervall + Zeitschritt-Erzeuger) im Code finden, gleiches Patch-Muster; Risiken wie dort (Kamera-Glättung, Physik bei kleinen Schritten, Replays/Online-Gleichlauf) **Messung 1 (pace30, `KAR_PACE_HZ=30` in nvn_api_obj.c present_period, nur Diagnose):** Rennuhr im HUD zwischen Frame 4400 und 4600 = 6,75 s bei ~6,7 s Echtzeit (bildgebunden wären es 3,33 s) → **Kirby rechnet mit gemessener Echtzeit, nicht pro Bild**; vermutlich kein Spiel-Patch nötig, nur die Laufzeit muss über 60 präsentieren dürfen. **Messung 2:** Kirby wartet pro Bild auf das Vsync-Ereignis (fest 60 Hz) → mit Ereignis bei 144 Hz Menüs 69–86 fps. **Umgesetzt (ohne Spiel-Patch):** frame_rate.c `frame_rate_self_timed` (kar*) und `frame_rate_vsync_hz`: Präsentation (nvn_api_obj.c present_period) und Vsync-Ereignis (gfx_present.c vsync_main, Zeitplan-Neustart bei Ratenwechsel) folgen dem Limit (`TOTK_FPS_LIMIT` 30–360/Monitor, live); Skript-Uhr folgt über 60 fps der Echtzeit (bei ≤ 60 wie bisher). **Messung 3 (lim144b, Limit 144):** Rennuhr 15,21 s bei 15,195 s Echtzeit (1,001), Menüs 86 fps, **Rennen ~66 fps = Replay-CPU-Grenze (15–22 ms/Frame)** → 144 im Rennen braucht 16.2–16.4 (Replay < 7 ms). Offen: Kamera/Physik/Replays bei > 60 fps im Spiel gefühlt prüfen (du), Diagnose `KAR_PACE_HZ`/`KAR_VSYNC_HZ`/`KAR_PACE_FROM` bleiben | Rennen bei 144 Cap: Spielzeit/Echtzeit 1,00 ✅, 144 fps erreicht ⬜ | OHNE + SPIEL | 🔶 |
+| 16.12 | **Hinweise aus Fritchii `NX2_NOTES.md`** (Eden-Fork für Switch-2-Titel, gelesen 2026-11-12): (a) #111/#127 das Spiel liest den Systemtakt (CNTPCT) beim Warten auf die GPU millionenfach/s; auf AMD ohne CPUID 0x15 ging jeder Lesezugriff über QueryPerformanceCounter (~10–23 % des Hauptkerns) → unser `rt_ticks()` messen (wichtig für 4750G); (b) #97 Detailstufen über Task-/Mesh-Programme, abgewiesen = Pop-in/Flackern → prüfen, ob Kirby solche Programme hat; (c) #58 bedingtes Rendern über zwei Abfragezähler bestätigt (bei uns über NVN-API umgesetzt) (a) Stand: `rt_ticks()` = QueryPerformanceCounter je Zugriff (main.c), Zugriffszahl im Spiel noch nicht gemessen | je Punkt gemessen | OHNE + SPIEL | ⬜ |
+| 16.8 | Linux (RADV) + AMD-APU-Test (Ryzen 7 4750G), siehe 11.3 | läuft; Zielwerte nach Messung | SPIEL (anderer PC) | ⬜ |
+
+## 17. Feature-Ziele (Liste vom Nutzer, 2026-11-12)
+
+Abgleich mit dem Plan: „teilweise in“ = verwandter Punkt existiert, deckt aber nicht alles ab. „Code da?“ = Stichwortsuche im Runtime-Code (DKB-Erbe), Wirkung bei Kirby noch nicht geprüft.
+
+| # | Feature | Bezug im Plan | Code da? | Art | Status |
+|---|---|---|---|---|---|
+| 17.1 | Nativer Code statt Emulation | Grundlage des Projekts | ja | – | ✅ |
+| 17.2 | 60 fps Standard; Limit 30–240 fps, Monitor-Bildrate oder unbegrenzt | teilweise in 14.5 | `FPS_LIMIT` | OHNE + SPIEL | ⬜ |
+| 17.3 | Breitbild und Ultrawide (Fensterform, 21:9, 32:9), HUD, Menüs und Filme bleiben 16:9 | teilweise in 14.10 | `ULTRAWIDE` | OHNE + SPIEL | ⬜ |
+| 17.4 | Auflösungen 1080p bis über 1440p: 1800p, 4K, 5K oder Fenstergröße; scharf bei High-DPI | teilweise in 14.2, 14.6, 14.8 | teilweise | OHNE + SPIEL | ⬜ |
+| 17.5 | Hochskalierung/AA: DLSS (DLAA, Quality, Balanced, Performance, Ultra Performance; RTX), FSR 3.1 (Native AA + Modi; jede GPU), FSR 4 (RX 6000/7000/9000); 3D-Szene in Modus-Auflösung, HUD scharf; alternativ FSR 1 oder bilinear mit Schärfe; schwarze Balken oder strecken | teilweise in 5.1, 14.7 (FSR 1, bilinear, Schärfe) | DLSS-Erwähnungen, FSR 3/4 nein | OHNE + SPIEL | ⬜ |
+| 17.6 | Frame Generation: DLSS FG (RTX 40/50, Reflex) 2x, auf RTX 50 3x/4x; FSR 3.1 FG (jede GPU); HUD ausgenommen; bei anderer Fensterform nur im Bild (Balken sauber); Limit zählt Spiel-Frames; Limit an RTSS übergeben | teilweise in 16.7 (nur FSR 3) | nein | OHNE + SPIEL | ⬜ |
+| 17.7 | HDR, zwei Arten: Szene auf Spitzenhelligkeit tonemappen (Mittelgrau/Ton des Spiels, echtes Schwarz) oder natives HDR des Spiels; Spitze, Spiel- und HUD-Helligkeit im Menü | neu | HDR-Code vorhanden | OHNE + SPIEL | ⬜ |
+| 17.8 | Bekannte Shader beim Build vorbereitet, im Spiel gefundene Pipelines bei jedem Start im Hintergrund neu gebaut; nie auf dem Zeichen-Thread kompilieren (Worker) | teilweise in 4.2, 13.3, 16.1a (Compute-Prefetch) | Grafik ja, Compute nein | OHNE + SPIEL | 🔶 |
+| 17.9 | Einstellungsmenü im Spiel (F1 oder Minus+Plus am Pad), Leistungsanzeige (F10) | teilweise in 14.11, 15 | Port-Menü ja | SPIEL | ⬜ |
+| 17.10 | Tastatur, Maus, Gamepads mit Umbelegung; Nintendo-/Xbox-/PlayStation-Layout; Vibration, Gyro; Spiel folgt dem zuletzt gedrückten Pad; DualShock 3 direkt (abschaltbar) | teilweise in 8.2–8.5 | Rumble, Gyro, DS3 | SPIEL (du) | ⬜ |
+| 17.11 | Tastensymbole Xbox, PlayStation, Steam Deck, Tastatur/Maus im Spieltext, beim Build gezeichnet; Tastatur-Symbole folgen der Belegung | teilweise in 2.1, 8.3 | Prompt-Code vorhanden | OHNE + SPIEL | ⬜ |
+| 17.12 | Stereo oder 5.1 auf wählbarem Ausgabegerät; Standard-Mikrofon als Mikrofon-Eingang des Spiels | teilweise in 9.1, 9.6 (Mikrofon neu) | Ausgabe ja | OHNE + SPIEL | ⬜ |
+| 17.13 | Wahl des Monitors; direkt im Vollbild starten, wenn Vollbild an | teilweise in 11.1, 14.3 | Monitor-Code vorhanden | SPIEL | ⬜ |
+| 17.14 | Discord-Status mit Originaltitel, Original-Icon und Spielzeit (Standard an, abschaltbar im Spiel-Tab und im Launcher) | neu | nein | OHNE + SPIEL | ⬜ |
+| 17.15 | Konsolenmodus TV oder Handheld wählbar | neu | Docked/Handheld-Code vorhanden | SPIEL | ⬜ |
+| 17.16 | Texturen bleiben komprimiert (BC3, halber VRAM, gleiche Geschwindigkeit), außer bei 20 GiB VRAM und 48 GiB RAM (Windows rechnet VRAM aufs Commit-Limit) | neu, betrifft 4.1, 4.7 | BC3-Code vorhanden | OHNE + SPIEL | ⬜ |
+
+## Reihenfolge
+
+1. **Jetzt dran** (Tabelle oben): D8 Schattenkarte (1.11) zurückgestellt (Konsolenbild nötig), 1.8 Bloom ✅ gemessen.
+2. (Nutzer 2026-11-12: Absturzprüfungen ans Ende, siehe 7.) Performance zuerst.
+3. Performance-Architektur 16.1–16.6 (größter Leistungshebel, beseitigt auch die Fehlerklasse „zu kleine Arrays/Puffer“).
+4. Optionen/Menü 5.3, 14.x, dann Modi 7.x, Audio 9.x, Fenster 11.x.
+5. Feature-Ziele 17.x (zuerst die mit vorhandenem Code: 17.2, 17.3, 17.7, 17.15, 17.16 prüfen).
+6. Release 6.x, 13.x; Wunsch 15.x (echtes Spiel-Menü) und 16.7/16.8 (Frame Generation, Linux) zuletzt.
+7. Ganz am Ende (Nutzer, 2026-11-12): Absturzprüfungen 3.2 (alle Modi; Skripte vorbereitet: `E:/kirby/tools/mode_top.txt`, `mode_city.txt`, `mode_road.txt` = Hauptmenü → Modus → A alle 150 Bilder, Aufruf `kar_race_test.ps1 -Script … -Shots 1200-6000:600 -ShotCount 9 -Env 'TOTK_FPS_LIMIT=60'`), 3.3, 3.5, 3.6, 12.x, dann 15.x Rest (Stand (2) in 15.1: Lebenszeit der Anzeige-Seite erkennen, Kurz-String-Fix testen, Werte 15.3/15.4), dann Langzeittests 3.4 (60 min) und 12.5 (Nacht-Soak). Vorbereitet: `tools/soak60.txt`, `kar_race_test.ps1 -MaxMinutes`.

@@ -80,7 +80,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # them. MAIN_ROOT is where they land, so resolved paths still print and compare relative to a root.
 MAIN_ROOT = (ROOT / 'build').resolve().parent
 UCRT = Path(r'C:\msys64\ucrt64\bin')
-EXE = 'dkb.exe' if WIN else 'dkb'   # DKB Recomp: not TotK's executable
+EXE = 'kar.exe' if WIN else 'kar'   # Kirby Air Riders Recomp (was dkb.exe in DKB Recomp)
 
 
 def on_path(name):
@@ -227,6 +227,14 @@ def read_layout(gen):
     return [(m['name'], int(m['base'], 16), int(m['size'], 16)) for m in data]
 
 
+def read_nro_layout(gen):
+    """[(name, base, size)] from nro_layout.json (recomp/gen.py --nro), [] when the game has no lifted NROs."""
+    path = gen / 'nro_layout.json'
+    if not path.is_file():
+        return []
+    return [(m['name'], int(m['base'], 16), int(m['size'], 16)) for m in json.loads(path.read_text())]
+
+
 def chunk_files(gen, mod):
     """The C files of one module: the chunks listed in <mod>/manifest.json, then <mod>_table.c."""
     d = gen / mod
@@ -307,19 +315,30 @@ def runtime_object(out, src):
     return out / 'obj' / 'runtime' / rel.with_suffix('.o')
 
 
-def module_glue(layout, linked, hashes, paths, version, expected=None):
-    """C for build/<version>/modules.c: the layout table, the linked modules' function tables (dispatch.h), the
-    expected ExeFS hashes, the game version and its display name, and the default game paths (host.h). expected is the
-    validated tools/data/expected-<version>.json, whose display_version names the build."""
+def module_glue(layout, linked, hashes, paths, version, expected=None, nros=()):
+    """C for build/<version>/modules.c: the layout table, the NRO table (nros, from nro_layout.json; mapped at
+    nn::ro::LoadModule), the linked modules' function tables (dispatch.h), the expected ExeFS hashes, the game version
+    and its display name, and the default game paths (host.h). expected is the validated
+    tools/data/expected-<version>.json, whose display_version names the build."""
     out = [f'// Module glue written by tools/build_game.py; do not edit. {GENERATED_MARKER}',
-           '#include "dispatch.h"', '#include "host.h"', '#include "layout.h"', '']
-    for name, base, size in layout:
+           '#include "dispatch.h"', '#include "host.h"', '#include "layout.h"']
+    if nros:
+        out.append('#include "nro_layout.h"')
+    out.append('')
+    for name, base, size in list(layout) + list(nros):
         u = name.upper()
         out.append(f'_Static_assert(MOD_{u}_BASE == {base:#x}ull && MOD_{u}_SIZE == {size:#x}ull, '
-                   f'"layout.h and layout.json disagree on {name}");')
+                   f'"the layout headers and their JSON disagree on {name}");')
     out += ['', 'const RtLayoutEntry rt_layout[] = {']
     out += [f'    {{"{n}", MOD_{n.upper()}_BASE, MOD_{n.upper()}_SIZE}},' for n, _, _ in layout]
     out += ['};', f'const int rt_layout_count = {len(layout)};', '']
+    if nros:
+        out += ['const RtLayoutEntry rt_nro_layout[] = {']
+        out += [f'    {{"{n}", MOD_{n.upper()}_BASE, MOD_{n.upper()}_SIZE}},' for n, _, _ in nros]
+        out += ['};']
+    else:
+        out += ['const RtLayoutEntry rt_nro_layout[1] = {{0}};']
+    out += [f'const int rt_nro_layout_count = {len(nros)};', '']
     for name in linked:
         out += [f'extern const uint64_t {name}_fn_addrs[];', f'extern const GuestFn {name}_fn_ptrs[];',
                 f'extern const uint64_t {name}_fn_count;']
@@ -429,7 +448,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         o = runtime_object(out, src)
         if src.suffix == '.rc':   # windres writes no depfile: the files totk.rc embeds are listed by hand
             lines.append(f'build {ninja_path(o)}: rc {ninja_path(src)} | {ninja_path(RUNTIME / "totk.manifest")} '
-                         f'{ninja_path(RUNTIME / "dkb.ico")}')
+                         f'{ninja_path(RUNTIME / "kar.ico")}')
         else:
             lines.append(f'build {ninja_path(o)}: cc_rt {ninja_path(src)}')
             if src.suffix == '.cpp':   # the Ampere lowering headers (runtime/third_party/eglantine) need C++20
@@ -861,12 +880,14 @@ def main():
         sys.exit(f'{gen / "layout.json"} not found: run the generator first')
 
     layout = read_layout(gen)
+    nros = read_nro_layout(gen)
     names = [n for n, _, _ in layout]
-    wanted = args.modules.split(',') if args.modules else names
-    unknown = [m for m in wanted if m not in names]
+    nro_names = [n for n, _, _ in nros]
+    wanted = args.modules.split(',') if args.modules else names + nro_names
+    unknown = [m for m in wanted if m not in names + nro_names]
     if unknown:
-        sys.exit(f'unknown modules {unknown}; the layout has {names}')
-    linked = [m for m in names if m in wanted]
+        sys.exit(f'unknown modules {unknown}; the layout has {names}, the NRO layout {nro_names}')
+    linked = [m for m in names + nro_names if m in wanted]
     mods = {m: chunk_files(gen, m) for m in linked}
 
     cpus = os.cpu_count() or 1
@@ -875,7 +896,7 @@ def main():
     missing = [n for n in names if n not in hashes]
     if missing:
         sys.exit(f'{expected}: no exefs_sha256 for {missing}')
-    write_if_changed(out / 'modules.c', module_glue(layout, linked, hashes, paths, args.version, expected_data))
+    write_if_changed(out / 'modules.c', module_glue(layout, linked, hashes, paths, args.version, expected_data, nros))
     if (paths['romfs'] / 'index.json').is_file():
         count, size, dt = romfs_index.write(paths['romfs'], out)
         print(f'romfs index: {count} files, {mib(size)}, {dt:.1f} s')

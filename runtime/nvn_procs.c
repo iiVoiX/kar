@@ -50,6 +50,8 @@ void nvn_procs_register(void) {
 
 uint64_t nvn_proc_address(const char *name) {
     if (!name) return 0;
+    extern void kar_dlss_force(void);   // KAR_FORCE_DLSS (nvn_api_dlss.c)
+    kar_dlss_force();
     const Proc *p = bsearch(&(Proc){name, 0}, procs, (size_t)nprocs, sizeof *procs, by_name);
     if (p) return p->addr;
     // Unknown names get NULL, as on hardware; each distinct one is logged once.

@@ -183,6 +183,10 @@ void ldr_load(const char *exefs_dir);                      // load, relocate (ov
 int ldr_count(void);
 const RtLoaded *ldr_module(int i);                         // order: main, subsdk0, sdk
 uint64_t ldr_symbol(const char *name);                     // exported definition, 0 if none
+// An NRO image the game passes to nn::ro::LoadModule, mapped at its rt_nro_layout base (matched by image size), relocated
+// against the loaded modules and sealed, once; then counted by ldr_count. Its DT_INIT is the caller's to run.
+const RtLoaded *ldr_map_nro(const void *image, size_t len);
+uint64_t ldr_module_symbol(const RtLoaded *m, const char *name);   // m's own exported definition, 0 if none
 uint64_t ldr_plt_stub(const char *module, const char *name); // PLT stub whose GOT slot holds name, 0 if none
 const char *ldr_describe(uint64_t a, char *buf, int n);    // "main+0x1234 (symbol+0x10)", "host <name>", or the address
 uint8_t *ldr_read_verified(const char *dir, const char *file, size_t *len);   // whole file, SHA-256 checked against
@@ -195,6 +199,7 @@ extern const int rt_exefs_sha256_count;
 extern const char rt_default_exefs[], rt_default_romfs[], rt_default_profile[];
 extern const int rt_game_version;                          // the game build: 111 (1.1.1), 121 (1.2.1) or 143 (1.4.3)
 extern const char rt_game_target[];                        // build target, including dkb100 and dkb458752
+int rt_game_is_kar(void);                                  // Kirby Air Riders (any kar* target): the one place that asks
 extern const char rt_game_display[];                       // the same version as a release name: 1.4.3, 1.0.0+458752
 extern const char rt_port_version[];                       // VERSION at the build's root: 0.1.0, 0.1.0+973c626 in a release
 #define RT_V111 (rt_game_version == 111)                    // 1.1.1: its own boot constants and data slots
@@ -280,8 +285,11 @@ void rt_patch_disable(int set);                            // before the guest s
 void rt_patch_switch(int set, int on);                     // at run time (live settings): each site takes the new code
                                                            // the next time it runs
 void *rt_patch_page(void);                                 // the page the patched code reads (NULL without the table)
+void kar_menu_init(void);                                  // Kirby options-menu text hook (kar_menu.c), before hostfn_seal
 void dkb_camera_init(void);                                // camera patch callbacks, before hostfn_seal
 void frame_step_init(void);                                // after rt_patches_init: the real-time step's first value
+int frame_rate_self_timed(void);                          // the game steps by measured time (Kirby): presents follow the limit
+double frame_rate_vsync_hz(void);                          // the vsync event rate: 60, or the limit for a self-timed game
 int frame_step_realtime(void);                             // the real-time step is on: presents ignore the interval
 uint64_t frame_step_cap_ns(void);                          // with the real-time step: the shortest frame in ns
 double frame_step_limit_hz(void);                         // the frame rate the limit gives (overlay); 0 unknown

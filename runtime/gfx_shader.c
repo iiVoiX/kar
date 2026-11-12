@@ -114,6 +114,7 @@ struct GfxShader {
     int has_c0;
     uint64_t origin;                                       // NVN 2 stage origin, set by note_origin (DKB_DUMP_SPV naming only)
     uint64_t spirv_fnv;                                    // FNV-1a 64 of spirv; 0 until gfx_shader_spirv_fnv fills it
+    volatile int32_t used_noted;                           // compute: entered in this session's used list (cs-used.bin)
 };
 
 static PlatMutex cache_lock = PLAT_MUTEX_INIT;                  // memory cache
@@ -612,7 +613,10 @@ static int spirv_complete(const uint32_t *w, uint64_t n) {
 
 // Reads <key>.spv and <key>.res.json from the pack (packed 1) or the loose files; NULL if either is missing or
 // malformed. iid: the input id, NULL when the caller sets it.
+static __thread int rp_cs;   // KAR_REPLAY_PROF: get_one is loading a compute stage (gfx_rp[8..9]: read, check+reflect)
+extern uint64_t gfx_rp[10];
 static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int packed, int flags) {
+    uint64_t q0 = rp_cs ? plat_now_ns() : 0;
     static volatile int32_t n_bad;
     char hex[65], p[PATH_CAP + 80];
     key_hex(key, hex);
@@ -628,6 +632,8 @@ static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int 
     }
     snprintf(p, PATH_CAP + 80, "%s/%s.spv", cache_dir, hex);
     uint8_t *spv = packed ? pack_read(PACK_SPV, key, &spv_size) : read_file(p, &spv_size);
+    uint64_t q1 = q0 ? plat_now_ns() : 0;
+    if (q0) gfx_rp[8] += q1 - q0;
     uint32_t magic = 0;
     if (spv && spv_size >= 20) memcpy(&magic, spv, 4);
     if (!spv || spv_size % 4 || magic != 0x07230203 || !spirv_complete((const uint32_t *)spv, spv_size / 4)) {
@@ -641,7 +647,9 @@ static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int 
     s->words = spv_size / 4;
     s->reflection = (char *)res;
     s->reflection_size = res_size;
-    if (!reflect(s, flags)) { shader_free(s); return NULL; }
+    int ok = reflect(s, flags);
+    if (q0) gfx_rp[9] += plat_now_ns() - q1;
+    if (!ok) { shader_free(s); return NULL; }
     return s;
 }
 
@@ -916,17 +924,351 @@ static void add_res(GfxShader *s, int kind, const char *o, const char *e) {
     r->type = (uint16_t)json_int(o, e, "type", 0);
     r->format = (uint8_t)fmt_code(buf);
     r->flags = (uint8_t)json_int(o, e, "flags", 0);
-    r->cbuf_slot = (int8_t)json_int(o, e, "cbuf_slot", -1);
+    // cbuf_slot is Ryujinx's TextureHandle.PackSlots: the texture buffer in the low 16 bits, the sampler buffer + 1
+    // above (0: the same buffer). -1 stays -1.
+    long long packed = json_int(o, e, "cbuf_slot", -1);
+    int tex_cb = packed < 0 ? -1 : (int)(packed & 0xffff), samp_cb = packed < 0 ? -1 : (int)(packed >> 16) - 1;
+    if (packed >= 0 && samp_cb < 0) samp_cb = tex_cb;
+    r->cbuf_slot = (int8_t)tex_cb;
     int handle = (int)json_int(o, e, "handle", 0);
     r->handle = (uint16_t)handle;
     r->count = (uint16_t)json_int(o, e, "array", 1);
     r->separate = sep && *sep == 't';
-    r->slot = (int16_t)handle_slot(kind, r->cbuf_slot, handle, r->separate);
+    r->arr_ubo = 0, r->from_img = 0, r->pool_arr = 0, r->c0_byte = 0, r->samp_tbl = 0;
+    // Ryujinx's "Direct" handle (TextureHandle 0x40000000, QueryTextureArrayLengthFromPool = 32): the whole texture or
+    // sampler pool as an array, indexed by the handle's id. Kirby Air Riders has 41 fragment shaders whose handle is a
+    // phi of c2 handles. pool_patch makes the index id & 31 and finds the c2 words the shader reads; the replay fills
+    // element id & 31 from them (vk_exec_draw.c bind_resources).
+    if (kind == GFX_RES_TEX && handle == 0x40000000 && r->count == 32) {
+        r->pool_arr = 1, r->slot = -1, r->samp_slot = -1;
+        return;
+    }
+    // Ryujinx BindlessToArray (BindlessToArray.cs RunPass): a texture indexed through handles in an ordinary constant
+    // buffer. Kirby Air Riders' materials keep up to 32 handles in c5..c8; the sampler, when separate, is a c2 word
+    // (handle type SeparateSamplerHandle at bit 28, its word offset in bits 14..27). The replay reads the element
+    // handles from the bound buffer (vk_exec_draw.c bind_resources).
+    if (kind == GFX_RES_TEX && tex_cb >= 3 && tex_cb - 3 < 18) {
+        r->arr_ubo = 1;
+        r->samp_slot = -1;
+        int type = (int)((unsigned)handle >> 28), sb = ((handle >> 14) & 0x3fff) * 4;
+        if (type == 1 && samp_cb == 2 && sb >= 0x568 && sb < 0x668) r->samp_slot = (int8_t)((sb - 0x568) / 8);
+        // NVN 2 compute: the separate sampler handle is a c0 word in the packed bank's texture table (Kirby Air Riders'
+        // local-light compute, handle 0x10090000: sampler at c0 byte 0x90). Its entry index is the bind slot the
+        // replay reads the sampler from (vk_exec_draw.c bind_resources); without this the array got sampler 0.
+        if (type == 1 && samp_cb == 0 && s->has_c0) {
+            int at = (int)nvn2_c0_part(&s->c0, 3), n = s->c0.textures;
+            if (sb >= at && sb < at + 8 * n && (sb - at) % 8 == 0) r->samp_slot = (int8_t)((sb - at) / 8), r->samp_tbl = 1;
+            else {
+                static int told;
+                if (told++ < 8) rt_log("gfx_shader: array sampler at c0 byte %#x outside the texture table", sb);
+            }
+        }
+        r->slot = -1;
+        return;
+    }
+    // A handle with a second offset above bit 14 (and a handle type at bit 28) names a texture and a separate sampler:
+    // its texture half is a separate-texture entry (c2 0x168 and up), whether or not the reflection marked it separate.
+    // Kirby Air Riders' NVN 2 programs read textures this way (handle 0x1056805a: texture at c2 0x168).
+    // The two 14-bit halves come in either order (0x1056805a: texture 0x168 low, sampler 0x568 high; 0x1016815a: the
+    // reverse), so the half in the separate-texture range names the texture.
+    // The descriptor type must stay as the SPIR-V declares it (r->separate from the reflection): a combined sampler
+    // declared over a split handle takes its texture from the separate-texture slot and its sampler from the
+    // separate-sampler slot (r->samp_slot), which the replay looks up (vk_exec_draw.c bind_resources).
+    r->samp_slot = -1;
+    int split_tex = 0;
+    if (kind != GFX_RES_IMG) {
+        int lo = (handle & 0x3fff) * 4, hi = ((handle >> 14) & 0x3fff) * 4;
+        int lo_tex = lo >= 0x168 && lo < 0x568, hi_tex = hi >= 0x168 && hi < 0x568;
+        int lo_samp = lo >= 0x568 && lo < 0x668, hi_samp = hi >= 0x568 && hi < 0x668;
+        if (!lo_tex && hi_tex) {
+            if (lo_samp) r->samp_slot = (int8_t)((lo - 0x568) / 8);
+            handle = (handle >> 14) & 0x3fff, split_tex = 1;
+        } else if (lo_tex) {
+            if (hi_samp) r->samp_slot = (int8_t)((hi - 0x568) / 8);
+            split_tex = 1;
+        }
+    }
+    r->slot = (int16_t)handle_slot(kind, r->cbuf_slot, handle, r->separate || split_tex);
+    if (r->slot < 0) {   // KAR diagnostic: where the shader reads a handle no c2 slot covers
+        static int told;
+        if (told++ < 24)
+            rt_log("gfx_shader: %s handle outside the c2 slots: cbuf_slot %d handle %#x (byte %#x) separate %d has_c0 %d",
+                   kind == GFX_RES_IMG ? "image" : "texture", r->cbuf_slot, handle, (handle & 0x3fff) * 4, r->separate,
+                   s->has_c0);
+    }
     if (s->has_c0 && (r->cbuf_slot <= 0 || r->cbuf_slot == 2)) {   // NVN 2 compute: packed-bank handles, 8 bytes each
         int bytes = (handle & 0x3fff) * 4, at = (int)nvn2_c0_part(&s->c0, kind == GFX_RES_IMG ? 4 : 3);
         int n = kind == GFX_RES_IMG ? s->c0.images : s->c0.textures;
         r->slot = (int16_t)(bytes >= at && bytes < at + 8 * n && (bytes - at) % 8 == 0 ? (bytes - at) / 8 : -1);
+        // A texture handle in the image range (the translator's TexSlot accepts it there too): the texture path reads
+        // that image, as on the console where images register in the texture pool.
+        int ia = (int)nvn2_c0_part(&s->c0, 4);
+        if (kind == GFX_RES_TEX && r->slot < 0 && bytes >= ia && bytes < ia + 8 * s->c0.images && (bytes - ia) % 8 == 0)
+            r->slot = (int16_t)((bytes - ia) / 8), r->from_img = 1;
+        // Still unmatched: remember where the handle word is in c0, for the KAR_C0_TEX experiment.
+        if (kind == GFX_RES_TEX && r->slot < 0 && r->cbuf_slot <= 0 && bytes > 0 && bytes + 4 <= (int)NVN2_C0_BYTES)
+            r->c0_byte = (uint16_t)bytes;
+        if (r->slot < 0) {   // KAR diagnostic: the packed layout this handle missed
+            static int told2;
+            if (told2++ < 40)
+                rt_log("gfx_shader: NVN 2 %s handle byte %#x unmatched: roots %u %u %u %u %u %u %u %u ubos %u ssbos %u "
+                       "textures %u (at %#zx) images %u (at %#zx)", kind == GFX_RES_IMG ? "image" : "texture", bytes,
+                       s->c0.roots[0], s->c0.roots[1], s->c0.roots[2], s->c0.roots[3], s->c0.roots[4], s->c0.roots[5],
+                       s->c0.roots[6], s->c0.roots[7], s->c0.ubos, s->c0.ssbos, s->c0.textures, nvn2_c0_part(&s->c0, 3),
+                       s->c0.images, nvn2_c0_part(&s->c0, 4));
+        }
     }
+}
+
+// "Direct" pool arrays (add_res, GfxShaderRes.pool_arr). The translator indexes them with UMin(id, 31), so any id
+// above 31 read pool entry 31. This rewrites each such UMin whose result (through a Bitcast) indexes a pool array into
+// BitwiseAnd(id, 31), and records which c2 handle words the shader reads (constant-index access chains into its c2
+// uniform buffer): the phi's candidates are among them, and the replay puts each candidate's texture and sampler at
+// element id & 31. Two candidates whose ids agree in the low 5 bits would share an element (logged by the replay).
+// Returns 0 when the module does not have the expected shape (the arrays then stay unfilled, as before).
+static int pool_patch(GfxShader *s) {
+    enum { OP_NAME_ = 5, OP_EXT_INST = 12, OP_CONST = 43, OP_VAR = 59, OP_ACCESS_CHAIN = 65, OP_BITCAST = 124,
+           OP_BITWISE_AND = 199, OP_DECOR = 71, DEC_BINDING = 33, GLSL_UMIN = 38 };
+    int any = 0, c2_binding = -1;
+    for (int i = 0; i < s->nres[GFX_RES_TEX]; i++) any |= s->res[GFX_RES_TEX][i].pool_arr;
+    if (!any) return 1;
+    for (int i = 0; i < s->nres[GFX_RES_UBO]; i++)
+        if (s->res[GFX_RES_UBO][i].slot == 2) c2_binding = s->res[GFX_RES_UBO][i].binding;
+    const uint32_t *w = s->spirv;
+    uint64_t n = s->words;
+    uint32_t bound = w[3];
+    if (n < 5 || bound > (1u << 22)) return 0;
+    // Per id: 1 the c2 variable, 2 a pool array variable; constant values; bitcast sources; UMin results to rewrite.
+    uint8_t *role = calloc(bound, 1), *is_const = calloc(bound, 1), *rewrite = calloc(bound, 1);
+    uint32_t *val = calloc(bound, sizeof *val), *cast = calloc(bound, sizeof *cast);
+    uint32_t *out = malloc(n * sizeof *out);
+    if (!role || !is_const || !rewrite || !val || !cast || !out) rt_fatal("gfx_shader: out of memory patching a shader");
+    uint32_t comb = 0, samp = 0;
+    uint64_t sep[2] = {0, 0};
+    for (uint64_t i = 5; i < n;) {   // pass 1: bindings, constants, bitcasts
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (!len || i + len > n) goto bad;
+        if (op == OP_DECOR && len == 4 && w[i + 2] == DEC_BINDING && w[i + 1] < bound) {
+            uint32_t id = w[i + 1], b = w[i + 3];
+            if ((int)b == c2_binding) role[id] = 1;
+            for (int k = 0; k < s->nres[GFX_RES_TEX]; k++)
+                if (s->res[GFX_RES_TEX][k].pool_arr && s->res[GFX_RES_TEX][k].binding == b) role[id] = 2;
+        } else if (op == OP_CONST && len == 4 && w[i + 2] < bound) {
+            is_const[w[i + 2]] = 1, val[w[i + 2]] = w[i + 3];
+        } else if (op == OP_BITCAST && len == 4 && w[i + 2] < bound) {
+            cast[w[i + 2]] = w[i + 3];
+        }
+        i += len;
+    }
+    for (uint64_t i = 5; i < n;) {   // pass 2: access chains
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == OP_ACCESS_CHAIN && len >= 5 && w[i + 3] < bound) {
+            uint32_t base = w[i + 3];
+            if (role[base] == 1 && len >= 6) {   // c2.member0[vec4][component]
+                int ok = 1;
+                for (uint32_t k = 4; k < len; k++) ok &= w[i + k] < bound && is_const[w[i + k]];
+                if (ok) {
+                    uint32_t lo = val[w[i + 5]] * 16, hi = lo + (len >= 7 ? val[w[i + 6]] * 4 : 12);
+                    for (uint32_t b = lo - lo % 4; b <= hi; b += 4) {
+                        if (b % 8) continue;
+                        if (b >= 0x20 && b < 0x120) comb |= 1u << ((b - 0x20) / 8);
+                        else if (b >= 0x168 && b < 0x568) sep[(b - 0x168) / 8 / 64] |= 1ull << ((b - 0x168) / 8 % 64);
+                        else if (b >= 0x568 && b < 0x668) samp |= 1u << ((b - 0x568) / 8);
+                    }
+                }
+            } else if (role[base] == 2 && w[i + 4] < bound && cast[w[i + 4]] < bound) {
+                rewrite[cast[w[i + 4]]] = 1;
+            }
+        }
+        i += len;
+    }
+    // The index becomes (id ^ (id >> 5)) & 31: plain id & 31 put the two candidates of a common shader (ids 321 and
+    // 641, 320 apart) in one element. A constant 5 of the 31's type follows each such 31; new ids go past the bound.
+    uint32_t *five = calloc(bound, sizeof *five), nb = bound;
+    if (!five) rt_fatal("gfx_shader: out of memory patching a shader");
+    uint64_t n_umin = 0, n_five = 0;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == OP_EXT_INST && len == 7 && w[i + 4] == GLSL_UMIN && w[i + 2] < bound && rewrite[w[i + 2]] &&
+            w[i + 6] < bound && is_const[w[i + 6]] && val[w[i + 6]] == 31) {
+            n_umin++;
+            if (!five[w[i + 6]]) five[w[i + 6]] = nb++, n_five++;
+        }
+        i += len;
+    }
+    // Each rewrite turns 7 words into 15; each new constant adds 4.
+    uint32_t *grown = realloc(out, (n + 8 * n_umin + 4 * n_five + 8) * sizeof *out);
+    if (!grown) rt_fatal("gfx_shader: out of memory patching a shader");
+    out = grown;
+    uint64_t m = 0;
+    int patched = 0;
+    for (uint64_t i = 0; i < 5; i++) out[m++] = w[i];
+    for (uint64_t i = 5; i < n;) {   // pass 3: copy; UMin(x, 31) → BitwiseAnd(x ^ (x >> 5), 31) where marked
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == OP_EXT_INST && len == 7 && w[i + 4] == GLSL_UMIN && w[i + 2] < bound && rewrite[w[i + 2]] &&
+            w[i + 6] < bound && five[w[i + 6]]) {
+            uint32_t type = w[i + 1], x = w[i + 5], sh = nb++, xr = nb++;
+            out[m++] = 5u << 16 | 194, out[m++] = type, out[m++] = sh, out[m++] = x, out[m++] = five[w[i + 6]];
+            out[m++] = 5u << 16 | 198, out[m++] = type, out[m++] = xr, out[m++] = x, out[m++] = sh;
+            out[m++] = 5u << 16 | OP_BITWISE_AND, out[m++] = type, out[m++] = w[i + 2], out[m++] = xr, out[m++] = w[i + 6];
+            patched++;
+        } else {
+            memcpy(out + m, w + i, len * sizeof *w), m += len;
+            if (op == OP_CONST && len == 4 && w[i + 2] < bound && five[w[i + 2]])
+                out[m++] = 4u << 16 | OP_CONST, out[m++] = w[i + 1], out[m++] = five[w[i + 2]], out[m++] = 5;
+        }
+        i += len;
+    }
+    out[3] = nb;
+    free(five);
+    for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
+        GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+        if (r->pool_arr) r->pool_comb = comb, r->pool_samp = samp, r->pool_sep[0] = sep[0], r->pool_sep[1] = sep[1];
+    }
+    free(s->spirv);
+    s->spirv = out, s->words = m;
+    free(role), free(is_const), free(rewrite), free(val), free(cast);
+    static int told;
+    if (told++ < 4)
+        rt_log("gfx_shader: Direct pool arrays: %d index clamps rewritten; c2 candidates: combined %#x, separate "
+               "textures %#llx%016llx, samplers %#x", patched, comb, (unsigned long long)sep[1],
+               (unsigned long long)sep[0], samp);
+    return patched > 0;
+bad:
+    free(role), free(is_const), free(rewrite), free(val), free(cast), free(out);
+    return 0;
+}
+
+// Material texture arrays (GfxShaderRes.arr_ubo) as Eden builds them. The translator (Ryujinx BindlessToArray)
+// declares 32 elements and clamps the index with UMin(i, 31); Eden, which plays Kirby Air Riders, reads up to 1024
+// descriptors per array at the shader's own stride (refs/eglantine src/shader_recompiler/ir_opt/texture_pass.cpp
+// DynamicDescriptorCount, src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp read_handle). Kirby's materials keep
+// their handles 16 bytes apart, so 32 eight-byte elements reach only 16 textures and every later one read element 31.
+// This retypes each such array variable to ARR_N elements (a new length constant, array and pointer type after the
+// old pointer type) and raises the clamp to ARR_N - 1 where a UMin result indexes it; GfxShaderRes.count follows.
+// KAR_ARR_N sets ARR_N; the default 32 keeps the translator's arrays (a 128-element run logged no handle past element
+// 31, so Kirby's materials fit in 32). Returns 0 when the module does not have the expected shape.
+static uint32_t arr_n(void) {
+    static uint32_t n;
+    if (!n) {
+        const char *e = getenv("KAR_ARR_N");
+        // default 512: Kirby Air Riders' local-light compute indexes c4 handles past element 31 (elements 32, 34, 36
+        // hold handles in the race); with 32 its probe atlas reads hit the clamped dummy and characters went dark
+        long v = e && *e ? strtol(e, NULL, 10) : 512;   // KAR_ARR_SCAN: handles up to element 416 in the race
+        n = v >= 32 && v <= 1024 ? (uint32_t)v : 32;
+    }
+    return n;
+}
+
+static int arr_patch(GfxShader *s) {
+    enum { OP_EXT_INST = 12, OP_TYPE_ARRAY_ = 28, OP_TYPE_POINTER_ = 32, OP_CONST = 43, OP_VAR = 59,
+           OP_ACCESS_CHAIN = 65, OP_BITCAST = 124, OP_DECOR = 71, DEC_BINDING = 33, GLSL_UMIN = 38 };
+    uint32_t N = arr_n();
+    int any = 0;
+    for (int i = 0; i < s->nres[GFX_RES_TEX]; i++) any |= s->res[GFX_RES_TEX][i].arr_ubo;
+    if (!any || N == 32) return 1;
+    const uint32_t *w = s->spirv;
+    uint64_t n = s->words;
+    uint32_t bound = w[3];
+    if (n < 5 || bound > (1u << 22)) return 0;
+    uint8_t *is_arr_var = calloc(bound, 1), *is_const = calloc(bound, 1), *rewrite = calloc(bound, 1);
+    uint32_t *val = calloc(bound, 4), *ctype = calloc(bound, 4), *arr_len = calloc(bound, 4), *pointee = calloc(bound, 4),
+             *vtype = calloc(bound, 4), *cast = calloc(bound, 4), *newptr = calloc(bound, 4), *binding = calloc(bound, 4);
+    if (!is_arr_var || !is_const || !rewrite || !val || !ctype || !arr_len || !pointee || !vtype || !cast || !newptr ||
+        !binding)
+        rt_fatal("gfx_shader: out of memory patching a shader");
+    for (uint64_t i = 5; i < n;) {   // pass 1: bindings, constants, array and pointer types, variables, bitcasts
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (!len || i + len > n) goto bad;
+        if (op == OP_DECOR && len == 4 && w[i + 2] == DEC_BINDING && w[i + 1] < bound) {
+            for (int k = 0; k < s->nres[GFX_RES_TEX]; k++)
+                if (s->res[GFX_RES_TEX][k].arr_ubo && s->res[GFX_RES_TEX][k].binding == w[i + 3])
+                    is_arr_var[w[i + 1]] = 1, binding[w[i + 1]] = w[i + 3];
+        } else if (op == OP_CONST && len == 4 && w[i + 2] < bound) {
+            is_const[w[i + 2]] = 1, val[w[i + 2]] = w[i + 3], ctype[w[i + 2]] = w[i + 1];
+        } else if (op == OP_TYPE_ARRAY_ && len == 4 && w[i + 1] < bound) {
+            arr_len[w[i + 1]] = w[i + 3];
+        } else if (op == OP_TYPE_POINTER_ && len == 4 && w[i + 1] < bound) {
+            pointee[w[i + 1]] = w[i + 3];
+        } else if (op == OP_VAR && len >= 4 && w[i + 2] < bound) {
+            vtype[w[i + 2]] = w[i + 1];
+        } else if (op == OP_BITCAST && len == 4 && w[i + 2] < bound) {
+            cast[w[i + 2]] = w[i + 3];
+        }
+        i += len;
+    }
+    // Which pointer types to duplicate: those of the material array variables over a 32-element array.
+    uint32_t nb = bound, uint_t = 0, c_n = 0, c_max = 0, nptr = 0;
+    for (uint32_t v = 0; v < bound; v++) {
+        if (!is_arr_var[v]) continue;
+        uint32_t pt = vtype[v], at = pt < bound ? pointee[pt] : 0, lc = at < bound ? arr_len[at] : 0;
+        if (!pt || !at || !lc || lc >= bound || !is_const[lc] || val[lc] != 32) { is_arr_var[v] = 0; continue; }
+        if (!uint_t) uint_t = ctype[lc];
+        if (ctype[lc] != uint_t) { is_arr_var[v] = 0; continue; }
+        if (!newptr[pt]) newptr[pt] = nb + 3, nb += 4, nptr++;   // per pointer type: const N, max, array, pointer
+    }
+    if (!nptr) goto bad;
+    for (uint64_t i = 5; i < n;) {   // pass 2: UMin results that index a material array
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == OP_ACCESS_CHAIN && len >= 5 && w[i + 3] < bound && is_arr_var[w[i + 3]] && w[i + 4] < bound &&
+            cast[w[i + 4]] < bound)
+            rewrite[cast[w[i + 4]]] = 1;
+        i += len;
+    }
+    uint32_t *out = malloc((n + 16 * nptr + 8) * sizeof *out);
+    if (!out) rt_fatal("gfx_shader: out of memory patching a shader");
+    uint64_t m = 0;
+    int clamps = 0, vars = 0;
+    for (uint64_t i = 0; i < 5; i++) out[m++] = w[i];
+    for (uint64_t i = 5; i < n;) {   // pass 3: copy with the new types after each duplicated pointer type
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == OP_VAR && len >= 4 && w[i + 2] < bound && is_arr_var[w[i + 2]]) {
+            memcpy(out + m, w + i, len * sizeof *w);
+            out[m + 1] = newptr[w[i + 1]];
+            m += len, vars++;
+        } else if (op == OP_EXT_INST && len == 7 && w[i + 4] == GLSL_UMIN && w[i + 2] < bound && rewrite[w[i + 2]] &&
+                   w[i + 6] < bound && is_const[w[i + 6]] && val[w[i + 6]] == 31 && c_max) {
+            memcpy(out + m, w + i, len * sizeof *w);
+            out[m + 6] = c_max;
+            m += len, clamps++;
+        } else {
+            memcpy(out + m, w + i, len * sizeof *w), m += len;
+            if (op == OP_TYPE_POINTER_ && len == 4 && w[i + 1] < bound && newptr[w[i + 1]]) {
+                uint32_t np = newptr[w[i + 1]], cn = np - 3, cm = np - 2, na = np - 1;
+                uint32_t elem = 0;   // the old array's element type
+                for (uint64_t j = 5; j < i && !elem;) {
+                    uint32_t l2 = w[j] >> 16;
+                    if ((w[j] & 0xffff) == OP_TYPE_ARRAY_ && l2 == 4 && w[j + 1] == w[i + 3]) elem = w[j + 2];
+                    j += l2;
+                }
+                if (!elem) { free(out); goto bad; }
+                out[m++] = 4u << 16 | OP_CONST, out[m++] = uint_t, out[m++] = cn, out[m++] = N;
+                out[m++] = 4u << 16 | OP_CONST, out[m++] = uint_t, out[m++] = cm, out[m++] = N - 1;
+                out[m++] = 4u << 16 | OP_TYPE_ARRAY_, out[m++] = na, out[m++] = elem, out[m++] = cn;
+                out[m++] = 4u << 16 | OP_TYPE_POINTER_, out[m++] = np, out[m++] = w[i + 2], out[m++] = na;
+                if (!c_max) c_max = cm;
+            }
+        }
+        i += len;
+    }
+    out[3] = nb;
+    for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {   // the layout and the replay bind N elements
+        GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+        for (uint32_t v = 0; v < bound && r->arr_ubo; v++)
+            if (is_arr_var[v] && binding[v] == r->binding) { r->count = (uint16_t)N; break; }
+    }
+    free(s->spirv);
+    s->spirv = out, s->words = m;
+    free(is_arr_var), free(is_const), free(rewrite), free(val), free(ctype), free(arr_len), free(pointee), free(vtype);
+    free(cast), free(newptr), free(binding);
+    static int told;
+    if (told++ < 3)
+        rt_log("gfx_shader: material arrays widened to %u elements: %d variables, %d index clamps", N, vars, clamps);
+    return 1;
+bad:
+    free(is_arr_var), free(is_const), free(rewrite), free(val), free(ctype), free(arr_len), free(pointee), free(vtype);
+    free(cast), free(newptr), free(binding);
+    return 0;
 }
 
 // SPIR-V opcodes and enumerants used below (SPIR-V 1.6 specification, section 3).
@@ -1171,6 +1513,8 @@ static int reflect(GfxShader *s, int flags) {
             return 0;
         }
     reflect_spirv(s);
+    if (!pool_patch(s)) rt_log("gfx_shader: a Direct pool array shader did not have the expected shape; left as is");
+    if (!arr_patch(s)) rt_log("gfx_shader: a material array shader did not have the expected shape; left at 32");
     if (s->geometry_source_passthrough) {
         if (s->geometry_position != 3) return 0;
         uint32_t locations = 0;
@@ -1707,6 +2051,15 @@ static int req_init(Req *r, int stage, const uint8_t *control, const uint8_t *co
     uint32_t c1_off;
     memcpy(&c1_off, control + 0x700, 4), memcpy(&r->length, control + 0x704, 4);
     uint64_t skip = stage == GFX_STAGE_CS ? 0 : CODE_SKIP;
+    if (r->length > 0x400000 || c1_off > 0x400000) {   // not an NVN 1 control at all (an NVN 2 one of another version)
+        uint32_t w[4];
+        memcpy(w, control, sizeof w);
+        static int told;
+        if (told++ < 8)
+            rt_log("gfx_shader: stage %d control %08x %08x %08x %08x is not NVN 1 shaped (length %#x)", stage, w[0], w[1],
+                   w[2], w[3], r->length);
+        return fail("control is not NVN 1 shaped", NULL), 0;
+    }
     if (!code || r->length > code_size || c1_off > r->length || skip >= r->length) return fail("bad control section", NULL), 0;
     if (stage == GFX_STAGE_GS) {
         uint32_t sph[5];
@@ -1777,6 +2130,7 @@ static void note_failed(const uint8_t key[32]);
 
 // The synchronous path (compute dispatches, awaited stages) remembers failures as the background one does
 // (X.waits): a shader that does not translate is not sent to the translator again on every dispatch or draw.
+static void pf_note_miss(const uint8_t *control, const uint8_t *code, uint32_t length, const uint8_t *iid, int final, const uint8_t *rkey);
 static const GfxShader *get_one(const Req *r, int stage, const uint8_t *control, const uint8_t *code,
                                 const GfxShaderAnswers *a) {
     GfxShader *s = mem_find(r->key);
@@ -1784,8 +2138,18 @@ static const GfxShader *get_one(const Req *r, int stage, const uint8_t *control,
     if (known_failed(r->key)) return NULL;
     paths();
     if (!cache_dir[0]) return fail("no cache directory", NULL);
-    if (r->final && (s = request_disk_load(r, r->key, r->iid))) return plat_inc64(&n_hits), mem_insert(s);
+    uint64_t q = stage == GFX_STAGE_CS ? plat_now_ns() : 0;
+    rp_cs = q != 0;
+    if (q) pf_note_miss(control, code, r->length, r->iid, r->final, r->key);
+    s = r->final ? request_disk_load(r, r->key, r->iid) : NULL;
+    rp_cs = 0;
+    if (s) {
+        if (q) gfx_rp[2] += plat_now_ns() - q, gfx_rp[6]++;
+        return plat_inc64(&n_hits), mem_insert(s);
+    }
+    if (q) q = plat_now_ns();
     const GfxShader *t = translate(r, stage, control, code, a);
+    if (q) gfx_rp[3] += plat_now_ns() - q, gfx_rp[7]++;
     if (!t) note_failed(r->key);
     return t;
 }
@@ -1799,11 +2163,16 @@ static void note_origin(const GfxShader *s, const uint8_t *code) {
 }
 uint64_t gfx_shader_origin(const GfxShader *s) { return s->origin; }
 
+// KAR_REPLAY_PROF (vk_exec.c), compute stages only: ns in request setup, get_one, disk load, translation; then counts.
+uint64_t gfx_rp[10];
 const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
                                 const uint8_t *c1, const GfxShaderAnswers *a) {
     Req r;
+    uint64_t q = stage == GFX_STAGE_CS ? plat_now_ns() : 0;
     if (!req_init(&r, stage, control, code, code_size, c1, a)) return NULL;
+    if (q) gfx_rp[0] += plat_now_ns() - q, gfx_rp[4]++, q = plat_now_ns();
     const GfxShader *s = get_one(&r, stage, control, code, a);
+    if (q) gfx_rp[1] += plat_now_ns() - q;
     note_origin(s, code);
     if (s) ans_note(&r, stage, control, code, a, s);
     return s;
@@ -2358,6 +2727,8 @@ static size_t other_inputs(const uint8_t (*named)[32], size_t n_named, uint8_t (
     return *out = l.v, l.n;
 }
 
+static Warm *volatile warm_live;   // the prewarm running (gfx_shader_prewarm_progress)
+static volatile size_t warm_total;
 void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **out, int threads, int procs) {
     paths();
     double t0 = (double)plat_now_ms();
@@ -2377,6 +2748,7 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
     int k = 0;
     for (int i = 0; i < threads; i++)
         if ((t[k] = plat_thread_new(warm_worker, &w, "shader prewarm"))) k++;
+    warm_live = &w, warm_total = total;
     if (!k) warm_worker(&w);
     for (int m = 0; m < k; m++)
         while (!plat_thread_join_ns(t[m], 2000000000u))
@@ -2387,10 +2759,91 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
            "cached); %llu translated, %llu failed, with up to %d translators and %d threads, in %.0f ms", w.n_named,
            (long)w.missing, w.n_other, (long)w.other_cached, (unsigned long long)((uint64_t)n_xlated - xl0),
            (unsigned long long)((uint64_t)n_failures - fail0), procs, k, (double)plat_now_ms() - t0);
+    warm_live = NULL;
     free(w.other);
 }
+
+// The boot screen's progress (boot_screen.c): shaders of the boot prewarm done, of all; 0 of 0 outside it.
+void gfx_shader_prewarm_progress(uint64_t *done, uint64_t *total) {
+    const Warm *w = warm_live;
+    *done = w ? (uint64_t)w->done : 0, *total = w ? warm_total : 0;
+}
+// A compute shader's SPIR-V (~1 MB in Kirby Air Riders) is needed only to build its one pipeline; the compute prefetch
+// keeps thousands in memory, so the back end drops it once the pipeline is built (gfx_shader_drop_spirv) and a later
+// reader (a dump, a rebuild) gets it loaded again from the disk cache, patched as at load. KAR_CS_DROP_SPIRV=0 keeps it.
+static volatile int64_t pf_resident;   // bytes of prefetched compute SPIR-V still held (the prefetch cap)
+static PlatMutex spirv_lock;   // zero-initialised storage is a valid unlocked lock (platform.h)
+
+// A dropped buffer is freed 5 s later, not at once: a pipeline builder on another thread may still be reading the
+// pointer gfx_shader_spirv gave it (the dropping build itself is done by then; a parallel one of the same shader is rare).
+#define GRAVE_N 16384
+static struct { uint32_t *p; uint64_t at; } grave[GRAVE_N];
+static uint32_t grave_head, grave_tail;   // spirv_lock held
+
+static void grave_sweep_locked(uint64_t now) {
+    while (grave_head != grave_tail && (now - grave[grave_head % GRAVE_N].at > 5000000000ull ||
+                                        grave_tail - grave_head >= GRAVE_N))
+        free(grave[grave_head % GRAVE_N].p), grave_head++;
+}
+
+static void drop_locked(GfxShader *s, uint64_t now) {
+    if (!s->spirv) return;
+    grave_sweep_locked(now);
+    grave[grave_tail % GRAVE_N].p = s->spirv, grave[grave_tail % GRAVE_N].at = now, grave_tail++;
+    if (plat_add64(&pf_resident, -(int64_t)(s->words * 4)) < 0) pf_resident = 0;   // a shader the prefetch did not count
+    s->spirv = NULL;
+}
+
+static int drop_on(void) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("KAR_CS_DROP_SPIRV") && *getenv("KAR_CS_DROP_SPIRV") == '0');
+    return on;
+}
+
+void gfx_shader_drop_spirv(const GfxShader *cs) {
+    if (!drop_on() || !cs || cs->stage != GFX_STAGE_CS) return;
+    gfx_shader_spirv_fnv(cs);   // the hash is kept; it is taken from the SPIR-V
+    plat_mutex_lock(&spirv_lock);
+    drop_locked((GfxShader *)cs, plat_now_ns());
+    plat_mutex_unlock(&spirv_lock);
+}
+
+// After the boot prewarm: every shader in memory gives its SPIR-V back (graphics ones too; a later pipeline of one
+// loads it again). The prewarm's ~4700 graphics shaders held ~0.5 GB that only their pipeline builds needed.
+void gfx_shader_drop_all_spirv(void) {
+    if (!drop_on()) return;
+    uint64_t now = plat_now_ns(), n = 0, bytes = 0;
+    plat_mutex_lock_shared(&cache_lock);
+    for (size_t i = 0; i < BUCKETS; i++)
+        for (GfxShader *s = buckets[i]; s; s = s->next) {
+            if (!s->spirv) continue;
+            gfx_shader_spirv_fnv(s);
+            plat_mutex_lock(&spirv_lock);
+            if (s->spirv) n++, bytes += s->words * 4, drop_locked(s, now);
+            plat_mutex_unlock(&spirv_lock);
+        }
+    plat_mutex_unlock_shared(&cache_lock);
+    rt_log("gfx_shader: %llu shaders gave back %.1f MiB of SPIR-V after the prewarm (loaded again when needed)",
+           (unsigned long long)n, bytes / 1048576.0);
+}
+
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words) {
     if (words) *words = s->words;
+    if (__atomic_load_n(&s->spirv, __ATOMIC_ACQUIRE)) return s->spirv;
+    plat_mutex_lock(&spirv_lock);
+    if (!s->spirv) {
+        GfxShader *d = disk_load(s->key, s->iid, REFLECT_LOWERED_BODY);
+        if (!d) d = disk_load(s->key, s->iid, 0);
+        if (d && d->words == s->words) {
+            __atomic_store_n(&((GfxShader *)s)->spirv, d->spirv, __ATOMIC_RELEASE);
+            plat_add64(&pf_resident, (int64_t)(s->words * 4));
+            d->spirv = NULL;
+        } else {
+            rt_log("gfx_shader: the dropped SPIR-V of a compute shader could not be loaded again");
+        }
+        if (d) shader_free(d);
+    }
+    plat_mutex_unlock(&spirv_lock);
     return s->spirv;
 }
 
@@ -3102,4 +3555,286 @@ size_t gfx_shader_warm_list(GfxWarmEnt **out) {
     rt_log("gfx_shader: warm list: %zu variants (%zu met in play, %zu prepared)", n, na, np);
     *out = e;
     return n;
+}
+
+// ---- compute prefetch (gfx_shader_prefetch_cs)
+// A compute stage's first dispatch otherwise loads its shader from the disk cache inside the replay (a compute shader
+// is ~1 MB of SPIR-V: 5-20 ms each, 100-650 ms frames in a race) and then waits for its pipeline. Programs are made
+// well before they dispatch (nvnProgramSetShaders, mostly while a course loads), and nearly every compute program has
+// exactly one stored input, so a background thread finds the stored input with the same control and code, loads it
+// into the memory cache and hands it to the back end (gfx_shader_set_prefetch_sink) to build its pipeline. A dispatch
+// whose answers differ from the stored ones loads its own shader as before. KAR_CS_PREFETCH=0 turns it off;
+// KAR_CS_PREFETCH_MB (default 128: the SPIR-V waiting for its pipeline) caps the SPIR-V it loads.
+// ---- compute used list (<cache>/cs-used.bin): which compute shaders dispatches used, per session
+// Prefetching every stored compute input built ~5000 pipelines, of which a race used ~100, at ~0.85 MB of driver
+// memory each (16.10). So the prefetch takes only the inputs a dispatch used in one of the last CSU_KEEP sessions; a
+// shader met for the first time loads at its dispatch as before and is in the list from then on. No file: nothing is
+// prefetched (KAR_CS_PREFETCH_ALL=1 takes every stored input). Layout: "KCSU", u32 version 1, u32 session, u32 count,
+// then count entries of an input id (32 bytes) and the u32 session that last used it.
+#define CSU_KEEP 8
+typedef struct { uint8_t iid[32]; uint32_t session; } CsuEnt;
+static struct {
+    PlatMutex m;
+    CsuEnt *v;                                             // the file's entries, sorted by iid, then this session's
+    size_t n, n_file, cap;
+    uint32_t session;
+    int loaded, dirty;
+} CSU;
+
+static int csu_cmp(const void *x, const void *y) { return memcmp(x, y, 32); }
+
+static void csu_path(char *p) { snprintf(p, PATH_CAP + 80, "%s/cs-used.bin", cache_dir); }
+
+static void csu_load(void) {
+    char p[PATH_CAP + 80];
+    csu_path(p);
+    uint64_t n = 0;
+    uint8_t *f = read_file(p, &n);
+    uint32_t head[4] = {0};
+    if (f && n >= 16) memcpy(head, f, 16);
+    if (f && head[0] == 0x5553434bu && head[1] == 1 && n == 16 + (uint64_t)head[3] * sizeof(CsuEnt)) {
+        CSU.v = malloc((head[3] + 1024) * sizeof(CsuEnt));
+        if (CSU.v) {
+            memcpy(CSU.v, f + 16, (size_t)head[3] * sizeof(CsuEnt));
+            CSU.n = CSU.n_file = head[3], CSU.cap = head[3] + 1024, CSU.session = head[2] + 1;
+            qsort(CSU.v, CSU.n, sizeof(CsuEnt), csu_cmp);
+        }
+    } else {
+        CSU.session = 1;
+    }
+    free(f);
+    CSU.loaded = 1;
+}
+
+static CsuEnt *csu_find_file(const uint8_t iid[32]) {
+    return CSU.n_file ? bsearch(iid, CSU.v, CSU.n_file, sizeof(CsuEnt), csu_cmp) : NULL;
+}
+
+// A dispatch used cs (vk_exec_draw.c shader_for): its input enters this session's list once.
+void gfx_shader_note_cs_used(const GfxShader *cs) {
+    if (!cs || cs->stage != GFX_STAGE_CS || cs->used_noted) return;
+    if (plat_xchg32(&((GfxShader *)cs)->used_noted, 1)) return;
+    plat_mutex_lock(&CSU.m);
+    if (CSU.loaded) {
+        CsuEnt *e = csu_find_file(cs->iid);
+        if (e) {
+            if (e->session != CSU.session) e->session = CSU.session, CSU.dirty = 1;
+        } else {
+            if (CSU.n == CSU.cap) {
+                size_t c = CSU.cap ? CSU.cap * 2 : 1024;
+                CsuEnt *t = realloc(CSU.v, c * sizeof *t);
+                if (t) CSU.v = t, CSU.cap = c;
+            }
+            if (CSU.n < CSU.cap) memcpy(CSU.v[CSU.n].iid, cs->iid, 32), CSU.v[CSU.n++].session = CSU.session, CSU.dirty = 1;
+        }
+    }
+    plat_mutex_unlock(&CSU.m);
+}
+
+// Writes the list (entries used in the last CSU_KEEP sessions) when it changed. The prefetch thread calls it.
+static void csu_save(void) {
+    plat_mutex_lock(&CSU.m);
+    if (!CSU.dirty || !cache_dir[0]) { plat_mutex_unlock(&CSU.m); return; }
+    CSU.dirty = 0;
+    size_t keep = 0;
+    CsuEnt *out = malloc((CSU.n + 1) * sizeof *out);
+    for (size_t i = 0; out && i < CSU.n; i++)
+        if (CSU.v[i].session + CSU_KEEP > CSU.session) out[keep++] = CSU.v[i];
+    uint32_t session = CSU.session;
+    plat_mutex_unlock(&CSU.m);
+    if (!out) return;
+    size_t bytes = 16 + keep * sizeof *out;
+    uint8_t *buf = malloc(bytes);
+    if (buf) {
+        uint32_t head[4] = {0x5553434bu, 1, session, (uint32_t)keep};
+        memcpy(buf, head, 16), memcpy(buf + 16, out, keep * sizeof *out);
+        char p[PATH_CAP + 80];
+        csu_path(p);
+        plat_file_write_atomic(p, buf, bytes);
+        free(buf);
+    }
+    free(out);
+}
+
+typedef struct { uint64_t h; uint8_t iid[32]; } PfEnt;
+static struct {
+    PlatMutex m;
+    PlatCond c;
+    int started, indexed;
+    const uint8_t *(*q)[2];                                // control, code: grows, never drops a program
+    uint32_t head, tail, cap_q;
+    PfEnt *ix;
+    size_t n;
+    uint64_t bytes, cap, jobs, loaded, missed, capped;
+} PF;
+static void (*pf_sink)(const GfxShader *);
+
+void gfx_shader_set_prefetch_sink(void (*sink)(const GfxShader *)) { pf_sink = sink; }
+
+static uint64_t pf_hash(const uint8_t *control, const uint8_t *code, uint32_t length) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < CONTROL_SIZE; i++) h = (h ^ control[i]) * 0x100000001b3ull;
+    for (uint32_t i = 0; i < length; i++) h = (h ^ code[i]) * 0x100000001b3ull;
+    return h;
+}
+
+static int pf_cmp(const void *x, const void *y) {
+    uint64_t a = ((const PfEnt *)x)->h, b = ((const PfEnt *)y)->h;
+    return a < b ? -1 : a > b;
+}
+
+static int pf_collect(const char *file, void *ctx) {
+    (void)ctx;
+    char name[80];
+    uint8_t iid[32];
+    if (strlen(file) != 67) return 1;
+    memcpy(name, file, 64), name[64] = 0;
+    if (!hex32(name, iid)) return 1;
+    Inputs in;
+    if (!in_load(iid, &in)) return 1;
+    static int all = -1;
+    if (all < 0) all = getenv("KAR_CS_PREFETCH_ALL") && *getenv("KAR_CS_PREFETCH_ALL") == '1';
+    CsuEnt *u = all ? NULL : csu_find_file(iid);
+    if (in.stage == GFX_STAGE_CS && (all || (u && u->session + CSU_KEEP > CSU.session))) {
+        if (PF.n % 1024 == 0) {
+            PfEnt *t = realloc(PF.ix, (PF.n + 1024) * sizeof *t);
+            if (!t) return free(in.buf), 0;
+            PF.ix = t;
+        }
+        PF.ix[PF.n].h = pf_hash(in.control, in.code, in.length);
+        memcpy(PF.ix[PF.n].iid, iid, 32);
+        PF.n++;
+    }
+    free(in.buf);
+    return 1;
+}
+
+// The stored compute inputs by control and code hash: the pack's, then the loose in/ files.
+static void pf_index(void) {
+    uint64_t t0 = plat_now_ns();
+    char name[68], dir[PATH_CAP + 80];
+    for (uint32_t i = 0; i < pack_n; i++) {
+        if (pack_ix[i].kind != PACK_IN) continue;
+        key_hex(pack_ix[i].name, name);
+        memcpy(name + 64, ".in", 4);
+        if (!pf_collect(name, NULL)) break;
+    }
+    snprintf(dir, sizeof dir, "%s/in", cache_dir);
+    plat_file_list(dir, ".in", pf_collect, NULL);
+    if (PF.n) qsort(PF.ix, PF.n, sizeof *PF.ix, pf_cmp);
+    rt_log("gfx_shader: compute prefetch: %zu stored compute inputs indexed in %.0f ms (session %u, %zu in the used list)",
+           PF.n, (plat_now_ns() - t0) / 1e6, CSU.session, CSU.n_file);
+}
+
+static void pf_worker(void *arg) {
+    (void)arg;
+    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+    paths();
+    plat_mutex_lock(&CSU.m);
+    if (cache_dir[0]) csu_load();
+    plat_mutex_unlock(&CSU.m);
+    if (cache_dir[0]) pf_index();
+    for (;;) {
+        plat_mutex_lock(&PF.m);
+        while (PF.head == PF.tail) {
+            plat_mutex_unlock(&PF.m);
+            csu_save();   // every ~5 s while idle, when this session used a compute shader the list did not have
+            plat_mutex_lock(&PF.m);
+            if (PF.head == PF.tail) plat_cond_wait_ns(&PF.c, &PF.m, 5000000000ull);
+        }
+        const uint8_t *control = PF.q[PF.head][0], *code = PF.q[PF.head][1];
+        if (++PF.head == PF.tail) PF.head = PF.tail = 0;
+        plat_mutex_unlock(&PF.m);
+        uint32_t length;
+        memcpy(&length, control + 0x704, 4);
+        PfEnt k = {.h = pf_hash(control, code, length)};
+        PfEnt *e = PF.n ? bsearch(&k, PF.ix, PF.n, sizeof k, pf_cmp) : NULL;
+        while (e && e > PF.ix && e[-1].h == k.h) e--;
+        int found = 0;
+        for (; e && e < PF.ix + PF.n && e->h == k.h; e++) {
+            // At the cap, wait for the pipeline builders to drop held SPIR-V (gfx_shader_drop_spirv) rather than skip:
+            // a skipped program loads its shader inside the replay again. 30 s without progress gives up on it.
+            for (int w = 0; pf_resident >= (int64_t)PF.cap && w < 6000; w++) plat_sleep_ns(5000000);
+            if (pf_resident >= (int64_t)PF.cap) { PF.capped++; break; }
+            const GfxShader *s = gfx_shader_load_input(e->iid, 0);
+            if (!s) continue;
+            found = 1;
+            if (s->spirv) plat_add64(&pf_resident, (int64_t)(s->words * 4));   // the sink may drop it again
+            PF.bytes += s->words * 4, PF.loaded++;
+            if (pf_sink) pf_sink(s);
+        }
+        if (!found && !(e && e < PF.ix + PF.n && e->h == k.h)) PF.missed++;
+        if (++PF.jobs % 64 == 0)
+            rt_log("gfx_shader: compute prefetch: %llu programs, %llu shaders loaded (%.0f MB, %.0f MB still held), %llu without a stored input, %llu given up at the cap",
+                   (unsigned long long)PF.jobs, (unsigned long long)PF.loaded, PF.bytes / 1e6, pf_resident / 1e6,
+                   (unsigned long long)PF.missed, (unsigned long long)PF.capped);
+    }
+}
+
+void gfx_shader_prefetch_cs(const uint8_t *control, const uint8_t *code) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("KAR_CS_PREFETCH"), *mb = getenv("KAR_CS_PREFETCH_MB");
+        on = !(e && e[0] == '0');
+        PF.cap = (mb ? strtoull(mb, NULL, 10) : 128) << 20;
+    }
+    if (!on || !control || !code) return;
+    plat_mutex_lock(&PF.m);
+    if (PF.tail == PF.cap_q) {
+        uint32_t c = PF.cap_q ? PF.cap_q * 2 : 4096;
+        const uint8_t *(*t)[2] = realloc(PF.q, (size_t)c * sizeof *t);
+        if (t) PF.q = t, PF.cap_q = c;
+    }
+    if (PF.tail < PF.cap_q) {
+        PF.q[PF.tail][0] = control, PF.q[PF.tail][1] = code;
+        PF.tail++;
+        if (!PF.started) PF.started = 1, plat_thread_spawn(pf_worker, NULL, "shader prefetch", 0);
+        plat_cond_signal(&PF.c);
+    }
+    plat_mutex_unlock(&PF.m);
+}
+
+// KAR_REPLAY_PROF: why a compute dispatch still loads from disk: no stored input with its code, its prefetch job not
+// run yet (queued behind others), or run but the dispatch's answers name another shader. Counts in gfx_pf_why[3].
+uint64_t gfx_pf_why[3];
+static void pf_note_miss(const uint8_t *control, const uint8_t *code, uint32_t length, const uint8_t *iid, int final, const uint8_t *rkey) {
+    if (!PF.started || !PF.n) return;
+    PfEnt k = {.h = pf_hash(control, code, length)};
+    PfEnt *e = bsearch(&k, PF.ix, PF.n, sizeof k, pf_cmp);
+    if (!e) { gfx_pf_why[0]++; return; }
+    plat_mutex_lock(&PF.m);
+    int queued = 0;
+    for (uint32_t i = PF.head; i != PF.tail && !queued; i++) queued = PF.q[i][1] == code;
+    uint32_t depth = PF.tail - PF.head;
+    plat_mutex_unlock(&PF.m);
+    gfx_pf_why[queued ? 1 : 2]++;
+    static int told;
+    int same = 0, iid_known = 0;
+    for (PfEnt *f = e; f > PF.ix && f[-1].h == k.h; f--) e = f - 1;
+    for (PfEnt *f = e; f < PF.ix + PF.n && f->h == k.h; f++) same++, iid_known |= !memcmp(f->iid, iid, 32);
+    for (size_t i = 0; i < PF.n && !iid_known; i++) iid_known = 2 * !memcmp(PF.ix[i].iid, iid, 32);
+    uint8_t key[32];
+    key_of_input(iid, key);
+    if (told < 12) {
+        GfxShader *d = disk_load(key, iid, REFLECT_LOWERED_BODY);
+        rt_log("gfx_shader: compute miss: request key %s input key; disk_load(input key) %s; input_matches_cached %d",
+               memcmp(key, rkey, 32) ? "differs from" : "equals", d ? "ok" : "fails", d ? input_matches_cached(d, iid) : -1);
+        if (d) shader_free(d);
+    }
+    if (told++ < 12)
+        rt_log("gfx_shader: compute miss: %s; %d stored inputs with this code; its input id %s; final %d; in memory under its input key %d",
+               queued ? "prefetch still queued" : "prefetched", same,
+               iid_known == 1 ? "among them" : iid_known == 2 ? "stored under other code" : "not stored", final, mem_find(key) != NULL);
+}
+
+// The memory cache's shaders and the SPIR-V bytes they still hold (vk_memory.c census).
+void gfx_shader_mem_stats(uint64_t *n, uint64_t *bytes) {
+    *n = *bytes = 0;
+    plat_mutex_lock_shared(&cache_lock);
+    for (size_t i = 0; i < BUCKETS; i++)
+        for (const GfxShader *s = buckets[i]; s; s = s->next) {
+            (*n)++;
+            if (s->spirv) *bytes += s->words * 4;
+        }
+    plat_mutex_unlock_shared(&cache_lock);
 }

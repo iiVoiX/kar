@@ -44,8 +44,9 @@
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "platform/platform.h"
 
-enum { W_FORMAT, W_REGION, W_BUFFER, W_OVERLAP, W_COPY, W_CLEAR, W_QUERY, W_COUNT };
+enum { W_FORMAT, W_REGION, W_BUFFER, W_OVERLAP, W_COPY, W_CLEAR, W_CLEAR_KIND, W_QUERY, W_COUNT };
 
 static void warn_once(int key, const char *fmt, ...) {
     static volatile int32_t seen[W_COUNT];
@@ -299,6 +300,10 @@ static void report_counter(VkExec *ex, const p_report_counter *p) {
         CounterWrite *a = malloc(sizeof *a);
         if (!a) rt_fatal("vk: out of memory");
         *a = (CounterWrite){p->addr, ex->submitted_ticks};
+        static int ideal = -1;   // KAR_TS_IDEAL=1 (diagnostic): a frame's timestamps all read frame * 1/60 s (no GPU time)
+        if (ideal < 0) ideal = getenv("KAR_TS_IDEAL") && *getenv("KAR_TS_IDEAL") == '1';
+        if (ideal)
+            a->submitted_ticks = rt_ns_to_ticks(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) * 16666667ull);
         vk_completion_add(ex->fence, counter_cb, a);
     }
     pending[pending_head++ % PENDING] = (typeof(pending[0])){p->addr, ex->fence, samples};
@@ -328,7 +333,17 @@ static int cond_enabled(const p_render_cond *c) {
         return 1;
     }
     if (rx == 2 || ry == 2) return 1;   // a samples-passed count not done yet
-    return c->mode == 0 ? x == y : x != y;
+    int on = c->mode == 0 ? x == y : x != y;
+    static int always = -1;   // KAR_COND_ALWAYS=1 (diagnostic): every condition renders; KAR_DIAG_COND=1 logs skips
+    if (always < 0) always = getenv("KAR_COND_ALWAYS") && *getenv("KAR_COND_ALWAYS") == '1';
+    static int diag = -1;
+    static volatile int32_t told;
+    if (diag < 0) diag = getenv("KAR_DIAG_COND") != NULL;
+    if (diag && !on && plat_inc32(&told) <= 300)
+        rt_log("vk_exec: conditional render off at %#llx mode %d (%llu vs %llu), frame %llu", (unsigned long long)c->addr,
+               c->mode, (unsigned long long)x, (unsigned long long)y,
+               (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+    return on || always;
 }
 
 // ---- textures
@@ -489,7 +504,7 @@ static void copy_buffer_image(VkExec *ex, const p_copy_b2t *p, int to_image) {
     }
     ex->recorded++;
     if (to_image) {
-        if (written) vk_texture_gpu_written(p->tex);
+        if (written) vk_texture_gpu_written(p->tex), vk_exec_note_drawn(s.img->image);
     } else {
         vk_mem_gpu_wrote(&m, size), note_gpu_write(ex, p->src, size);
     }
@@ -560,6 +575,7 @@ static int copy_decoded_astc(VkExec *ex, const p_copy_t2t *p) {
     VkImageCopy cp = {sub_layers(&s), sub_offset(&s), sub_layers(&d), sub_offset(&d), sub_extent(&s)};
     vkCmdCopyImage(ex->cb, si->image, VK_IMAGE_LAYOUT_GENERAL, di->image, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
     ex->recorded++;
+    vk_exec_note_drawn(di->image);
     vk_texture_gpu_written(p->dst);
     return 1;
 }
@@ -601,6 +617,7 @@ static void copy_t2t(VkExec *ex, const p_copy_t2t *p) {
                        linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
     ex->recorded++;
+    vk_exec_note_drawn(d.img->image);
     vk_texture_gpu_written(p->dst);
 }
 
@@ -695,6 +712,13 @@ static void clear_tex(VkExec *ex, const p_clear_tex *p) {
     int is3d = img->type == VK_IMAGE_TYPE_3D;
     uint32_t lw = max1(img->width >> s.level), lh = max1(img->height >> s.level);
     int reformat = p->has_view && p->view.set_format && p->view.format != t->d.format;
+    static int diag_clear = -1;   // KAR_DIAG_CLEAR=1: the first 300 texture clears, replayed or not
+    static int n_diag;
+    if (diag_clear < 0) diag_clear = getenv("KAR_DIAG_CLEAR") != NULL;
+    if (diag_clear && (t->d.width == 64 || t->d.width == 4096) && n_diag++ < 300)
+        rt_log("vk: clear_tex %ux%u nvn fmt %#x flags %#x region %d,%d %ux%u z %d+%u level %u (%ux%u) mask %#x reformat %d uint %d value %g %g %g %g",
+               t->d.width, t->d.height, t->d.format, (unsigned)t->d.flags, s.x, s.y, s.w, s.h, s.z, s.nz, s.level, lw, lh,
+               p->mask, reformat, p->is_uint, p->c.f[0], p->c.f[1], p->c.f[2], p->c.f[3]);
     if (s.x || s.y || s.w != lw || s.h != lh || (p->mask & 0xf) != 0xf || reformat ||
         (is3d && (s.z || s.nz != max1(img->depth >> s.level)))) {
         warn_once(W_CLEAR, "texture clear of region %d,%d %ux%u mask %#x (level %ux%u, view format change %d): skipped",
@@ -705,8 +729,13 @@ static void clear_tex(VkExec *ex, const p_clear_tex *p) {
     if (img->aspect & VK_IMAGE_ASPECT_COLOR_BIT) {
         rng.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         VkClearColorValue cv;
-        if (int_format(img->format) != (p->is_uint != 0)) {
-            warn_once(W_CLEAR, "texture clear value kind (uint %d) does not match format %d: skipped", p->is_uint, (int)img->format);
+        // An all-zero value is the same bits as a float or an integer: Kirby Air Riders clears its R11G11B10F vertex
+        // data textures (64xN and 4096xN, IMAGE flag) with ClearTexturei 0 before their first use. Skipped, they kept
+        // the bytes of their heap storage: zeros in a fresh block, old data in a reused one, which lit the race in
+        // random colours in about half of the starts ("rainbow").
+        int zero = !(p->c.u[0] | p->c.u[1] | p->c.u[2] | p->c.u[3]);
+        if (int_format(img->format) != (p->is_uint != 0) && !zero) {
+            warn_once(W_CLEAR_KIND, "texture clear value kind (uint %d) does not match format %d: skipped", p->is_uint, (int)img->format);
             return;
         }
         memcpy(&cv, &p->c, sizeof cv);

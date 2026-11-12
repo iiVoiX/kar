@@ -2,6 +2,7 @@
 // lowering (runtime/third_party/eglantine, GPL-3.0-or-later) rewrites the Ampere code as Maxwell, laid out as TotK's
 // translator reads it, and a synthetic control block carries the fields the host reads.
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -51,10 +52,35 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
         const auto r = capture.Observe(insn, static_cast<uint32_t>(native.size() - 1));
         if (r != Shader::Ampere::ProgramCaptureState::Result::Continue) break;
     }
-    const auto lowered = Shader::Ampere::LowerToMaxwell(native, "full");
+    Shader::Ampere::LoweringOptions options;
+    options.tensor = true;   // HMMA expanded inline (the old "full" tensor mode)
+    const auto lowered = Shader::Ampere::LowerToMaxwell(native, options);
     if (!lowered) {
-        rt_log("nvn2: Ampere lowering failed at +%#x: %.*s", lowered.error_offset, (int)lowered.error.size(),
-               lowered.error.data());
+        // The failing instruction's 12-bit opcode too, so a run lists which native forms the lowering still lacks
+        const size_t at = lowered.error_offset / sizeof(Shader::Ampere::Instruction);
+        const unsigned op = at < native.size() ? native[at].Bits(0, 12) : 0xfffu;
+        rt_log("nvn2: Ampere lowering failed at +%#x (opcode %#05x): %.*s", lowered.error_offset, op,
+               (int)lowered.error.size(), lowered.error.data());
+        if (at < native.size()) {   // the failing instruction's register fields, to see which operand cannot move
+            const auto &x = native[at];
+            rt_log("nvn2:   words %08x %08x %08x %08x: r16 %u r24 %u r32 %u r64 %u width(73) %u bit72 %u bit91 %u",
+                   x.words[0], x.words[1], x.words[2], x.words[3], x.Bits(16, 8), x.Bits(24, 8), x.Bits(32, 8),
+                   x.Bits(64, 8), x.Bits(73, 3), x.Bits(72, 1), x.Bits(91, 1));
+        }
+        return nullptr;
+    }
+    // Upstream Eglantine moves values between IR register banks with a MOV form (lower_to_maxwell.h NativeRegisterCopy:
+    // bits 44-47 = 10, banks in bits 8-11) for native registers above the lowering's reserved ones. Our translator
+    // reads it since tools/xlate/patches/0024-native-register-banks.patch (banks 1 and 2 as IR registers 256-767).
+    // Ryujinx passes only R0-R254 across calls, so a program with bank copies and a CAL is still rejected: a banked
+    // value would not reach the callee.
+    bool bank_copies = false, calls = false;
+    for (const uint64_t w : lowered.instructions) {
+        bank_copies |= (w & 0xfff8000000000000ull) == 0x5c98000000000000ull && ((w >> 44) & 0xf) == 10;
+        calls |= (w >> 52) == 0xe26;
+    }
+    if (bank_copies && calls) {
+        rt_log("nvn2: Ampere lowering needs register-bank copies in a program with calls, which the translator cannot pass");
         return nullptr;
     }
 
@@ -127,10 +153,27 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
     if (!gfx) {
         std::memcpy(out->control.data() + 0x748, control + 0x58, 12);   // local size (NVN 2 control +0x58)
         // The compute driver bank is packed per program from these counts (gfx_shader.c, "NVN 2 compute c0"):
-        // images +0xb6, uniform buffers +0xb1, storage buffers +0xb2, textures +0xb3.
+        // images +0xb6, uniform buffers +0xb1, storage buffers +0xb2, textures +0xb3 (+0xb4, +0xb5: see below).
         // DKC1 adds the eight root-table word counts. The marker and counts enter the code/cache hash, so an older
         // DKC0 translation cannot be reused with the new parameter-block layout.
-        const uint8_t lay[8] = {'D', 'K', 'C', '1', control[0xb6], control[0xb1], control[0xb2], control[0xb3]};
+        // The handle entries between the storage table and the images are combined textures (+0xb3), separate
+        // textures (+0xb4) and separate samplers (+0xb5), 8 bytes each. Kirby Air Riders' compute programs have +0xb3 = 0
+        // and their textures and samplers in +0xb4/+0xb5: counting +0xb3 alone put every image handle and every texture
+        // past the first in no slot (its depth pyramid and tiled light culling read and wrote dummies, which darkened the
+        // whole 3D picture). The texture count handed on is the sum, so the images start after all three and a separate
+        // texture keeps its own slot (a sampler entry is never a texture declaration's handle).
+        const unsigned tex_entries = control[0xb3] + control[0xb4] + control[0xb5];
+        const uint8_t lay[8] = {'D', 'K', 'C', '1', control[0xb6], control[0xb1], control[0xb2],
+                                static_cast<uint8_t>(tex_entries > 255 ? 255 : tex_entries)};
+        {   // KAR diagnostic: the raw count bytes, to place the handle entries the layout does not count yet
+            static int told;
+            if (told++ < 400) {
+                char hx[3 * 24 + 1];
+                for (int i = 0; i < 24; i++) std::snprintf(hx + 3 * i, 4, "%02x ", control[0xa8 + i]);
+                rt_log("nvn2 cs counts: ub %u ss %u tx %u b4 %u b5 %u im %u | a8.. %s", control[0xb1], control[0xb2],
+                       control[0xb3], control[0xb4], control[0xb5], control[0xb6], hx);
+            }
+        }
         std::memcpy(out->control.data() + kC0Layout, lay, sizeof lay);
         // Shared memory bytes (NVN 2 control +0x64; Bananza's upscaling network uses 0x2a88): the translator sizes the
         // workgroup's shared array from it, and with 0 every LDS read back nothing.

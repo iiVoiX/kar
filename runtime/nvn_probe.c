@@ -94,7 +94,7 @@ static void probe_device_and_pools(void) {
     int abi[2] = {0, 0};
     CALL(nvnDeviceGetInteger, U(&dev), 0, U(&abi[0]));
     CALL(nvnDeviceGetInteger, U(&dev), 1, U(&abi[1]));
-    int minor = !strcmp(rt_game_target, "dkb458752") ? 30 : 16;
+    int minor = !strcmp(rt_game_target, "dkb458752") || rt_game_is_kar() ? 30 : 16;
     CHECK(abi[0] == 231 && abi[1] == minor, "device ABI %d.%d (expected 231.%d)", abi[0], abi[1], minor);
 
     pmem = mem_kernel_alloc(PROBE_POOL_SIZE, 0x1000);
@@ -457,6 +457,7 @@ static uint64_t record_all(void) {
     REC(OP_PRIM_RESTART, CALL(nvnCommandBufferSetPrimitiveRestart, U(c), 1, 0xffff));
     REC(OP_DRAW_IDX_IND, CALL(nvnCommandBufferDrawElementsIndirect, U(c), NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_INT,
                               0x8000, 0xc000));
+    REC(OP_DRAW_IND, CALL(nvnCommandBufferDrawArraysIndirect, U(c), NVN_DRAW_PRIMITIVE_TRIANGLES, 0xc000));
     REC(OP_DISPATCH_IND, CALL(nvnCommandBufferDispatchComputeIndirect, U(c), 0xc100));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferClearBuffer, U(c), 0xc200, 0x40, 0xdeadbeef));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferReportValue, U(c), 0x1234, 0xc300));

@@ -25,6 +25,7 @@ extern "C" {
 int menu_is_open(void);
 void menu_toggle(void);                   // F1 / Esc on the keyboard, Minus+Plus on the pad
 void menu_perf_cycle(void);               // F10: the performance overlay off, fps, full
+void gfx_request_screenshot(void);        // F12 (gfx_present.c): the next image to screenshots/ (TOTK_SCREENSHOT_KEY)
 
 // ---- events from the window adapter, used only while the menu is open. key: an ImGuiKey; coordinates in pixels of the
 // window's client area, which is the swapchain image.

@@ -130,6 +130,7 @@ typedef struct Pipe {
     const struct Layout *lay;          // graphics: the layout it was entered with
     VkPipeline fast;                   // GPL: the fast-linked pipeline (kept until shutdown: recorded draws use it)
     uint8_t fast_tried;
+    uint8_t used;                      // a draw or dispatch has looked it up (vk_pipeline_usage)
     size_t key_size;
     uint8_t key[];
 } Pipe;
@@ -168,6 +169,17 @@ static void cache_path_init(void) {
 
 // Cache data whose header names another device or driver is dropped before Vulkan sees it.
 static void cache_load(VkCtx *c) {
+    // No VkPipelineCache of ours for Kirby Air Riders (KAR_APP_PIPELINE_CACHE=1 brings it back; =0 drops it for the
+    // other games). Its data lives in RAM for the whole run (1.2 GB growing to 2 GB with the compute prefetch) and
+    // every 20 s save copies all of it again; the drivers keep their own disk cache of compiled shaders. Measured on a
+    // race (rmem2 against rmem4): private 17.8 -> 16.7 GiB, the same boot prewarm time and race frame rate.
+    const char *app = getenv("KAR_APP_PIPELINE_CACHE");
+    if (app ? app[0] == '0' : rt_game_is_kar()) {
+        cache_path_init();   // pipeline-keys.bin (keys_open) sits beside it
+        P.cache = VK_NULL_HANDLE;
+        rt_log("vk_pipeline: no application pipeline cache (the driver's own cache; KAR_APP_PIPELINE_CACHE=1 turns it on)");
+        return;
+    }
     cache_path_init();
     void *data = NULL;
     size_t size = 0;
@@ -1096,7 +1108,8 @@ static void spv_dump(const uint32_t *w, uint64_t words, const GfxShader *src) {
 
 // DKB_SPV_OVERRIDE=<16-hex FNV-1a 64 name>:<path.spv>[,...] (debug only, for #75, max 8 entries): a module whose final
 // SPIR-V hashes to <name> (the hash in the spv_dump file name) is created from the file instead. Parsed once.
-static uint32_t *spv_override(const uint32_t *w, uint64_t words, uint64_t *out_words) {
+// src_h: the shader's own hash (gfx_shader_spirv_fnv, the name vk_dump and KAR_DIAG_* use); either hash matches.
+static uint32_t *spv_override(const uint32_t *w, uint64_t words, uint64_t src_h, uint64_t *out_words) {
     static struct { uint64_t h; char path[PLAT_PATH_MAX * 3]; int bad; } ent[8];
     static int n = -1;
     if (n < 0) {
@@ -1119,7 +1132,7 @@ static uint32_t *spv_override(const uint32_t *w, uint64_t words, uint64_t *out_w
     uint64_t h = 0xcbf29ce484222325ull;
     for (uint64_t i = 0; i < words * 4; i++) h = (h ^ ((const uint8_t *)w)[i]) * 0x100000001b3ull;
     for (int i = 0; i < n; i++) {
-        if (ent[i].h != h || ent[i].bad) continue;
+        if ((ent[i].h != h && ent[i].h != src_h) || ent[i].bad) continue;
         FILE *f = fopen(ent[i].path, "rb");
         long sz = -1;
         if (f && fseek(f, 0, SEEK_END) == 0) sz = ftell(f);
@@ -1221,6 +1234,10 @@ static uint32_t *spirv_fmz(const uint32_t *w, uint64_t n, int vertex_only, uint6
 }
 
 static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w, uint64_t words, int geometry_chain) {
+    // TOTK_SPV_OVERRIDE: replaced before the fixups below, so the file gets the same rewrites as the original.
+    uint64_t ov_n = 0;
+    uint32_t *ov = spv_override(w, words, src ? gfx_shader_spirv_fnv(src) : 0, &ov_n);
+    if (ov) w = ov, words = ov_n;
     uint64_t fixed_n = 0;
     uint32_t *fixed = geometry_chain ? spirv_fixup_linked(w, words, &fixed_n, 1) : spirv_fixup(w, words, &fixed_n);
     if (fixed) w = fixed, words = fixed_n;
@@ -1261,9 +1278,6 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
         }
     }
     spv_dump(w, words, src);
-    uint64_t ov_n = 0;
-    uint32_t *ov = spv_override(w, words, &ov_n);
-    if (ov) w = ov, words = ov_n;
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)words * 4, .pCode = w};
     VkShaderModule m = VK_NULL_HANDLE;
     VkResult r = vkCreateShaderModule(P.device, &ci, NULL, &m);
@@ -1710,6 +1724,7 @@ static VkDescriptorType descriptor_type(int kind, const GfxShaderRes *r) {
     case GFX_RES_SSBO: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     case GFX_RES_TEX:
         if (buffer) return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        if (r->pool_arr && !(r->type & 0xff)) return VK_DESCRIPTOR_TYPE_SAMPLER;   // a Direct sampler-pool array
         if (r->separate) LOG_ONCE("vk_pipeline: a separate texture handle: bound as SAMPLED_IMAGE");
         return r->separate ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     default: return buffer ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -1768,7 +1783,13 @@ static int add_stage(Bindings *B, const GfxShader *s, uint32_t off) {
 
 // The first binding a module's resource variables use that the binding list b[0..n) lacks (module bindings >= 1 moved
 // by off), or -1. A reflection that misses a resource would otherwise hand the driver an invalid layout.
+// Only variables the code references count: Vulkan requires the layout to cover the bindings a shader statically uses,
+// and the translator keeps declaring a constant buffer whose every load it folded away (Kirby Air Riders: c1, the
+// inline constants, decorated Binding 1 but read nowhere once its values were known), which the reflection then omits.
 static int module_binding_missing(const GfxShader *s, const VkDescriptorSetLayoutBinding *b, uint32_t n, uint32_t off) {
+    enum { MAXV = 128 };
+    uint32_t id[MAXV], bind[MAXV], nv = 0;
+    uint8_t used[MAXV] = {0};
     uint64_t words = 0;
     const uint32_t *w = gfx_shader_spirv(s, &words);
     for (uint64_t i = 5; w && i < words;) {
@@ -1777,10 +1798,29 @@ static int module_binding_missing(const GfxShader *s, const VkDescriptorSetLayou
         if (op == SPV_OP_DECORATE && len >= 4 && w[i + 2] == SPV_DEC_BINDING) {
             uint32_t want = w[i + 3] + (w[i + 3] >= 1 ? off : 0), j = 0;
             while (j < n && b[j].binding != want) j++;
-            if (j == n) return (int)w[i + 3];
+            if (j == n) {
+                if (nv == MAXV) return (int)w[i + 3];   // too many to track: missing, as before
+                id[nv] = w[i + 1], bind[nv++] = w[i + 3];
+            }
         }
         i += len;
     }
+    if (!nv) return -1;
+    // A reference is an operand of an instruction that takes a pointer: OpFunctionCall (57), OpImageTexelPointer (60),
+    // OpLoad (61), OpStore (62), OpCopyMemory (63, 64), the access chains (65 to 67), OpArrayLength (68), OpCopyObject
+    // (83), OpSelect (169), the atomics (227 to 242) and OpPhi (245). Other instructions carry literals that can equal
+    // a small id. A memory-access literal that happens to equal the id only keeps the binding, as before.
+    for (uint64_t i = 5; i < words;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > words) break;
+        if ((op >= 57 && op <= 68 && op != 58 && op != 59) || op == 83 || op == 169 || (op >= 227 && op <= 242) || op == 245)
+            for (uint32_t k = 1; k < len; k++)
+                for (uint32_t v = 0; v < nv; v++)
+                    if (w[i + k] == id[v]) used[v] = 1;
+        i += len;
+    }
+    for (uint32_t v = 0; v < nv; v++)
+        if (used[v]) return (int)bind[v];
     return -1;
 }
 
@@ -1798,7 +1838,29 @@ static int layout_covers(const VkPipeState *s, const Layout *l, uint32_t fs_off,
         m = l->set1 ? module_binding_missing(s->fs, l->b + l->n0, l->n - l->n0, 0) : module_binding_missing(s->fs, l->b, l->n, fs_off);
         stage = "fragment";
     }
-    if (m >= 0) snprintf(why, cap, "the %s shader uses binding %d, which its reflection and layout lack", stage, m);
+    if (m >= 0) {
+        snprintf(why, cap, "the %s shader uses binding %d, which its reflection and layout lack", stage, m);
+        // KAR diagnostic: KAR_LACK_DUMP=<dir> saves the first such modules and logs their reflection.
+        static volatile int32_t told;
+        const char *dir = getenv("KAR_LACK_DUMP");
+        const GfxShader *bad = stage[0] == 'v' ? s->vs : stage[0] == 'g' ? s->gs : s->fs;
+        if (dir && *dir && __atomic_fetch_add(&told, 1, __ATOMIC_RELAXED) < 12) {
+            uint64_t words = 0;
+            const uint32_t *w = gfx_shader_spirv(bad, &words);
+            char path[1024];
+            snprintf(path, sizeof path, "%s/lack-%s-%016llx.spv", dir, stage, (unsigned long long)gfx_shader_spirv_fnv(bad));
+            FILE *f = fopen(path, "wb");
+            if (f) fwrite(w, 4, (size_t)words, f), fclose(f);
+            for (int k = 0; k < GFX_RES_KINDS; k++) {
+                const GfxShaderRes *r;
+                int n = gfx_shader_resources(bad, k, &r);
+                for (int i = 0; i < n; i++)
+                    rt_log("kar lack %016llx: kind %d binding %u count %u slot %d cbuf %d handle %#x type %#x sep %d",
+                           (unsigned long long)gfx_shader_spirv_fnv(bad), k, r[i].binding, r[i].count, r[i].slot,
+                           r[i].cbuf_slot, r[i].handle, r[i].type, r[i].separate);
+            }
+        }
+    }
     return m < 0;
 }
 
@@ -2824,9 +2886,97 @@ static void keys_note(const VkPipeState *s) {
     K.pend[K.pend_n++] = r;
 }
 
+// ---- used list (pipeline-used.bin beside pipeline-keys.bin; Kirby Air Riders)
+// The boot prewarm built every record ever written (3373), of which a race used ~160, at ~0.85 MB of driver memory
+// each (16.10). A draw's first lookup of a pipeline enters its record hash here with the session; the prewarm then
+// builds only records used in one of the last PU_KEEP sessions. No file yet: every record (the first session).
+// KAR_PIPE_PREWARM_ALL=1 builds them all. Layout: "KPUS", u32 version 1, u32 session, u32 count, then count entries
+// of the u64 record hash and the u32 session that last used it (and a u32 of padding).
+#define PU_KEEP 8
+typedef struct { uint64_t h; uint32_t session, pad; } PuEnt;
+static struct {
+    PlatMutex m;
+    PuEnt *v;                          // the file's entries sorted by hash, then this session's
+    size_t n, n_file, cap;
+    uint32_t session;
+    int on, loaded, dirty;
+    char path[PLAT_PATH_MAX * 2];
+} PU = {.m = PLAT_MUTEX_INIT};
+
+static int pu_cmp(const void *x, const void *y) {
+    uint64_t a = ((const PuEnt *)x)->h, b = ((const PuEnt *)y)->h;
+    return a < b ? -1 : a > b;
+}
+
+static PuEnt *pu_find(uint64_t h) {
+    PuEnt k = {.h = h};
+    return PU.n_file ? bsearch(&k, PU.v, PU.n_file, sizeof k, pu_cmp) : NULL;
+}
+
+static void pu_load(const char *keys_path) {
+    PU.on = rt_game_is_kar();
+    if (!PU.on) return;
+    snprintf(PU.path, sizeof PU.path, "%s", keys_path);
+    char *dot = strrchr(PU.path, '.');
+    if (dot && dot > PU.path + 4 && !strcmp(dot - 5, "-keys.bin")) strcpy(dot - 5, "-used.bin");
+    else return (void)(PU.on = 0);
+    uint64_t n = 0;
+    uint8_t *f = plat_file_read(PU.path, &n);
+    uint32_t head[4] = {0};
+    if (f && n >= 16) memcpy(head, f, 16);
+    PU.session = 1;
+    if (f && head[0] == 0x5355504bu && head[1] == 1 && n == 16 + (uint64_t)head[3] * sizeof(PuEnt) &&
+        (PU.v = malloc(((size_t)head[3] + 1024) * sizeof(PuEnt)))) {
+        memcpy(PU.v, f + 16, (size_t)head[3] * sizeof(PuEnt));
+        PU.n = PU.n_file = head[3], PU.cap = head[3] + 1024, PU.session = head[2] + 1;
+        qsort(PU.v, PU.n, sizeof(PuEnt), pu_cmp);
+    }
+    free(f);
+    PU.loaded = 1;
+}
+
+// A draw looked up the pipeline of s for the first time this run.
+static void pu_note(const VkPipeState *s) {
+    if (!PU.on || !PU.loaded) return;
+    KeyRec r;
+    rec_fill(&r, s);
+    uint64_t h = rec_hash(&r);
+    plat_mutex_lock(&PU.m);
+    PuEnt *e = pu_find(h);
+    if (e) {
+        if (e->session != PU.session) e->session = PU.session, PU.dirty = 1;
+    } else {
+        if (PU.n == PU.cap) {
+            size_t c = PU.cap ? PU.cap * 2 : 1024;
+            PuEnt *t = realloc(PU.v, c * sizeof *t);
+            if (t) PU.v = t, PU.cap = c;
+        }
+        if (PU.n < PU.cap) PU.v[PU.n++] = (PuEnt){h, PU.session, 0}, PU.dirty = 1;
+    }
+    plat_mutex_unlock(&PU.m);
+}
+
+static void pu_save(void) {
+    plat_mutex_lock(&PU.m);
+    if (!PU.on || !PU.dirty) { plat_mutex_unlock(&PU.m); return; }
+    PU.dirty = 0;
+    size_t keep = 0;
+    uint8_t *buf = malloc(16 + PU.n * sizeof(PuEnt));
+    if (buf) {
+        PuEnt *o = (PuEnt *)(buf + 16);
+        for (size_t i = 0; i < PU.n; i++)
+            if (PU.v[i].session + PU_KEEP > PU.session) o[keep++] = PU.v[i];
+        uint32_t head[4] = {0x5355504bu, 1, PU.session, (uint32_t)keep};
+        memcpy(buf, head, 16);
+    }
+    plat_mutex_unlock(&PU.m);
+    if (buf) plat_file_write_atomic(PU.path, buf, 16 + keep * sizeof(PuEnt)), free(buf);
+}
+
 // Appends the pending records (present thread or exit; never the render thread).
 static void keys_flush(void) {
     if (!K.path[0]) return;
+    pu_save();
     plat_mutex_lock(&K.io);
     plat_mutex_lock(&P.lock);
     KeyRec *r = K.pend;
@@ -2858,6 +3008,7 @@ static void keys_open(void) {
     if (fslash > slash) slash = fslash;
     snprintf(slash ? slash + 1 : K.path, sizeof K.path - (size_t)(slash ? slash + 1 - K.path : 0), "pipeline-keys.bin");
     gfx_shader_record_at(K.path);   // shader-answers.bin next to it (gfx_shader.c)
+    pu_load(K.path);
     FILE *f = fopen(K.path, "rb");
     if (!f) return;
     KeysHeader h;
@@ -3187,6 +3338,7 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
     int queued;
     if (p) {
         if (!p->building) P.stats.hits++;
+        if (!p->used) p->used = 1, pu_note(s);
     } else {
         p = pipe_miss(s, &k, h, async, &queued);
     }
@@ -3303,6 +3455,7 @@ static void warm_builder(void *arg) {
 
 static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]);
 
+static volatile uint32_t prewarm_queued;   // the boot screen's total (vk_pipeline_prewarm_progress)
 void vk_pipeline_prewarm(void) {
     const char *gpu = rt_config()->gpu;
     uint32_t pr_hist[16] = {0}, fs_hist[4] = {0};   // library state of the recorded pipelines (lb_start)
@@ -3317,6 +3470,17 @@ void vk_pipeline_prewarm(void) {
         rt_log("vk_pipeline: prewarm: no pipeline keys (%s)", K.path[0] ? K.path : "<none>");
         if (P.ready) lb_start(pr_hist, fs_hist);
         return;
+    }
+    if (PU.on && PU.n_file && !(getenv("KAR_PIPE_PREWARM_ALL") && *getenv("KAR_PIPE_PREWARM_ALL") == '1')) {
+        KeyRec *w = (KeyRec *)K.file;   // only the records a draw used in the last PU_KEEP sessions
+        size_t kept = 0;
+        for (size_t i = 0; i < K.file_n; i++) {
+            PuEnt *e = pu_find(rec_hash(&w[i]));
+            if (e && e->session + PU_KEEP > PU.session) w[kept++] = w[i];
+        }
+        rt_log("vk_pipeline: prewarm: %zu of %zu records used in the last %d sessions (session %u)", kept, K.file_n,
+               PU_KEEP, PU.session);
+        K.file_n = kept;
     }
     const KeyRec *r = (const KeyRec *)K.file;
     size_t n = K.file_n, m = 0;
@@ -3387,6 +3551,7 @@ void vk_pipeline_prewarm(void) {
     for (int i = 0; i < cpus && i < 64 && queued; i++)
         if ((t[nt] = plat_thread_new(warm_builder, NULL, "pipe prewarm"))) nt++;
     if (!nt) warm_builder(NULL);
+    prewarm_queued = queued;
     for (int i = 0; i < nt; i++)
         while (!plat_thread_join_ns(t[i], 2000000000u))
             rt_log("vk_pipeline: prewarm: %u of %u pipelines, %.0f ms", K.built + K.failed, queued, now_ms() - t1);
@@ -3398,6 +3563,7 @@ void vk_pipeline_prewarm(void) {
     free(K.file);
     K.file = NULL;
     plat_mutex_unlock(&P.lock);
+    gfx_shader_drop_all_spirv();   // the prewarm's pipelines are built; their shaders' SPIR-V is loaded again on demand
     lb_start(pr_hist, fs_hist);
 }
 
@@ -3481,9 +3647,124 @@ static struct {
     PlatMutex stat;
 } LB = {.stat = PLAT_MUTEX_INIT};
 
+// ---- asynchronous compute pipelines (Kirby Air Riders)
+// The replay used to build a missing compute pipeline on the spot, with P.lock held. Kirby's lowered compute programs
+// are large (600 KB of SPIR-V, 1.5 s of NVIDIA compiler each, hundreds of them), so the game ran at one frame a
+// minute. vk_pipeline_compute_async queues the build to CS_WORKERS background threads and returns no pipeline until it
+// is done; the replay skips the dispatch meanwhile, as it skips draws whose graphics pipeline is building.
+// KAR_CS_ASYNC=0 builds them on the replay thread as before.
+#define CS_WORKERS 4
+#define CQ_N 4096
+static struct {
+    PlatMutex m;
+    PlatCond c;
+    const GfxShader *q[CQ_N];
+    uint32_t head, tail;
+    int started;
+} CQ = {PLAT_MUTEX_INIT, PLAT_COND_INIT};
+static const GfxShader *cpend[8192];   // shaders queued or building; open addressing under P.lock, NULL = free
+
+static uint32_t cpend_slot(const GfxShader *cs) { return (uint32_t)(((uintptr_t)cs >> 4) * 0x9E3779B1u) & 8191; }
+static int cpend_has(const GfxShader *cs) {
+    for (uint32_t i = cpend_slot(cs), n = 0; n < 8192 && cpend[i]; i = (i + 1) & 8191, n++)
+        if (cpend[i] == cs) return 1;
+    return 0;
+}
+static int cpend_add(const GfxShader *cs) {
+    for (uint32_t i = cpend_slot(cs), n = 0; n < 8192; i = (i + 1) & 8191, n++)
+        if (!cpend[i] || cpend[i] == (const GfxShader *)1) { cpend[i] = cs; return 1; }
+    return 0;
+}
+static void cpend_del(const GfxShader *cs) {
+    for (uint32_t i = cpend_slot(cs), n = 0; n < 8192 && cpend[i]; i = (i + 1) & 8191, n++)
+        if (cpend[i] == cs) { cpend[i] = (const GfxShader *)1; return; }   // a tombstone keeps later probes going
+}
+
+static Pipe *compute_build(const GfxShader *cs, int locked);
+
+static void cs_worker(void *arg) {
+    (void)arg;
+    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+    for (;;) {
+        plat_mutex_lock(&CQ.m);
+        while (CQ.head == CQ.tail) plat_cond_wait(&CQ.c, &CQ.m);
+        const GfxShader *cs = CQ.q[CQ.head++ % CQ_N];
+        plat_mutex_unlock(&CQ.m);
+        compute_build(cs, 0);
+        plat_mutex_lock(&P.lock);
+        cpend_del(cs);
+        plat_mutex_unlock(&P.lock);
+    }
+}
+
+// gfx_shader.c compute prefetch: a prefetched compute shader's pipeline is queued for the background builders, so the
+// first dispatch finds it built. Before the pipeline state is set up (boot) only the shader is kept.
+VkPipeline vk_pipeline_compute_async(const GfxShader *cs, const VkPipeInfo **info, int *pending);
+static void cs_prefetch_sink(const GfxShader *cs) {
+    if (!__atomic_load_n(&P.ready, __ATOMIC_ACQUIRE)) return;
+    int pending;
+    vk_pipeline_compute_async(cs, NULL, &pending);
+}
+__attribute__((constructor)) static void cs_prefetch_register(void) { gfx_shader_set_prefetch_sink(cs_prefetch_sink); }
+
+// The pipeline of cs, or none while a background worker builds it (*pending = 1). Never blocks on the compiler.
+VkPipeline vk_pipeline_compute_async(const GfxShader *cs, const VkPipeInfo **info, int *pending) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("KAR_CS_ASYNC");
+        on = !(e && e[0] == '0');
+    }
+    *pending = 0;
+    if (!on) return vk_pipeline_compute(cs, info);
+    if (info) *info = NULL;
+    if (!cs || !ensure_init()) return VK_NULL_HANDLE;
+    struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
+    uint64_t h = key_hash(&k, sizeof k);
+    plat_mutex_lock(&P.lock);
+    Pipe *p = pipe_find(&k, sizeof k, h);
+    if (p) {
+        P.stats.hits++;
+        if (info) p->used = 1;   // a dispatch's lookup (the prefetch's passes no info)
+        plat_mutex_unlock(&P.lock);
+        if (info) *info = &p->info;
+        return p->info.pipeline;
+    }
+    int queued = cpend_has(cs);
+    if (!queued) {
+        plat_mutex_lock(&CQ.m);
+        if (CQ.tail - CQ.head < CQ_N && cpend_add(cs)) {
+            CQ.q[CQ.tail++ % CQ_N] = cs;
+            queued = 1;
+            if (!CQ.started) {
+                CQ.started = 1;
+                // KAR_CS_WORKERS (1-8, default CS_WORKERS): each builder thread gets its own compiler arena in the
+                // driver, ~1 GB each on NVIDIA with the megabyte compute shaders (KAR_MEM_MAP, 16.10).
+                const char *we = getenv("KAR_CS_WORKERS");
+                int nw = we ? atoi(we) : CS_WORKERS;
+                nw = nw < 1 ? 1 : nw > 8 ? 8 : nw;
+                for (int i = 0; i < nw; i++) plat_thread_spawn(cs_worker, NULL, "vk compute builder", 0);
+            }
+            plat_cond_signal(&CQ.c);
+        }
+        plat_mutex_unlock(&CQ.m);
+    }
+    plat_mutex_unlock(&P.lock);
+    if (queued) { *pending = 1; return VK_NULL_HANDLE; }
+    return vk_pipeline_compute(cs, info);   // the queue is full: build it here
+}
+
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
     if (info) *info = NULL;
     if (!cs || !ensure_init()) return VK_NULL_HANDLE;
+    Pipe *p = compute_build(cs, 1);
+    if (!p) return VK_NULL_HANDLE;
+    if (info) *info = &p->info;
+    return p->info.pipeline;
+}
+
+// Finds or builds the pipeline of cs. locked = 1: P.lock is held through the compiler, as the synchronous path always
+// did; 0: only around the lookups, the layout and the insertion (background workers).
+static Pipe *compute_build(const GfxShader *cs, int locked) {
     struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
     uint64_t h = key_hash(&k, sizeof k);
     plat_mutex_lock(&P.lock);
@@ -3494,13 +3775,34 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
         const char *why = NULL;
         Bindings B = {0};
         Layout *l = compute_layout(cs, &B, &why);
+        if (!locked) plat_mutex_unlock(&P.lock);
         VkPipeline pipe = VK_NULL_HANDLE;
+        // Kirby Air Riders: a few lowered compute programs translate to SPIR-V of megabytes that the NVIDIA compiler
+        // takes minutes over, on the replay thread with P.lock held, so the game stalls at one frame a minute. Those
+        // above KAR_CS_SPV_MAX bytes (default 1 MiB, 0 = no cap) are not built: their dispatches are skipped.
+        static long long spv_max = -1;
+        if (spv_max < 0) {
+            const char *e = getenv("KAR_CS_SPV_MAX");
+            spv_max = e ? atoll(e) : (4ll << 20);   // builds are asynchronous (vk_pipeline_compute_async)
+        }
+        uint64_t words = 0;
+        if (!why) gfx_shader_spirv(cs, &words);
+        if (!why && spv_max > 0 && (long long)(words * 4) > spv_max) {
+            why = "SPIR-V over KAR_CS_SPV_MAX";
+            rt_log("vk_pipeline: compute shader of %llu bytes of SPIR-V skipped (KAR_CS_SPV_MAX %lld)",
+                   (unsigned long long)words * 4, spv_max);
+        }
         if (!why) {
-            uint64_t p0 = perf_begin();
+            uint64_t p0 = perf_begin(), t0 = plat_now_ns();
             pipe = compute_create(cs, l);
             perf_end(PERF_PIPE, p0);
+            uint64_t ms = (plat_now_ns() - t0) / 1000000;
+            if (ms >= 500) rt_log("vk_pipeline: compute pipeline of %llu bytes of SPIR-V took %llu ms",
+                                  (unsigned long long)words * 4, (unsigned long long)ms);
             if (!pipe) why = "pipeline creation failed";
+            else gfx_shader_drop_spirv(cs);   // only its pipeline needs the SPIR-V (gfx_shader.c)
         }
+        if (!locked) plat_mutex_lock(&P.lock);
         if (why) {
             P.stats.failures++;
             rt_log("vk_pipeline: compute pipeline not built: %s", why);
@@ -3508,12 +3810,16 @@ VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
             P.stats.compute++;
             LB.cs_draw++;
         }
-        p = pipe_add(&k, sizeof k, h, pipe, l, l ? &B : NULL, VK_PIPELINE_BIND_POINT_COMPUTE, 0);
+        Pipe *other = locked ? NULL : pipe_find(&k, sizeof k, h);   // built meanwhile by the synchronous path
+        if (other) {
+            if (pipe) vkDestroyPipeline(P.device, pipe, NULL);
+            p = other;
+        } else {
+            p = pipe_add(&k, sizeof k, h, pipe, l, l ? &B : NULL, VK_PIPELINE_BIND_POINT_COMPUTE, 0);
+        }
     }
     plat_mutex_unlock(&P.lock);
-    if (!p) return VK_NULL_HANDLE;
-    if (info) *info = &p->info;
-    return p->info.pipeline;
+    return p;
 }
 
 static void lb_lock(void) {
@@ -3709,6 +4015,13 @@ static void lb_start(const uint32_t pr_hist[16], const uint32_t fs_hist[4]) {
     const char *e = cfg_value("TOTK_LIB_PREBUILD"), *ke = cfg_get("TOTK_LIB_PREBUILD_KEEP");
     const char *te = cfg_get("TOTK_LIB_PREBUILD_THREADS");   // no fixed default: a quarter of the CPUs when unset
     if (!A.on || !cfg_bool("TOTK_LIB_PREBUILD")) return;
+    // Kirby Air Riders: off unless set. Its boot prebuild held ~7 GB of commit (private 29 GB → 22 GB without it) for
+    // the same race frame rate on a warm driver cache.
+    const char *set = cfg_get("TOTK_LIB_PREBUILD");
+    if ((!set || !*set) && rt_game_is_kar()) {
+        rt_log("vk_pipeline: stage library prebuild off for kar* (TOTK_LIB_PREBUILD=1 turns it on)");
+        return;
+    }
     GfxWarmEnt *all = NULL;
     size_t total = gfx_shader_warm_list(&all), n = 0, n_cs = 0;
     LB.keep_n = ke && *ke ? atoi(ke) : 0;
@@ -4270,4 +4583,26 @@ int vk_pipeline_selftest(void) {
     int ok = built > 0 && cbuilt > 0 && cached && recorded && errors == 0;
     printf("vk_pipeline selftest: %s\n", ok ? "passed" : "FAILED");
     return ok ? 0 : 1;
+}
+
+// Census (vk_memory.c, 16.10): pipelines built and those a draw or dispatch looked up, compute and graphics. Every
+// pipeline holds driver memory (~0.5 MB each on NVIDIA), so built but unused ones are what a prebuild costs.
+void vk_pipeline_usage(uint32_t out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 0;
+    if (!P.ready) return;
+    plat_mutex_lock(&P.lock);
+    for (size_t b = 0; b < PIPE_BUCKETS; b++)
+        for (Pipe *p = pipes[b]; p; p = p->next) {
+            if (!p->info.pipeline) continue;
+            int cs = p->key_size == sizeof(struct { const GfxShader *cs; uint32_t compute; });
+            out[cs ? 0 : 2]++;
+            if (p->used) out[cs ? 1 : 3]++;
+        }
+    plat_mutex_unlock(&P.lock);
+}
+
+// The boot screen's progress (boot_screen.c): pipelines of the boot prewarm built or failed, of those queued.
+void vk_pipeline_prewarm_progress(uint32_t *done, uint32_t *total) {
+    *total = prewarm_queued;
+    *done = K.built + K.failed;
 }

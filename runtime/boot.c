@@ -236,7 +236,7 @@ static void save_shot(const tex_t *t, const char *path) {
         }
     rt_write_png(path, px, w, h);
     free(px);
-    rt_logf("boot: shot %s (%ux%u)\n", path, w, h);
+    rt_log("boot: shot %s (%ux%u) at %.3f s", path, w, h, kern_now_ns() / 1e9);   // wall time: game-speed checks
 }
 
 // TOTK_SHOTS=lo-hi:step [TOTK_SHOTS_DIR=dir]: every step-th present in [lo, hi] saved as <dir>/f<n>.png (n the
@@ -294,6 +294,7 @@ static void series_shot(const tex_t *t, uint64_t n) {
     char path[PLAT_PATH_MAX];
     snprintf(path, sizeof path, "%s/f%05llu.png", dir, (unsigned long long)n);
     rt_write_png(path, out, ow, oh);
+    rt_log("boot: shot f%05llu at %.3f s", (unsigned long long)n, kern_now_ns() / 1e9);   // wall time: game-speed checks (16.11)
     free(out);
     free(px);
 }
@@ -338,6 +339,9 @@ static void guest_main(Cpu *c) {
     rt_fatal("boot: nn::init::Start returned");
 }
 
+void boot_screen_start(void);
+void boot_screen_stop(void);
+
 static void prewarm_main(void *arg) {
     (void)arg;
     vk_pipeline_prewarm();
@@ -354,10 +358,12 @@ static void boot_main(void *arg) {
     check_npdm();
     if (!rt_config()->shot) vk_pipeline_async_enable();   // a --shot image must not depend on build timing
     // Shaders and pipelines recorded in earlier runs are made ready while the modules load; the guest waits for them.
+    boot_screen_start();   // boot_screen.c: shows the prewarm's progress until the guest starts
     PlatThread *warm = plat_thread_new(prewarm_main, NULL, "prewarm");
     ldr_load(rt_config()->exefs);
     rt_patches_init();
     dkb_camera_init();
+    kar_menu_init();
     frame_step_init();
     res_init();
     cb_addr[0] = hostfn_register("<rtld loader_ready>", cb_loader_ready);
@@ -368,6 +374,7 @@ static void boot_main(void *arg) {
     if (warm) plat_thread_join(warm);
     else vk_pipeline_prewarm();
     held = plat_now_ms() - held;
+    boot_screen_stop();
     rt_log("boot: guest starts %llu ms after process start (%llu ms of it waiting for the prewarm)",
            (unsigned long long)(plat_process_uptime_ns() / 1000000), (unsigned long long)held);
     rt_guest_start_ns = kern_now_ns();

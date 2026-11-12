@@ -327,6 +327,12 @@ class Lifter:
                                        bits(w, 8, 4), bits(w, 5, 3), bits(w, 0, 5))
         if op0 == 0 and not L:
             if crn == 2 and op1 == 3 and rt == 31:  # hints
+                if crm == 0 and op2 == 1:
+                    # YIELD: the guest says it is spinning. On the Switch the spinner holds only its own core; here
+                    # a spinner at equal priority can keep the virtual core the lock holder needs (Kirby Air Riders'
+                    # job scheduler at main+0xe926c0 spun forever on its fiber switch lock). rt_spin_gate hands the
+                    # core to a waiting thread once the spin has lasted a while; it touches no guest register.
+                    return Insn('op', f'rt_spin_gate(c, {hx(pc)});')
                 return Insn('op', '/* hint */')
             if crn == 3 and op1 == 3 and rt == 31:  # barriers
                 if op2 == 2:

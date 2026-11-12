@@ -77,8 +77,14 @@ typedef struct VkExec {
     VkPipeState pipe;
 
     // ---- vk_exec_draw.c slots (draws, binds, dispatch): left empty by vk_exec.c
-    const prog_t *prog;                  // OP_BIND_PROGRAM
+    const prog_t *prog;                  // the program of the draw or dispatch being replayed: gprog or cprog
     int32_t prog_stages;
+    // OP_BIND_PROGRAM replaces only the stages in its mask (NVN), so a compute bind leaves the graphics program bound
+    // and the other way round.
+    // Kirby Air Riders binds each stage from its own program (VS from one, FS from another, NULL for GS), so the
+    // program of each NVN stage (bit i of the mask = stage i) is kept, and a draw whose stages come from different
+    // programs gets a composite of them (vk_exec_draw.c, composite_prog).
+    const prog_t *sprog[6];
     NVNbufferRange vbuf[16];             // OP_BIND_VBUF
     p_bind_buf ubo[6][18], ssbo[6][16];  // OP_BIND_UBO / OP_BIND_SSBO per stage and index
     uint64_t tex[6][128], samp[6][128], img[6][32];   // OP_BIND_TEX / OP_BIND_SAMP / OP_BIND_IMG handles per stage
@@ -119,6 +125,14 @@ int vk_exec_reset_indirect(VkExec *ex, uint64_t list_addr, uint32_t descriptor_b
 // Begins dynamic rendering with the current targets unless a pass is open (a full memory barrier precedes it). Call
 // before a draw or an attachment clear.
 void vk_exec_pass_begin(VkExec *ex);
+// The newest single-sample colour render target of `format` narrower than max_w, with dst_w x dst_h's aspect ratio
+// (2 %), written in a pass that ended at gfx frame stamp >= min_stamp; *w, *h its size. VK_NULL_HANDLE if none.
+void vk_exec_note_drawn(VkImage image);   // a colour attachment, storage image or copy destination of the replay
+int vk_exec_was_drawn(VkImage image);      // drawn into within the last 8 gfx frames
+void vk_exec_rt_note_storage(const VkTexImage *img);   // a storage image bound now: drawn, and a fallback source
+void vk_exec_rt_forget(VkImage image);    // the image was retired (vk_defer_image): never a fallback source again
+VkImage vk_exec_rt_newest(VkFormat format, uint32_t max_w, uint32_t dst_w, uint32_t dst_h, uint64_t min_stamp,
+                          uint32_t *w, uint32_t *h);
 // Ends the open pass (no-op without one) and marks its targets GPU-written. Call before copies and dispatches.
 void vk_exec_pass_end(VkExec *ex);
 // Full memory barrier (all commands, all memory); ends the open pass first. Copies and dispatches order themselves with
@@ -165,6 +179,7 @@ void vk_exec_frame_log(const tex_t *presented, uint64_t frame);
 // textures, samplers) and images.txt (per image value statistics). The hooks run only when vk_dump_armed is set.
 extern int vk_dump_armed;
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
+int vk_dump_split_draw(const VkExec *ex);   // TOTK_DUMP_DRAWS: end the pass after this draw
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds
 void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPipeInfo *info, const p_dispatch *d);

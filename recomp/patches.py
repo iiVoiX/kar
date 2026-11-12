@@ -10,7 +10,9 @@ Lifted code cannot be byte-patched when the game runs, so a patch is applied whe
 
 <address> is a module offset (hex), <original> the instruction word the module has there (checked; a mismatch stops
 the generator), each <replacement> an instruction word (hex) or `@page:x<n>`, which is `adrp x<n>, <patch page>`
-encoded for the site's address. The patch page is the first 4 KiB page after main's image (layout.py leaves the rest
+encoded for the site's address, or (last word only) `@call:<offset>`, a call of the patch page + <offset> with the
+site's return address that is not encoded as an instruction, so it has no `bl` range limit (Kirby's sites lie more than
+128 MiB below the page). The patch page is the first 4 KiB page after main's image (layout.py leaves the rest
 of the 2 MiB-aligned module slot free); the runtime commits it and owns its contents. Words in use, by byte offset:
 +0..15 the frame-rate step (runtime/frame_rate.c), +16..55 the output, swapchain and scene sizes
 (runtime/resolution.c res_init), +56..59 the camera's aspect ratio (runtime/resolution.c res_init, set aspect), +60..63
@@ -64,7 +66,8 @@ class Table:
         out = {}
         for off, (k, repl, _) in self.sites.get(name, {}).items():
             a = base + off
-            out[a] = (k, [adrp(a, self.page, w[1]) if isinstance(w, tuple) else w for w in repl])
+            out[a] = (k, [w if not isinstance(w, tuple) else ('call', self.page + w[1]) if w[0] == 'call'
+                          else adrp(a, self.page, w[1]) for w in repl])
         return out
 
 
@@ -72,7 +75,7 @@ def load(path, mods):
     """Table from a patch file; mods is layout() output [(name, base, size)]."""
     sets, index, sites, spins = [], {}, {}, {}
     bases = {n: (b, s) for n, b, s in mods}
-    for no, raw in enumerate(Path(path).read_text().splitlines(), 1):
+    for no, raw in enumerate(Path(path).read_text(encoding='utf-8-sig').splitlines(), 1):
         f = raw.split('#', 1)[0].split()
         if not f:
             continue
@@ -92,6 +95,10 @@ def load(path, mods):
             for w in f[5:]:
                 if w.startswith('@page:x'):
                     repl.append(('page', int(w[7:])))
+                elif w.startswith('@call:'):
+                    if w is not f[-1]:
+                        raise PatchError(f'{where}: @call must be the last replacement word')
+                    repl.append(('call', int(w[6:], 16)))
                 else:
                     repl.append(int(w, 16))
             mod = sites.setdefault(f[2], {})

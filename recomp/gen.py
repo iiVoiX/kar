@@ -22,6 +22,7 @@ time and resolves its jump tables (recomp/jumptables.py), so memory per worker d
 Chunks are sized from a per-instruction estimate of the C they produce, so their names and contents only depend on
 the input; a chunk whose text did not change is not rewritten and keeps its mtime.
 """
+import types
 import argparse
 import json
 import multiprocessing as mp
@@ -44,7 +45,7 @@ import jumptables  # noqa: E402
 import patches  # noqa: E402
 import regs  # noqa: E402
 from check_content import GENERATED_MARKER  # noqa: E402
-from layout import layout, write as write_layout  # noqa: E402
+from layout import layout, layout_nro, write as write_layout, write_nro  # noqa: E402
 from lifter import hx  # noqa: E402
 from module import Module  # noqa: E402
 
@@ -254,7 +255,8 @@ class Emitter:
 
     def replacements(self, a):
         """Lifted replacement words of the patched site a."""
-        return [self.mod.lifter.lift(w, a) for w in self.patched[a][1]]
+        return [types.SimpleNamespace(kind='bl', target=w[1]) if isinstance(w, tuple) else self.mod.lifter.lift(w, a)
+                for w in self.patched[a][1]]
 
     @staticmethod
     def flow(insns, entry, end, tables):
@@ -397,7 +399,7 @@ class Emitter:
                 elif r.kind == 'bl' and j == len(words) - 1:
                     repl.append(call(r.target, a))
                 else:
-                    raise patches.PatchError(f'{a:#x}: replacement word {w:08x} is a {r.kind}')
+                    raise patches.PatchError(f'{a:#x}: replacement word {w} is a {r.kind}')
             orig = op(i, ins.code) if ins.kind == 'op' else call(ins.target, a)
             self.uses_patches = True
             self.stats['patched_sites'] += 1
@@ -622,25 +624,37 @@ def main():
     ap.add_argument('--no-callee-saved-trust', action='store_true',
                     help='reload X19-X29 and SP after every call too, instead of trusting AAPCS64 (slower; for '
                          'telling a broken callee from a generator bug)')
+    ap.add_argument('--nro', action='append', default=[], metavar='NAME=PATH',
+                    help='an NRO the game maps through nn::ro (from the RomFS), lifted too and placed after the ExeFS '
+                         'modules in nro_layout.json/.h; repeatable')
     args = ap.parse_args()
     opts = {'reg_locals': args.reg_locals, 'callee_saved': not args.no_callee_saved_trust}
 
     t0 = time.perf_counter()
     mods = layout(args.exefs)
     write_layout(mods, args.out)
-    table = patches.load(args.patches, mods) if args.patches else patches.Table()
+    nro_paths = {}
+    for spec in args.nro:
+        name, sep, p = spec.partition('=')
+        if not sep or not Path(p).is_file():
+            raise SystemExit(f'--nro {spec!r}: want NAME=PATH to an existing file')
+        nro_paths[name] = Path(p)
+    nros = layout_nro(mods, list(nro_paths.items()))
+    if nros:
+        write_nro(nros, nro_paths, args.out)
+    table = patches.load(args.patches, mods + nros) if args.patches else patches.Table()
     write_if_changed(args.out / 'patches.h', patches.header_text(table, GENERATED_MARKER))
-    want = args.modules.split(',')
-    unknown = set(want) - {n for n, _, _ in mods}
+    want = [m for m in args.modules.split(',') if m] + list(nro_paths)
+    unknown = set(want) - {n for n, _, _ in mods + nros}
     if unknown:
         raise SystemExit(f'not in {args.exefs}: {", ".join(sorted(unknown))}')
 
     paths, starts_abs, info, tasks = {}, {}, {}, []
-    for name, base, _ in mods:
+    for name, base, _ in mods + nros:
         if name not in want:
             continue
         t = time.perf_counter()
-        path = args.exefs / name
+        path = nro_paths.get(name, args.exefs / name)
         mod = Module(name, path, base, 'c')
         patches.check(table, mod, name)
         starts, dstats = discover(mod)

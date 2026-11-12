@@ -38,11 +38,11 @@
 #include "vk_exec.h"
 #include "platform/platform.h"
 
-#define MAX_PASSES 400
+#define MAX_PASSES 2000
 #define PNG_CAP (2ull << 30)
 #define INFLIGHT_CAP (3ull << 30)   // host buffers waiting for their submission
-#define MAX_ENTS 48                 // distinct pipeline + texture sets listed per pass
-#define MAX_LUTS 256                // 3D textures and small sampled 8-bit 2D textures dumped per frame
+#define MAX_ENTS 1024               // distinct pipeline + texture sets listed per pass (48 cut off the big scene passes)
+#define MAX_LUTS 1024               // 3D textures and small sampled 8-bit 2D textures dumped per frame
 #define TEX2D_CAP (1u << 20)        // texels of a sampled 2D texture that is dumped
 
 int vk_dump_armed;
@@ -50,7 +50,9 @@ static uint64_t dump_frame, log_from;   // log_from: TOTK_DUMP_LOG, first frame 
 static char dir[400];
 static FILE *passes_f, *images_f;
 static int seq, finished, copied;      // copied: passes and dispatches of the dump frame whose images were copied
+static int draws_fmt;                  // TOTK_DUMP_DRAWS (vk_dump_split_draw): also raw .bin files
 static int skip_runs, dump_ubo;        // TOTK_DUMP_SKIP_RUNS, TOTK_DUMP_UBO
+static int dump_gpu_tex;              // TOTK_DUMP_TEX=gpu: every GPU-written 2D texture sampled in the frame
 static uint32_t want_tex[16][2];       // TOTK_DUMP_TEX: slot id and 0, or width and height
 static int nwant_tex;
 static uint64_t last_targets;          // targets_sig of the last render pass; 0 after a dispatch
@@ -267,12 +269,21 @@ static void write_images(const Job *j) {
         rt_write_png(path, out, pw, ph);
     }
     free(nanm);
+    if (draws_fmt) {   // TOTK_DUMP_DRAWS: the raw texels too, for per-draw differences in HDR values
+        char path[600];
+        snprintf(path, sizeof path, "%s/%s.bin", dir, j->name);
+        FILE *rf = fopen(path, "wb");
+        if (rf) fwrite(j->map, 1, (size_t)((uint64_t)j->w * j->h * j->d * j->f->bytes), rf), fclose(rf);
+    }
     uint64_t all = distinct(j, 0, j->h), top = distinct(j, 0, j->h / 4 ? j->h / 4 : 1);
     plat_mutex_lock(&img_lock);
     if (images_f) {
-        fprintf(images_f, "%s %ux%ux%u min %g %g %g %g max %g %g %g %g distinct %llu top-quarter %llu nan %llu\n", j->name,
-                j->w, j->h, j->d, mn[0], mn[1], mn[2], mn[3], mx[0], mx[1], mx[2], mx[3], (unsigned long long)all,
-                (unsigned long long)top, (unsigned long long)nans);
+        uint64_t fnv = 0xcbf29ce484222325ull;   // FNV-1a 64 of the raw texels: compares a texture across two runs
+        const uint8_t *raw = (const uint8_t *)j->map;
+        for (uint64_t i = 0, nb = (uint64_t)j->w * j->h * j->d * j->f->bytes; i < nb; i++) fnv = (fnv ^ raw[i]) * 0x100000001b3ull;
+        fprintf(images_f, "%s %ux%ux%u min %g %g %g %g max %g %g %g %g distinct %llu top-quarter %llu nan %llu hash %016llx\n",
+                j->name, j->w, j->h, j->d, mn[0], mn[1], mn[2], mn[3], mx[0], mx[1], mx[2], mx[3], (unsigned long long)all,
+                (unsigned long long)top, (unsigned long long)nans, (unsigned long long)fnv);
         fflush(images_f);
     }
     plat_mutex_unlock(&img_lock);
@@ -458,6 +469,14 @@ static int active(void) {
 }
 static uint64_t frame_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1; }
 
+// TOTK_DUMP_DRAWS=<VkFormat> (pixel history): in the dump frame, a render pass whose colour target 0 has that format
+// ends after every draw (vk_exec_draw.c note_work), so each draw gets its own "pass" entry with its pipeline and the
+// target's image and value statistics as they are after that draw. The next draw resumes the pass (load op LOAD).
+int vk_dump_split_draw(const VkExec *ex) {
+    return draws_fmt && ex->in_pass && frame_now() == dump_frame && !finished && ex->color[0].image &&
+           (int)ex->color[0].format == draws_fmt;
+}
+
 typedef struct { char *s; size_t n, cap; } Str;
 
 __attribute__((format(printf, 2, 3))) static void sp(Str *b, const char *fmt, ...) {
@@ -536,7 +555,12 @@ static void flush_luts(VkExec *ex, int n) {
                  (int)l->format, fmt_name(l->format, fn), bf ? "_blocks" : "");
         const char *why = bf ? copy_region(ex, l->image, bf, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0,
                                            (VkExtent3D){l->w, l->h, l->d}, (l->w + 3) / 4, (l->h + 3) / 4, l->d, name)
-                             : copy_out(ex, l->image, l->format, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, l->w, l->h, l->d, name);
+                             : copy_out(ex, l->image, l->format,
+                                        l->format == VK_FORMAT_D16_UNORM || l->format == VK_FORMAT_D32_SFLOAT ||
+                                                l->format == VK_FORMAT_X8_D24_UNORM_PACK32
+                                            ? VK_IMAGE_ASPECT_DEPTH_BIT   // a depth texture asked for by id (TOTK_DUMP_TEX=<id>)
+                                            : VK_IMAGE_ASPECT_COLOR_BIT,
+                                        0, 0, l->w, l->h, l->d, name);
         fprintf(passes_f, "  %s tex %d -> %s.png%s%s\n", l->is2d ? "2D" : "3D", l->id, name, why ? " skipped: " : "",
                 why ? why : "");
     }
@@ -576,6 +600,52 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
                 if (ex->ssbo[st][k].addr)
                     sp(b, " %d=%#llx+%#llx", k, (unsigned long long)ex->ssbo[st][k].addr, (unsigned long long)ex->ssbo[st][k].size);
             sp(b, "\n");
+            // Kirby's character fragment shader (fs 0432bb88) picks its light parameters from a light zone: zone number
+            // at fs slot 0 +460 (u32), zone id = slot 5[number] (bounds-checked against slot 5's size), record at
+            // slot 4 + id * 320 (sphere centre +16..+24, radius +28). Print what the CPU sees (the cave glow).
+            if (st == 1 && r->cbuf_slot == 0 && r->handle * 4 == 0x550) {
+                const p_bind_buf *s0 = &ex->ssbo[1][0], *s4 = &ex->ssbo[1][4], *s5 = &ex->ssbo[1][5];
+                VkMemSpan zm;
+                if (s0->addr && vk_mem_resolve(s0->addr + 456, 8, &zm)) {
+                    const uint32_t *z = (const uint32_t *)(uintptr_t)(s0->addr + 456);
+                    sp(b, "    zone: s0+456 %#x +460 %#x;", z[0], z[1]);
+                    if (s5->addr && s5->size && vk_mem_resolve(s5->addr, s5->size, &zm)) {
+                        sp(b, " s5:");
+                        for (uint64_t k = 0; k < s5->size / 4 && k < 16; k++)
+                            sp(b, " %#x", ((const uint32_t *)(uintptr_t)s5->addr)[k]);
+                    }
+                    sp(b, "\n");
+                    for (uint32_t id = 0; id < 4; id++)
+                        if (s4->addr && vk_mem_resolve(s4->addr + id * 320, 32, &zm)) {
+                            const float *f = (const float *)(uintptr_t)(s4->addr + id * 320);
+                            sp(b, "    zone rec %u%s: %g %g %g %g | %g %g %g %g\n", id, id * 320 >= s4->size ? " (past bound)" : "",
+                               f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+                        }
+                }
+            }
+            // Kirby's body vertex shader (vs c2cdafed) scales its light-probe ambient by the three floats at +272 of a
+            // vertex storage buffer (s1): print them for every bound vertex buffer large enough, to see whether that
+            // factor drops in dark places (the cave glow).
+            // The NVN slot is the c0 table entry (vertex table at 0x110, 16 bytes each): s1 at c0+0x180 is slot 7.
+            int nslot = r->cbuf_slot == 0 && r->handle * 4 >= 0x110 && (r->handle * 4 - 0x110) % 16 == 0
+                            ? (r->handle * 4 - 0x110) / 16 : -1;
+            if (st == 0 && nslot >= 0 && nslot < 16) {
+                const p_bind_buf *kb = &ex->ssbo[st][nslot];
+                VkMemSpan kms;
+                if (kb->addr && vk_mem_resolve(kb->addr + 272, 12, &kms)) {   // also past the bound size
+                    const float *f = (const float *)(uintptr_t)(kb->addr + 272);
+                    sp(b, "    vs ssbo c0+%#x = slot %d at %#llx size %#llx +272: %g %g %g\n", r->handle * 4, nslot,
+                       (unsigned long long)kb->addr, (unsigned long long)kb->size, f[0], f[1], f[2]);
+                }
+            }
+            // Kirby's per-object block (vertex slot 2, address at c0+0x130): colour at +144, fog scale at +376.
+            VkMemSpan oms;
+            const p_bind_buf *ob = &ex->ssbo[st][2];
+            if (st == 0 && r->cbuf_slot == 0 && r->handle * 4 == 0x130 && ob->size >= 380 && vk_mem_resolve(ob->addr, 380, &oms)) {
+                const float *f = (const float *)(uintptr_t)ob->addr;
+                sp(b, "    vs obj block %#llx: [0] %g %g %g %g [144] %g %g %g %g [376] %g\n", (unsigned long long)ob->addr,
+                   f[0], f[1], f[2], f[3], f[36], f[37], f[38], f[39], f[94]);
+            }
             continue;
         }
         if (r && bd->kind == GFX_RES_UBO && dump_ubo && r->slot >= 3 && r->slot - 3 < 18) {
@@ -585,8 +655,14 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             sp(b, "    %s ubo c%d addr %#llx size %#llx", stn[st], r->slot, (unsigned long long)u->addr, (unsigned long long)u->size);
             if (u->addr && vk_mem_resolve(u->addr, 1, &ms)) {
                 uint64_t n = u->size && u->size < ms.avail ? u->size : ms.avail;
+                // The submit-time copy (vk_usnap.c) when there is one: what the draw read, not the next frame's data.
+                static float snapf[180 * 4];
                 const float *f = (const float *)(uintptr_t)u->addr;
-                for (uint64_t k = 0; k < 16 && (k + 1) * 16 <= n; k++)
+                uint64_t want = n < sizeof snapf ? n : sizeof snapf;
+                int snapped = vk_usnap_read(u->addr, snapf, want);
+                if (snapped) f = snapf;
+                sp(b, snapped ? " (submit copy)" : " (live)");
+                for (uint64_t k = 0; k < 180 && (k + 1) * 16 <= n; k++)   // 180: the lighting reads c4[0..174]
                     sp(b, "%s[%llu] %g %g %g %g", k % 4 ? " " : "\n      ", (unsigned long long)k, f[4 * k], f[4 * k + 1],
                        f[4 * k + 2], f[4 * k + 3]);
             } else {
@@ -605,9 +681,47 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
         for (uint32_t k = 0; k < (bd->count ? bd->count : 1u); k++) {
             int slot = r->slot + (int)k;
             uint64_t h = handle_of(ex, st, slot, img);
+            if (!img && r->arr_ubo) {   // material array: element k's handle at byte 8k of c[cbuf_slot], as bound
+                const p_bind_buf *u = r->cbuf_slot >= 3 && r->cbuf_slot - 3 < 18 ? &ex->ubo[st][r->cbuf_slot - 3] : NULL;
+                uint64_t a = 0;
+                VkMemSpan ms;
+                if (k == 0) {   // where the handle table is bound, and whether the submit-time copy covers it
+                    uint64_t probe;
+                    sp(b, "    %s arr c%d bound at %#llx size %#llx%s\n", stn[st], r->cbuf_slot,
+                       (unsigned long long)(u ? u->addr : 0), (unsigned long long)(u ? u->size : 0),
+                       u && u->addr ? (vk_usnap_read(u->addr, &probe, 8) ? " (snapshot)" : " (live memory)") : " (unbound)");
+                }
+                if (u && u->addr && u->size >= 8ull * k + 8 && !vk_usnap_read(u->addr + 8ull * k, &a, 8) &&
+                    vk_mem_resolve(u->addr + 8ull * k, 8, &ms))
+                    memcpy(&a, (const void *)(uintptr_t)(u->addr + 8ull * k), 8);
+                h = a & 0xffffffffull;
+                if (h && r->samp_slot >= 0 && r->samp_slot < 128)
+                    h = (h & 0xfffff) | (ex->samp[st][r->samp_slot] & ~0xfffffull);
+                sp(b, "    %s tex arr c%d[%u] decl %s raw %#llx: ", stn[st], r->cbuf_slot, k, decl_type(r->type, dt),
+                   (unsigned long long)(a & 0xffffffffull));
+            } else
             sp(b, "    %s %s slot %d decl %s%s: ", stn[st], img ? "img" : "tex", slot, decl_type(r->type, dt),
                img && (r->flags & 4) ? " store" : "");
-            if (!h) { sp(b, "no handle (dummy)\n"); continue; }
+            // as bind_resources: a combined declaration over a split handle takes its sampler from the separate slot
+            if (!img && h && !r->separate && !r->arr_ubo && r->samp_slot >= 0 && r->samp_slot < 128)
+                h = (h & 0xfffff) | (ex->samp[st][r->samp_slot] & ~0xfffffull);
+            if (!h) {   // where the shader expects the handle: its constant bank and word, and what that word holds now
+                uint32_t word = 0;
+                int have = 0;
+                if (r->cbuf_slot >= 3 && r->cbuf_slot - 3 < 18) {
+                    const p_bind_buf *u = &ex->ubo[st][r->cbuf_slot - 3];
+                    uint64_t at = u->addr + (uint64_t)r->handle * 4;
+                    VkMemSpan ms;
+                    if (u->addr && u->size >= (uint64_t)r->handle * 4 + 4) {
+                        if (vk_usnap_read(at, &word, 4)) have = 1;
+                        else if (vk_mem_resolve(at, 4, &ms)) memcpy(&word, (const void *)(uintptr_t)at, 4), have = 1;
+                    }
+                }
+                sp(b, "no handle (dummy); expects cbuf %d word %#x", r->cbuf_slot, r->handle * 4);
+                if (have) sp(b, " = %#x", word);
+                sp(b, "\n");
+                continue;
+            }
             view_t v;
             int hv = 0;
             const VkTexImage *t = vk_texture_by_id(&ex->tex_pool, NVN_HANDLE_TEX(h), &v, &hv);
@@ -623,7 +737,7 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             if (img) {
                 // storage image: no sampler
             } else if (r->separate) {
-                sp(b, " | separate sampler (not replayed: default sampler)");
+                sp(b, " | separate texture (its sampler is a separate binding)");
             } else if (vk_sampler_params(&ex->samp_pool, NVN_HANDLE_SAMP(h), &s)) {
                 static const char *minn[] = {"N", "L", "N_mipN", "L_mipN", "N_mipL", "L_mipL"};
                 int mf = s.minf;
@@ -651,6 +765,10 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
                 wanted |= want_tex[k][1] ? want_tex[k][0] == t->width && want_tex[k][1] == t->height
                                          : want_tex[k][0] == (uint32_t)NVN_HANDLE_TEX(h);
             if (t->type == VK_IMAGE_TYPE_3D) queue_lut(t, NVN_HANDLE_TEX(h));
+            else if (dump_gpu_tex && !img && t->gpu_owned && t->type == VK_IMAGE_TYPE_2D && t->samples == 1 &&
+                     !(t->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
+                     (uint64_t)t->width * t->height <= 4 * TEX2D_CAP)
+                queue_lut(t, NVN_HANDLE_TEX(h));
             else if (wanted && t->type == VK_IMAGE_TYPE_2D && t->samples == 1) queue_lut(t, NVN_HANDLE_TEX(h));
             else if (!img && t->type == VK_IMAGE_TYPE_2D && t->samples == 1 && (uint64_t)t->width * t->height <= TEX2D_CAP &&
                      (t->format == VK_FORMAT_R8_UNORM || t->format == VK_FORMAT_R8G8_UNORM ||
@@ -786,6 +904,16 @@ void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPip
     last_targets = 0;
     Str b = {0};
     describe_bindings(&b, ex, info);
+    sp(&b, "    cs bound tex slots:");   // every compute texture / sampler slot the game has bound, declared or not
+    for (int k = 0; k < 128; k++)
+        if (ex->tex[5][k]) sp(&b, " %d=%#llx", k, (unsigned long long)ex->tex[5][k]);
+    sp(&b, " | samp slots:");
+    for (int k = 0; k < 128; k++)
+        if (ex->samp[5][k]) sp(&b, " %d=%#llx", k, (unsigned long long)ex->samp[5][k]);
+    sp(&b, " | img slots:");
+    for (int k = 0; k < 32; k++)
+        if (ex->img[5][k]) sp(&b, " %d=%#llx", k, (unsigned long long)ex->img[5][k]);
+    sp(&b, "\n");
     fprintf(passes_f, "pass %04d: dispatch %dx%dx%d cs %016llx prog %llu caller %#llx, fence %llu\n%s", n, d->x, d->y,
             d->z, (unsigned long long)shader_hash(cs), (unsigned long long)(ex->prog ? ex->prog->serial : 0),
             (unsigned long long)d->caller, (unsigned long long)ex->fence, b.s ? b.s : "");
@@ -884,9 +1012,12 @@ void vk_dump_init(void) {
     if (lf && *lf) log_from = strtoull(lf, NULL, 10);
     const char *sr = cfg_get("TOTK_DUMP_SKIP_RUNS");
     skip_runs = sr && *sr && *sr != '0';
+    const char *dd = cfg_get("TOTK_DUMP_DRAWS");
+    draws_fmt = dd && *dd ? atoi(dd) : 0;
     const char *du = cfg_get("TOTK_DUMP_UBO");
     dump_ubo = du && *du && *du != '0';
     const char *wt = cfg_get("TOTK_DUMP_TEX");
+    if (wt && !strncmp(wt, "gpu", 3)) dump_gpu_tex = 1, wt += 3, wt += *wt == ',';
     for (char *q = (char *)wt; q && *q && nwant_tex < 16; q += *q == ',') {
         uint32_t *w = want_tex[nwant_tex++];
         w[0] = (uint32_t)strtoul(q, &q, 10);

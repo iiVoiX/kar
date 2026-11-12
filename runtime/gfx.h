@@ -75,6 +75,15 @@ const uint8_t *gfx_shader_key(const GfxShader *s);          // the 32-byte cache
 const uint8_t *gfx_shader_input_id(const GfxShader *s);     // the 32-byte input id (stable across translators)
 // By input id from memory or disk; xlate 1 also translates it from its stored inputs. NULL if absent.
 const GfxShader *gfx_shader_load_input(const uint8_t iid[32], int xlate);
+// Compute prefetch: a program's compute stage (lowered control and code, kept for the process) is loaded from its
+// stored input in the background; each loaded shader goes to the sink, which starts its pipeline (gfx_shader.c).
+void gfx_shader_prefetch_cs(const uint8_t *control, const uint8_t *code);
+void gfx_shader_set_prefetch_sink(void (*sink)(const GfxShader *));
+// Frees a compute shader's SPIR-V once its pipeline is built; gfx_shader_spirv loads it again when asked.
+void gfx_shader_drop_spirv(const GfxShader *cs);
+void gfx_shader_drop_all_spirv(void);
+void gfx_shader_note_cs_used(const GfxShader *cs);   // a dispatch used it: cs-used.bin (the compute prefetch list)   // after the boot prewarm: all shaders give their SPIR-V back
+void gfx_shader_mem_stats(uint64_t *n, uint64_t *bytes);   // memory cache: shaders, SPIR-V bytes held
 // Boot prewarm: out[i] = gfx_shader_load_input(iids[i], 1) on `threads` threads with up to `procs` translators, then
 // every other stored input not cached under this translator is translated. Logs progress and the total.
 void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **out, int threads, int procs);
@@ -111,6 +120,22 @@ typedef struct {
     uint16_t handle;            // TEX/IMG: raw handle (word offset; separate: texture | sampler << 14); SSBO: address offset
     uint16_t count;             // descriptors (array length)
     uint8_t separate;           // TEX: texture and sampler handles are separate
+    int8_t samp_slot;           // TEX, combined in the shader but split in the bank (Kirby: separate texture | separate
+                                // sampler << 14): the separate sampler slot (0x568 + 8 slot) its sampler comes from; -1 none
+    uint8_t arr_ubo;            // TEX array whose element handles the shader reads from constant buffer cbuf_slot (3..20)
+                                // instead of c2 (Ryujinx BindlessToArray): element k's handle at byte 8k; slot is -1
+    uint8_t from_img;           // TEX of NVN 2 compute whose handle lies in the packed bank's image range: slot is an
+                                // image slot and the descriptor views that image (TXQ on an image-only program)
+    uint8_t pool_arr;           // TEX "Direct" pool array (Ryujinx handle 0x40000000, 32 entries; type 0: samplers): the
+                                // shader indexes it with (id & 31) (gfx_shader.c pool_patch); element id & 31 holds the
+                                // texture or sampler of each c2 handle the shader reads (the masks below); slot is -1
+    uint32_t pool_comb, pool_samp;   // pool_arr: combined c2 slots (0x20 + 8s) and separate sampler slots (0x568 + 8s) read
+    uint64_t pool_sep[2];            // pool_arr: separate texture slots (0x168 + 8s) read
+    uint16_t c0_byte;           // TEX of NVN 2 compute whose handle word lies in c0 outside the texture and image tables
+                                // (handle 0x100f8038: byte 0xe0, in the storage-buffer table): its byte offset, 0 none.
+                                // Read at bind time only with KAR_C0_TEX=1 (vk_exec_draw.c c0_tex_handle)
+    uint8_t samp_tbl;           // arr_ubo TEX of NVN 2 compute: samp_slot is an entry of the packed bank's texture
+                                // table (a separate sampler handle bound there), not a c2 separate-sampler slot
 } GfxShaderRes;
 typedef struct { uint8_t type, comps, packed, scalar_bits; } GfxShaderIo;   // scalar_bits: actual numeric SPIR-V width, 0 unknown
 uint64_t gfx_shader_origin(const GfxShader *s);             // NVN 2 stage origin (nvn2_origin of its code) noted at get time, or 0

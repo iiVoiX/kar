@@ -22,6 +22,8 @@
 #include "vk.h"
 #include "platform/platform.h"
 
+static void mem_map_line(const char *line);
+
 // Timestamps for the tracking cost, in ns; qpc_ms converts.
 static uint64_t qpc(void) { return plat_now_ns(); }
 
@@ -757,6 +759,27 @@ void vk_mem_census(uint64_t frame) {
         return;
     }
     // Frame 600 as well: runs on slow machines end before 1800.
+    {   // KAR_WATCH_ADDR=<hex>:<hex len>@<frame> (diagnostic, D8): from that frame, log the code writing that guest range
+        static int64_t wa_at = -2;
+        static uint64_t wa_lo, wa_len;
+        if (wa_at == -2) {
+            const char *e = getenv("KAR_WATCH_ADDR");
+            wa_at = -1;
+            if (e && *e) {
+                char *q;
+                wa_lo = strtoull(e, &q, 16);
+                if (*q == ':') wa_len = strtoull(q + 1, &q, 16);
+                if (*q == '@') wa_at = atoll(q + 1);
+            }
+        }
+        if (wa_at >= 0 && (int64_t)frame >= wa_at && wa_len) plat_diag_watch_write(wa_lo, wa_len), wa_at = -1;
+    }
+    if (frame % 600 == 0 && getenv("KAR_THREAD_CPU") && *getenv("KAR_THREAD_CPU") == '1') {
+        char m[32];
+        snprintf(m, sizeof m, "frame %llu", (unsigned long long)frame);
+        rt_log("threads: window ending at %s", m);
+        plat_thread_cpu_report(mem_map_line);
+    }
     if (frame != 600 && (frame % 1800 || !(frame == 1800 || (rt_trace & RT_TRACE_PERF)))) return;
     typedef struct { int kind; uint32_t flags; uint64_t n, bytes; } Group;
     Group g[64];
@@ -778,6 +801,38 @@ void vk_mem_census(uint64_t frame) {
            (unsigned long long)frame, (unsigned long long)count[POOL_IMPORT], total[POOL_IMPORT] / 1048576.0,
            n_import_failures, (unsigned long long)count[POOL_PHYS], total[POOL_PHYS] / 1048576.0,
            (unsigned long long)count[POOL_VIRT], total[POOL_VIRT] / 1048576.0);
+    {   // the whole process beside the pools: what Task Manager shows (private commit and RAM in use)
+        uint64_t res, priv;
+        plat_process_memory(&res, &priv);
+        rt_log("mem: process at frame %llu: private %.1f GiB, working set %.1f GiB", (unsigned long long)frame,
+               priv / 1073741824.0, res / 1073741824.0);
+        // Where it goes (16.9 memory budget): per Vulkan heap what the driver reports for the process (pipelines,
+        // swapchain and driver internals included) and what VMA holds in blocks and allocations; the shader cache.
+        VkCtx *c = vk_ctx();
+        const VkPhysicalDeviceMemoryProperties *mp = &c->mem_props;
+        VmaBudget vb[VK_MAX_MEMORY_HEAPS];
+        vmaGetHeapBudgets(c->vma, vb);
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
+                                                .pNext = c->has_memory_budget ? &b : NULL};
+        vkGetPhysicalDeviceMemoryProperties2(c->phys, &p2);
+        for (uint32_t h = 0; h < mp->memoryHeapCount && h < VK_MAX_MEMORY_HEAPS; h++)
+            rt_log("mem:   heap %u (%s): driver usage %.1f MiB of budget %.1f MiB; VMA blocks %.1f MiB, allocations %.1f MiB in %u",
+                   h, mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "device-local" : "host",
+                   c->has_memory_budget ? b.heapUsage[h] / 1048576.0 : 0.0, c->has_memory_budget ? b.heapBudget[h] / 1048576.0 : 0.0,
+                   vb[h].statistics.blockBytes / 1048576.0, vb[h].statistics.allocationBytes / 1048576.0,
+                   vb[h].statistics.allocationCount);
+        uint64_t sn = 0, sb = 0;
+        gfx_shader_mem_stats(&sn, &sb);
+        rt_log("mem:   shader memory cache: %llu shaders, %.1f MiB of SPIR-V held", (unsigned long long)sn, sb / 1048576.0);
+        extern int64_t mem_guest_committed(void);
+        rt_log("mem:   guest memory committed: %.1f MiB (upper bound)", mem_guest_committed() / 1048576.0);
+        extern void vk_pipeline_usage(uint32_t out[4]);
+        uint32_t pu[4];
+        vk_pipeline_usage(pu);
+        rt_log("mem:   pipelines: compute %u built, %u used; graphics %u built, %u used", pu[0], pu[1], pu[2], pu[3]);
+        if (getenv("KAR_MEM_MAP") && *getenv("KAR_MEM_MAP") == '1') plat_mem_map_report(RT_ADDRESS_LIMIT, mem_map_line);
+    }
     // How many imported pools the GPU has resolved at least once: the rest paid the import (about 20 ms of driver time
     // each on NVIDIA, whatever the size) for memory that only the CPU touched.
     rt_log("mem: of the %llu imported pools, %llu (%.1f MiB) were resolved by the GPU so far; %.0f ms in all imports (%d, %d of them on first GPU use)",
@@ -824,6 +879,8 @@ int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact) {
             *used += vb[h].statistics.blockBytes, *budget += mp->memoryHeaps[h].size;
     return *budget != 0;
 }
+
+static void mem_map_line(const char *line) { rt_log("%s", line); }
 
 // ---------------------------------------------------------------- page write generations
 // Two-level table over the guest address space (below 2^39): 256 MiB chunks of 65,536 page generations, allocated
@@ -2304,6 +2361,8 @@ static int dead_pending(void) {
 }
 
 void vk_defer_image(VkImage img, VmaAllocation alloc) {
+    extern void vk_exec_rt_forget(VkImage image);   // the missing-upscale fallback's source list (vk_exec.c)
+    if (img) vk_exec_rt_forget(img);
     if (img) defer(alloc ? DEAD_IMAGE_VMA : DEAD_IMAGE, (uint64_t)(uintptr_t)img, alloc);
 }
 void vk_defer_view(VkImageView view) { if (view) defer(DEAD_VIEW, (uint64_t)(uintptr_t)view, NULL); }

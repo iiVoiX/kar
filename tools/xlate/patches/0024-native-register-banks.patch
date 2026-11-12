@@ -1,0 +1,100 @@
+--- a/src/Ryujinx.Graphics.Shader/Decoders/RegisterConsts.cs
++++ b/src/Ryujinx.Graphics.Shader/Decoders/RegisterConsts.cs
+@@ -5,7 +5,11 @@
+         public const int GprsCount = 255;
+         public const int PredsCount = 7;
+         public const int FlagsCount = 4;
+-        public const int TotalCount = GprsCount + PredsCount + FlagsCount;
++        // Native register banks 1 and 2 of lowered Ampere programs (Eglantine's NativeRegisterCopy), IR only:
++        // GPR indices BankedGprsBase + (bank - 1) * 256 + register.
++        public const int BankedGprsBase = 256;
++        public const int BankedGprsCount = 512;
++        public const int TotalCount = GprsCount + PredsCount + FlagsCount + BankedGprsCount;
+ 
+         public const int RegisterZeroIndex = GprsCount;
+         public const int PredicateTrueIndex = PredsCount;
+--- a/src/Ryujinx.Graphics.Shader/Decoders/InstDecoders.cs
++++ b/src/Ryujinx.Graphics.Shader/Decoders/InstDecoders.cs
+@@ -3812,6 +3812,9 @@
+         public InstMovR(ulong opcode) => _opcode = opcode;
+         public int Dest => (int)(_opcode & 0xFF);
+         public int SrcA => (int)((_opcode >> 20) & 0xFF);
++        public bool NativeBankCopy => ((_opcode >> 44) & 0xF) == 10;
++        public int DestBank => (int)((_opcode >> 8) & 3);
++        public int SrcBank => (int)((_opcode >> 10) & 3);
+         public int Pred => (int)((_opcode >> 16) & 0x7);
+         public bool PredInv => (_opcode & 0x80000) != 0;
+         public int QuadMask => (int)((_opcode >> 39) & 0xF);
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMove.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMove.cs
+@@ -13,6 +13,26 @@
+         {
+             InstMovR op = context.GetOp<InstMovR>();
+ 
++            if (op.NativeBankCopy)
++            {
++                // A copy between register banks of a lowered Ampere program (Eglantine's NativeRegisterCopy): bank 0
++                // is R0-R254, banks 1 and 2 exist only in the IR. RZ stays RZ in bank 0.
++                static Operand Banked(int bank, int index) => bank == 0
++                    ? Register(index, RegisterType.Gpr)
++                    : Register(RegisterConsts.BankedGprsBase + (bank - 1) * 256 + index, RegisterType.Gpr);
++
++                Operand source = op.SrcBank == 0 && op.SrcA == RegisterConsts.RegisterZeroIndex
++                    ? Const(0)
++                    : Banked(op.SrcBank, op.SrcA);
++
++                if (op.DestBank != 0 || op.Dest != RegisterConsts.RegisterZeroIndex)
++                {
++                    context.Copy(Banked(op.DestBank, op.Dest), source);
++                }
++
++                return;
++            }
++
+             context.Copy(GetDest(op.Dest), GetSrcReg(context, op.SrcA));
+         }
+ 
+--- a/src/Ryujinx.Graphics.Shader/Translation/RegisterUsage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/RegisterUsage.cs
+@@ -355,7 +355,12 @@
+             switch (register.Type)
+             {
+                 case RegisterType.Gpr:
+-                    gprMasks[register.Index >> 6] = 1L << (register.Index & 0x3f);
++                    // Banked registers (lowered Ampere programs) are not passed across calls; such programs with
++                    // calls are rejected before translation (runtime/nvn2_lower.cpp).
++                    if (register.Index < RegisterConsts.BankedGprsBase)
++                    {
++                        gprMasks[register.Index >> 6] = 1L << (register.Index & 0x3f);
++                    }
+                     break;
+                 case RegisterType.Predicate:
+                     predMask = 1L << register.Index;
+--- a/src/Ryujinx.Graphics.Shader/Translation/Ssa.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Ssa.cs
+@@ -342,7 +342,11 @@
+ 
+         private static int GetKeyFromRegister(Register reg)
+         {
+-            if (reg.Type == RegisterType.Gpr)
++            if (reg.Type == RegisterType.Gpr && reg.Index >= RegisterConsts.BankedGprsBase)
++            {
++                return GprsAndPredsCount + RegisterConsts.FlagsCount + (reg.Index - RegisterConsts.BankedGprsBase);
++            }
++            else if (reg.Type == RegisterType.Gpr)
+             {
+                 return reg.Index;
+             }
+@@ -358,7 +362,11 @@
+ 
+         private static Register GetRegisterFromKey(int key)
+         {
+-            if (key < RegisterConsts.GprsCount)
++            if (key >= GprsAndPredsCount + RegisterConsts.FlagsCount)
++            {
++                return new Register(key - GprsAndPredsCount - RegisterConsts.FlagsCount + RegisterConsts.BankedGprsBase, RegisterType.Gpr);
++            }
++            else if (key < RegisterConsts.GprsCount)
+             {
+                 return new Register(key, RegisterType.Gpr);
+             }

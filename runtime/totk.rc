@@ -2,4 +2,4 @@
    the installer window). tools/build_game.py compiles it with the runtime objects, so it is also a member of
    libtotkrt.a, which the release links with --whole-archive. */
 1 24 "totk.manifest"
-1 ICON "dkb.ico"
+1 ICON "kar.ico"   /* Kirby Air Riders build: tools/make_kar_icon.py (dkb.ico stays for the installer) */

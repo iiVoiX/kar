@@ -6,6 +6,7 @@
 //   nn::vi::*    display, layer and native window identities; the vsync event is bound here
 //   nvnBootstrapLoader   the end of --boot (rt_boot_event "nvn"); otherwise the synthetic address of an NVN proc (nvn_procs.c)
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "gfx.h"
 #include "host.h"
@@ -108,9 +109,28 @@ static void ov_vsync_event(Cpu *c) {
 
 // ---- Switch 2 vi calls (Donkey Kong Bananza): the host presents SDR with a fixed swap interval and no VRR.
 // Result QueryDisplayHdrStatus(bool *enabled, HdrOutputFormat *format, u16 *?, const Display *): HDR off
+// All three outputs are written: left as they were, the format and the u16 (a luminance in nits, read by Kirby Air
+// Riders' colour grading) kept stack garbage, and the grading LUT mapped to a ~2000-nit HDR range that the SDR
+// output then clipped (a white, glowing Kirby in dark scenes). SDR: format 0 and 100 nits; KAR_DISPLAY_NITS overrides.
 static void ov_hdr_status(Cpu *c) {
     uint8_t *on = arg_p(c, 0);
+    uint32_t *fmt = arg_p(c, 1);
+    uint16_t *nits = arg_p(c, 2);
+    const char *e = getenv("KAR_DISPLAY_NITS");
+    uint16_t v = e && atoi(e) > 0 ? (uint16_t)atoi(e) : 100;
+    static int told;
+    if (!told++)
+        rt_log("vi: QueryDisplayHdrStatus: SDR, %u nits (before: format %#x, u16 %u)", v, fmt ? *fmt : 0, nits ? *nits : 0);
     if (on) *on = 0;
+    if (fmt) *fmt = 0;
+    if (nits) *nits = v;
+    ret_x(c, 0);
+}
+// Diagnostic: the content luminance the game announces per frame (first few calls).
+static void ov_hdr_lum(Cpu *c) {
+    static int told;
+    if (told++ < 4) rt_log("vi: SetLayerNextHdr*ContentLuminanceRangeMetadata(%u, %u)", (unsigned)(arg_x(c, 1) & 0xffff),
+                           (unsigned)(arg_x(c, 2) & 0xffff));
     ret_x(c, 0);
 }
 // Result QueryDisplayHdrPaperWhite(u16 *nits, const Display *): the BT.2408 reference white, 203 nits
@@ -135,8 +155,8 @@ HOST_OVERRIDE("_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", ov_vrr_su
 HOST_OVERRIDE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", ov_vi_accept);
 HOST_OVERRIDE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", ov_vi_accept);
 HOST_OVERRIDE("_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", ov_vi_accept);
-HOST_OVERRIDE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", ov_vi_accept);
-HOST_OVERRIDE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", ov_vi_accept);
+HOST_OVERRIDE("_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", ov_hdr_lum);
+HOST_OVERRIDE("_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", ov_hdr_lum);
 HOST_OVERRIDE("_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", ov_vi_accept);
 HOST_OVERRIDE("_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", ov_vi_accept);
 

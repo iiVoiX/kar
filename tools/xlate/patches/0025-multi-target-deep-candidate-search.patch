@@ -1,0 +1,55 @@
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -831,6 +831,52 @@
+                 }
+             }
+ 
++            if (targetCbs.Count == 0)
++            {
++                // The address mixes a table base with a computed offset behind phis (an index loaded from another
++                // buffer, a bounds check selecting a fallback pointer): walk the whole expression for driver-table
++                // words (c0, even word offsets) and try each one; the range check below picks the real buffer.
++                Queue<(Operand Value, BasicBlock Block)> pending = new();
++                HashSet<Operand> seen = [];
++                pending.Enqueue((operation.GetSource(0), block));
++                while (pending.TryDequeue(out var current) && seen.Count < 4096)
++                {
++                    Operand operand = current.Value;
++                    if (!seen.Add(operand))
++                    {
++                        continue;
++                    }
++                    SearchResult found = FindUniqueBaseAddressCb(gtsContext, current.Block, operand, needsOffset: false);
++                    if (!found.Found && operand.Type == OperandType.ConstantBuffer)
++                    {
++                        found = new SearchResult(operand.GetCbufSlot(), operand.GetCbufOffset());
++                    }
++                    if (found.Found && found.SbCbSlot == 0 && found.SbCbOffset >= 0 && found.SbCbOffset < 0x3fff &&
++                        (found.SbCbOffset & 1) == 0)
++                    {
++                        uint targetCb = PackCbSlotAndOffset(found.SbCbSlot, found.SbCbOffset);
++                        if (!targetCbs.Contains(targetCb))
++                        {
++                            targetCbs.Add(targetCb);
++                        }
++                    }
++                    if (operand.AsgOp is PhiNode deepPhi)
++                    {
++                        for (int index = 0; index < deepPhi.SourcesCount; index++)
++                        {
++                            pending.Enqueue((deepPhi.GetSource(index), deepPhi.GetBlock(index)));
++                        }
++                    }
++                    else if (operand.AsgOp is Operation source)
++                    {
++                        for (int index = 0; index < source.SourcesCount; index++)
++                        {
++                            pending.Enqueue((source.GetSource(index), current.Block));
++                        }
++                    }
++                }
++            }
++
+             targetCbs.Sort();
+ 
+             if (targetCbs.Count == 0)

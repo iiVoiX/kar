@@ -361,7 +361,13 @@ class FunctionCheck:
     @property
     def facts(self):
         if self._facts is None:
-            self._facts = jumptables._facts(self.cfg) or {}
+            # A fresh step budget, as jumptables.resolve_function gives each function. A function too large for it
+            # (Kirby Air Riders' main has some) gets no facts here, as the generator falls back to rt_dispatch there.
+            jumptables._budget[0] = jumptables.MAX_STEPS
+            try:
+                self._facts = jumptables._facts(self.cfg) or {}
+            except jumptables._Exhausted:
+                self._facts = {}
         return self._facts
 
 
@@ -514,9 +520,13 @@ def _edge_holds(oracle, ways, start, src, ins, taken, reg, k):
 
     if ins.mnemonic.startswith('b.'):
         setter = next((x for x in range(src - 4, start - 4, -4) if sets_flags(_insn(mod, x))), None)
-        if setter is None or _insn(mod, setter).mnemonic not in _FLAG_SETTERS                 or any(reg in _writes(_insn(mod, x)) for x in range(setter, src, 4)):
+        if setter is None or _insn(mod, setter).mnemonic not in _FLAG_SETTERS \
+                or any(reg in _writes(_insn(mod, x)) for x in range(setter + 4, src, 4)):
             return True
-        need, top, sl = gp_reads(_insn(mod, setter)), setter, [setter]
+        si = _insn(mod, setter)
+        if reg in _writes(si):
+            return _self_setter_holds(oracle, si, setter, src, reg, k, taken)
+        need, top, sl = gp_reads(si), setter, [setter]
     else:
         need, top, sl = gp_reads(ins), src, []
     if need is None:
@@ -542,6 +552,39 @@ def _edge_holds(oracle, ways, start, src, ins, taken, reg, k):
         mu.reg_write(A.UC_ARM64_REG_X0 + reg if reg < 29 else A.UC_ARM64_REG_X29, k)
         for x in reversed(sl):
             mu.emu_start(x, 0, count=1)
+        mu.emu_start(src, 0, count=1)
+        went = mu.reg_read(A.UC_ARM64_REG_PC) != src + 4
+    except uc.UcError:
+        return True
+    return went == taken
+
+
+def _self_setter_holds(oracle, si, setter, src, reg, k, taken):
+    """_edge_holds for a b.cond whose flags come from `subs|adds x<reg>, x<n>, #imm` (or the w form), which also
+    writes the index: x<reg> = k after it means x<n> = k + imm (subs) or k - imm (adds) before it, so the setter and
+    the branch are replayed from that value. Clang peels a switch case this way (`subs w11, w11, #1; b.ne` or
+    `subs w3, w11, #1; b.ne` leave only index 0 on the fall-through; Kirby Air Riders' main has hundreds). Any other
+    shape: True, as before."""
+    ops = si.operands
+    if si.mnemonic not in ('subs', 'adds') or len(ops) != 3 or ops[2].type != capstone.arm64.ARM64_OP_IMM \
+            or ops[0].type != capstone.arm64.ARM64_OP_REG or ops[1].type != capstone.arm64.ARM64_OP_REG \
+            or _regno(si.reg_name(ops[0].reg)) != reg or ops[2].shift.type != 0 or reg >= 31:
+        return True
+    n = _regno(si.reg_name(ops[1].reg))
+    if n is None or n >= 31:
+        return True   # sp or a zero register as the source
+    width = 32 if si.reg_name(ops[0].reg).startswith('w') else 64
+    imm = ops[2].imm
+    before = (k + imm if si.mnemonic == 'subs' else k - imm) & ((1 << width) - 1)
+    mu = oracle.mu
+    try:
+        for r in range(29):
+            mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
+        uc_reg = lambda r: A.UC_ARM64_REG_X0 + r if r < 29 else {29: A.UC_ARM64_REG_X29, 30: A.UC_ARM64_REG_X30}[r]
+        mu.reg_write(uc_reg(n), before)
+        mu.emu_start(setter, 0, count=1)
+        if (mu.reg_read(uc_reg(reg)) & ((1 << width) - 1)) != k:
+            return True   # the replay does not land on k: do not decide
         mu.emu_start(src, 0, count=1)
         went = mu.reg_read(A.UC_ARM64_REG_PC) != src + 4
     except uc.UcError:

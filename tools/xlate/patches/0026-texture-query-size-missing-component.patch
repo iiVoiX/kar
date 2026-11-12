@@ -1,0 +1,16 @@
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1541,6 +1541,13 @@
+                     dimensions++;
+                 }
+ 
++                // TXQ asks for a component the declared type does not have (the depth or layer count of a 2D
++                // texture): the hardware reports 1 there. Extracting it would be invalid SPIR-V.
++                if (texOp.Index >= dimensions)
++                {
++                    return new OperationResult(AggregateType.S32, context.Constant(context.TypeS32(), 1));
++                }
++
+                 SpvInstruction resultType = dimensions == 1 ? context.TypeS32() : context.TypeVector(context.TypeS32(), dimensions);
+ 
+                 SpvInstruction result;

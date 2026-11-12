@@ -106,6 +106,9 @@ const char *ov_language(void) {
         rt_fatal("TOTK_LANG '%s' is not a Switch language code", code);
     }
     const char *tag = cfg_get("TOTK_LOCALE");
+    // Kirby Air Riders: German unless TOTK_LANG or TOTK_LOCALE says otherwise (the user's choice; US English shows mph,
+    // a European language km/h). An in-game language setting is on the roadmap.
+    if ((!tag || !*tag) && rt_game_is_kar()) return "de";
     char sys[85] = "en-US";
     if (!tag || !*tag) {
         if (*plat_user_locale()) snprintf(sys, sizeof sys, "%s", plat_user_locale());
@@ -138,6 +141,17 @@ static void ov_nifm_unavailable(Cpu *c) {
     // No request is accepted and no system network applet can resolve an error on this host.
     ret_x(c, 0);
 }
+
+// Kirby Air Riders' asynchronous request forms. Eglantine found the game waiting forever on a request that never
+// reached a final state (Djihads80/Eglantine PR #27), so the request ends at once, refused:
+// - void SubmitNetworkRequest(): refused as SubmitNetworkRequestAndWait is (ov_nifm_submit).
+// - bool IsNetworkRequestOnHold(): false, the request is no longer pending.
+// - void CancelNetworkRequest(), void SetLocalNetworkMode(bool): nothing to cancel or switch.
+// - Result GetCurrentPrimaryIpAddress(socket::InAddr *), GetCurrentProxySetting(ProxySetting *): no connection, so a
+//   failure of the nifm module (110); the game only tests for success, and the exact description is unverified.
+#define NIFM_R_NO_CONNECTION ((uint32_t)(110 | (300 << 9)))
+static void ov_nifm_nothing(Cpu *c) { (void)c; }
+static void ov_nifm_no_connection(Cpu *c) { ret_x(c, NIFM_R_NO_CONNECTION); }
 
 static void ov_bcat_initialize(Cpu *c) {
     (void)c;
@@ -834,6 +848,80 @@ static void ov_font_size(Cpu *c) {
     ret_x(c, fonts.size[t]);
 }
 
+// ==== nn::pl built-in fonts, Switch 2 (Kirby Air Riders). bool GetBuiltInFontData(BuiltInFontDataOunce *out,
+// BuiltInFontTypeOunce type, bool): the game asks for types 0-5 at boot and spins (sleeping ~5 ms) until each says
+// ready. The SDK (sdk+0x521190) fills the 0x18-byte out as: +0 and +1 two flag bytes from the platform manager, +8 the
+// font's address in pl shared memory, +0x10 its size. The fonts are console system data, not in the game's RomFS.
+// KAR_BUILTIN_FONTS=<dir> (default "fonts") serves <dir>/<dump name>.ttf (the user's own, see builtin_font_path), then
+// <dir>/<type>.ttf or .otf; otherwise a font already installed in
+// Windows stands in (%WINDIR%/Fonts/segoeui.ttf, then arial.ttf), read in place and never copied or shipped. The stand-in
+// has no CJK glyphs, and whether the game wants a plain sfnt (as here) or an obfuscated one is unverified.
+#define BUILTIN_FONT_TYPES 6
+static struct { PlatMutex lock; const uint8_t *data[BUILTIN_FONT_TYPES]; uint64_t size[BUILTIN_FONT_TYPES]; } builtin;
+
+static int builtin_font_path(int64_t t, char *path, size_t n) {
+    const char *dir = cfg_get("KAR_BUILTIN_FONTS");
+    if (!dir || !*dir) dir = "fonts";   // next to kar.exe: 5.ttf, the button-symbol stand-in (tools/make_kar_buttonfont.py)
+    if (dir && *dir) {
+        // The user's own console fonts first, under the names console font dumpers write (the shared font types in
+        // order), so a dumped FontNintendoExtended.ttf wins over the generated 5.ttf stand-in.
+        static const char *const dumped[BUILTIN_FONT_TYPES] = {
+            "FontStandard", "FontChineseSimplified", "FontExtendedChineseSimplified", "FontChineseTraditional",
+            "FontKorean", "FontNintendoExtended"};
+        snprintf(path, n, "%s/%s.ttf", dir, dumped[t]);
+        if (plat_file_exists(path)) return 1;
+        static const char *const ext[] = {"ttf", "otf"};
+        for (int i = 0; i < 2; i++) {
+            snprintf(path, n, "%s/%lld.%s", dir, (long long)t, ext[i]);
+            if (plat_file_exists(path)) return 1;
+        }
+    }
+    const char *win = getenv("WINDIR");
+    if (win && *win) {
+        static const char *const stand_in[] = {"segoeui.ttf", "arial.ttf"};
+        for (int i = 0; i < 2; i++) {
+            snprintf(path, n, "%s/Fonts/%s", win, stand_in[i]);
+            if (plat_file_exists(path)) return 1;
+        }
+    }
+    return 0;
+}
+
+static void ov_builtin_font(Cpu *c) {
+    uint8_t *out = arg_p(c, 0);
+    int64_t t = (int32_t)arg_x(c, 1);
+    char lr[96];
+    if (!out) rt_fatal("nn::pl::GetBuiltInFontData: null output");
+    if (t < 0 || t >= BUILTIN_FONT_TYPES)
+        rt_fatal("nn::pl::GetBuiltInFontData: font type %lld from %s", (long long)t, caller(c, lr, sizeof lr));
+    plat_mutex_lock(&builtin.lock);
+    if (!builtin.data[t]) {
+        char path[PLAT_PATH_MAX + 64];
+        if (!builtin_font_path(t, path, sizeof path))
+            rt_fatal("nn::pl::GetBuiltInFontData(%lld): no font; set KAR_BUILTIN_FONTS=<dir> with %lld.ttf",
+                     (long long)t, (long long)t);
+        FILE *f = fopen(path, "rb");
+        if (!f) rt_fatal("nn::pl: built-in font %s cannot be opened", path);
+        plat_fseek64(f, 0, SEEK_END);
+        int64_t len = plat_ftell64(f);
+        plat_fseek64(f, 0, SEEK_SET);
+        if (len < 12 || len > (64 << 20)) rt_fatal("nn::pl: built-in font %s: size %lld", path, (long long)len);
+        uint8_t *p = mem_kernel_alloc((uint64_t)len, 16);
+        size_t got = fread(p, 1, (size_t)len, f);
+        fclose(f);
+        if (got != (size_t)len) rt_fatal("nn::pl: built-in font %s: short read", path);
+        builtin.size[t] = (uint64_t)len;
+        __atomic_store_n(&builtin.data[t], p, __ATOMIC_RELEASE);
+        rt_log("pl: built-in font %lld: %lld bytes from %s", (long long)t, (long long)len, path);
+    }
+    memset(out, 0, 0x18);
+    uint64_t addr = (uint64_t)(uintptr_t)builtin.data[t], size = builtin.size[t];
+    memcpy(out + 8, &addr, 8);
+    memcpy(out + 0x10, &size, 8);
+    plat_mutex_unlock(&builtin.lock);
+    ret_x(c, 1);
+}
+
 // ==== registration
 // ---- Switch 2 oe calls (Donkey Kong Bananza)
 // int nn::oe::GetCurrentGraphicsScale(): an enum 0-2; main+0x4686d4 maps it through a float table {3, 12, 16} and
@@ -854,6 +942,76 @@ HOST_OVERRIDE("_ZN2nn2oe31EnterExitRequestHandlingSectionEv", ov_exit_section);
 HOST_OVERRIDE("_ZN2nn2oe31LeaveExitRequestHandlingSectionEv", ov_exit_section);
 
 HOST_OVERRIDE("_ZN2nn2oe10InitializeEv", ov_oe_initialize);
+
+// nn::crypto::GenerateCryptographicallyRandomBytes(void *buf, size_t n): the SDK asks the csrng service, which is not
+// emulated. Kirby Air Riders reaches it at boot through std::random_device and getentropy. Guest addresses are host
+// addresses, so the system's generator fills the game's buffer directly.
+static void ov_crypto_random(Cpu *c) {
+    if (c->x[1]) need(plat_random((void *)(uintptr_t)c->x[0], (size_t)c->x[1]), "crypto: random bytes");
+}
+HOST_OVERRIDE("_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm", ov_crypto_random);
+
+// nn::oe::GetPseudoDeviceId(nn::util::Uuid *out): the SDK reads it over its applet session, which the host's
+// nn::oe::Initialize never opens, so the lifted version dereferences a null session (Kirby Air Riders' nnMain calls
+// it early). A per-application id that only has to stay the same between runs: one fixed, non-zero value.
+static void ov_pseudo_device_id(Cpu *c) {
+    static const uint8_t id[16] = {0x6b, 0x61, 0x72, 0x2d, 0x72, 0x65, 0x63, 0x6f,
+                                   0x6d, 0x70, 0x2d, 0x70, 0x63, 0x00, 0x00, 0x01};
+    memcpy((void *)(uintptr_t)c->x[0], id, sizeof id);
+}
+HOST_OVERRIDE("_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", ov_pseudo_device_id);
+
+// void nn::oe::GetDefaultDisplayResolutionChangeEvent(nn::os::SystemEvent *out): the SDK fetches it over the applet
+// session, which the host never opens (Kirby Air Riders calls it at boot, right after GetCurrentGraphicsScale). A
+// SystemEvent begins with its SystemEventType, so the host binds that to an event of its own. The host's output
+// resolution does not change under the game, so the event stays clear.
+static void ov_display_resolution_event(Cpu *c) {
+    uint64_t ev = arg_x(c, 0);
+    if (!ev) rt_fatal("nn::oe::GetDefaultDisplayResolutionChangeEvent: null event");
+    kern_bind_system_event(c, ev, 0);
+}
+HOST_OVERRIDE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", ov_display_resolution_event);
+
+// void nn::oe::GetDefaultDisplayResolution(int *width, int *height): read over the applet session in the SDK (Kirby
+// Air Riders calls it at graphics setup). The game's window textures are 2560x1440 and its final composite covers
+// the reported display resolution: 1920x1080 left the frame in the top-left three quarters of the swap image. So
+// 2560x1440 by default; KAR_DISPLAY_RES=WxH overrides (the host scales the swap image to its window either way).
+static void ov_display_resolution(Cpu *c) {
+    int32_t *w = arg_p(c, 0), *h = arg_p(c, 1);
+    int32_t dw = 2560, dh = 1440;
+    const char *e = getenv("KAR_DISPLAY_RES");
+    if (e && *e) {
+        int a = 0, b = 0;
+        if (sscanf(e, "%dx%d", &a, &b) == 2 && a > 0 && b > 0) dw = a, dh = b;
+    }
+    if (w) *w = dw;
+    if (h) *h = dh;
+}
+HOST_OVERRIDE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", ov_display_resolution);
+
+// The rest of Kirby Air Riders' nn::oe imports, which the SDK sends over the applet session or the gs service:
+// - void SetGraphicsTargetFrameRateAuto(): the console picks the frame length (nn::gs); the host paces presents itself.
+// - void EnableRecording(), DisableRecording(): video capture of gameplay; the host has none.
+// - void SendServerMaintenanceOverlayNotification(PosixTime, PosixTime): a system overlay; nothing to show offline.
+static void ov_oe_nothing(Cpu *c) { (void)c; }
+// - void RestartProgram(const void *param, size_t size): the system relaunches the game; the host cannot, so it stops
+//   with where the request came from.
+static void ov_oe_restart(Cpu *c) {
+    char lr[96];
+    rt_fatal("nn::oe::RestartProgram from %s: the game asked to be restarted; start it again", caller(c, lr, sizeof lr));
+}
+HOST_OVERRIDE("_ZN2nn2oe30SetGraphicsTargetFrameRateAutoEv", ov_oe_nothing);
+HOST_OVERRIDE("_ZN2nn2oe15EnableRecordingEv", ov_oe_nothing);
+HOST_OVERRIDE("_ZN2nn2oe16DisableRecordingEv", ov_oe_nothing);
+HOST_OVERRIDE("_ZN2nn2oe40SendServerMaintenanceOverlayNotificationENS_4time9PosixTimeES2_", ov_oe_nothing);
+HOST_OVERRIDE("_ZN2nn2oe14RestartProgramEPKvm", ov_oe_restart);
+
+// Switch 2 GameChat (nn::chat), which the SDK opens over IPC (Eglantine stubs its chat user client too). Kirby Air
+// Riders calls void Initialize() at boot, ignoring the outcome, and bool IsChatting(): the host has no chat session.
+static void ov_chat_initialize(Cpu *c) { (void)c; }
+static void ov_chat_is_chatting(Cpu *c) { ret_x(c, 0); }
+HOST_OVERRIDE("_ZN2nn4chat10InitializeEv", ov_chat_initialize);
+HOST_OVERRIDE("_ZN2nn4chat10IsChattingEv", ov_chat_is_chatting);
 HOST_OVERRIDE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", ov_display_version);
 HOST_OVERRIDE("_ZN2nn2oe18GetDesiredLanguageEv", ov_desired_language);
 HOST_OVERRIDE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", ov_performance_config);
@@ -883,6 +1041,12 @@ HOST_OVERRIDE("_ZN2nn4nifm10InitializeEv", ov_nifm_initialize);
 HOST_OVERRIDE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", ov_nifm_submit);
 HOST_OVERRIDE("_ZN2nn4nifm18IsNetworkAvailableEv", ov_nifm_unavailable);
 HOST_OVERRIDE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", ov_nifm_unavailable);
+HOST_OVERRIDE("_ZN2nn4nifm20SubmitNetworkRequestEv", ov_nifm_submit);
+HOST_OVERRIDE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", ov_nifm_unavailable);
+HOST_OVERRIDE("_ZN2nn4nifm20CancelNetworkRequestEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm19SetLocalNetworkModeEb", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", ov_nifm_no_connection);
+HOST_OVERRIDE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", ov_nifm_no_connection);
 HOST_OVERRIDE("_ZN2nn4bcat10InitializeEv", ov_bcat_initialize);
 HOST_OVERRIDE("_ZN2nn4bcat25MountDeliveryCacheStorageEv", ov_bcat_mount);
 HOST_OVERRIDE("_ZN2nn10streamplay21GetRequiredMemorySizeENS0_14StreamPlayTypeENS0_13StreamingModeEi", ov_streamplay_memory);
@@ -899,6 +1063,32 @@ HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountT
 HOST_OVERRIDE("_ZN2nn3nfp9GetNpadIdEPjRKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_no_device);
+// Kirby Air Riders' amiibo forms: the extended-area initialisation as Initialize; with no reader, every device
+// operation and amiibo settings applet answers "device not found", as the others above.
+HOST_OVERRIDE("_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv", ov_nfp_initialize);
+HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp18SetApplicationAreaERKNS0_12DeviceHandleEPKvm", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp30GetExtendedApplicationAreaInfoEPNS0_27ExtendedApplicationAreaInfoERKNS0_12DeviceHandleE",
+              ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp26GetExtendedApplicationAreaEPvPmRKNS0_12DeviceHandleEm", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp26SetExtendedApplicationAreaERKNS0_12DeviceHandleEPKvm", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp5FlushERKNS0_12DeviceHandleE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp7RestoreERKNS0_12DeviceHandleE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp21CreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE",
+              ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp13GetCommonInfoEPNS0_10CommonInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_"
+              "24AmiiboSettingsStartParamERKNS0_7TagInfoE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_"
+              "24AmiiboSettingsStartParamERKNS0_7TagInfoERKS4_", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp13StartRestorerEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE",
+              ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE",
+              ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp14StartDetectionERKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp13StopDetectionERKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
@@ -911,6 +1101,13 @@ HOST_OVERRIDE("_ZN2nn3aoc17CountAddOnContentEv", ov_aoc_count);
 HOST_OVERRIDE("_ZN2nn3aoc16ListAddOnContentEPiii", ov_aoc_list);
 HOST_OVERRIDE("_ZN2nn3err26InitializeContextWriterApiEv", ov_err_context);
 HOST_OVERRIDE("_ZN2nn4pctl10InitializeEv", ov_pctl_initialize);
+// Kirby Air Riders asks these after A on the title screen. No parental controls: free communication is always allowed
+// (both return bool, sdk+0x5187a0 and +0x518710: true when allowed); End has nothing to end.
+static void ov_pctl_true(Cpu *c) { ret_x(c, 1); }
+static void ov_pctl_none(Cpu *c) { (void)c; }
+HOST_OVERRIDE("_ZN2nn4pctl28IsFreeCommunicationAvailableEv", ov_pctl_true);
+HOST_OVERRIDE("_ZN2nn4pctl25TryBeginFreeCommunicationEb", ov_pctl_true);
+HOST_OVERRIDE("_ZN2nn4pctl20EndFreeCommunicationEv", ov_pctl_none);
 HOST_OVERRIDE("_ZN2nn4diag34InitializeApplicationAbortObserverEv", ov_abort_observer);
 
 HOST_OBSERVER("_ZN2nn2os21AllocateAddressRegionEPmm", obs_address_region);
@@ -948,3 +1145,23 @@ HOST_OVERRIDE("_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKN
 HOST_OVERRIDE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", ov_font_state);
 HOST_OVERRIDE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", ov_font_address);
 HOST_OVERRIDE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", ov_font_size);
+HOST_OVERRIDE("_ZN2nn2pl18GetBuiltInFontDataEPNS0_20BuiltInFontDataOunceENS0_20BuiltInFontTypeOunceEb",
+              ov_builtin_font);
+
+// clock_gettime(CLOCK_REALTIME) in Kirby Air Riders' SDK (musl, sdk+0x704550) calls a realtime-clock provider through a
+// pointer nn::time registers (sdk+0x92860 -> [sdk+0xe00018]); here that provider fails, std::chrono::system_clock::now
+// throws system_error (after pressing A on the title screen) and the unwinder then faults. A failed realtime read is
+// answered with the host's UTC time; every other clock and every successful read is left to the SDK.
+static void obs_clock_gettime(Cpu *c) {
+    uint64_t clk = c->x[0], ts = c->x[1];
+    uint64_t r = rt_original(c);
+    if ((uint32_t)clk == 0 && (int32_t)r != 0 && ts) {
+        uint64_t ns = plat_unix_time_ns();
+        int64_t v[2] = {(int64_t)(ns / 1000000000u), (int64_t)(ns % 1000000000u)};
+        memcpy((void *)(uintptr_t)ts, v, sizeof v);
+        c->x[0] = 0;
+        static int told;
+        if (!told++) rt_log("time: clock_gettime(CLOCK_REALTIME) failed in the SDK; answered with the host's UTC time");
+    }
+}
+HOST_OBSERVER("clock_gettime", obs_clock_gettime);

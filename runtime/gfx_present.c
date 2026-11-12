@@ -148,12 +148,26 @@ static void vsync_main(void *arg) {
     (void)arg;
     plat_thread_priority(PLAT_PRIO_HIGHEST);
     uint64_t n = 0;
+    // KAR_VSYNC_HZ=<n> (diagnostic, 16.11): the vsync event at n per second instead of 60, to measure whether the
+    // game's loop waits for it each frame (its frame rate then follows this rate).
+    uint64_t vs_hz = getenv("KAR_VSYNC_HZ") ? strtoull(getenv("KAR_VSYNC_HZ"), NULL, 10) : 0;
+    if (vs_hz < 30 || vs_hz > 360) vs_hz = VSYNC_HZ;
+    uint64_t vs_from = getenv("KAR_PACE_FROM") ? strtoull(getenv("KAR_PACE_FROM"), NULL, 10) : 0, vs_want = vs_hz, vs_prev = VSYNC_HZ;
     for (;;) {
         uint64_t start = (uint64_t)g_vs_start_ns;
-        uint64_t due = start + (n + 1) * VSYNC_NS / VSYNC_HZ;
+        // The limit's rate for a self-timed game (frame_rate.c frame_rate_vsync_hz; read each tick, so a menu change
+        // applies at once); KAR_VSYNC_HZ overrides it from frame KAR_PACE_FROM (diagnostics).
+        vs_hz = vs_want != VSYNC_HZ && __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) >= vs_from
+                    ? vs_want : (uint64_t)(frame_rate_vsync_hz() + 0.5);
+        if (vs_hz != vs_prev) {   // a new rate: restart the schedule at the current tick, not n ticks of the new rate
+            g_vs_start_ns = (int64_t)(kern_now_ns() - n * VSYNC_NS / vs_hz);
+            start = (uint64_t)g_vs_start_ns;
+            vs_prev = vs_hz;
+        }
+        uint64_t due = start + (n + 1) * VSYNC_NS / vs_hz;
         uint64_t now = kern_now_ns();
         if (now > due + 100000000ull) {                  // the process stalled: restart the schedule, no catch-up burst
-            g_vs_start_ns = (int64_t)(now - (n + 1) * VSYNC_NS / VSYNC_HZ);
+            g_vs_start_ns = (int64_t)(now - (n + 1) * VSYNC_NS / vs_hz);
         } else if (due > now) {
             plat_wait_ns(due - now);
         }
@@ -206,6 +220,12 @@ void gfx_vsync_bind_counter(volatile int32_t *counter) {
 
 uint64_t gfx_vsync_ticks(void) { return (uint64_t)plat_cas64(&g_ticks, 0, 0); }
 uint64_t gfx_vsync_time_ns(uint64_t tick) { return (uint64_t)g_vs_start_ns + tick * VSYNC_NS / VSYNC_HZ; }
+
+// ---- screenshot key: TOTK_SCREENSHOT_KEY=1 (default) lets F12 save the next presented image under screenshots/
+static volatile int32_t g_shot_req;
+void gfx_request_screenshot(void) {
+    if (cfg_bool("TOTK_SCREENSHOT_KEY")) plat_xchg32(&g_shot_req, 1);
+}
 
 // ---- focus
 int gfx_window_focused(void) { return g_focused; }
@@ -502,7 +522,7 @@ int vk_present_captured(const uint8_t **px, int *w, int *h, VkFormat *fmt) {
     return ok;
 }
 
-// The captured swapchain image as a PNG (the menu's test hook), RGBA with opaque alpha.
+// The captured swapchain image as a PNG (the menu's test hook and the F12 screenshot), RGBA with opaque alpha.
 static void save_capture(const char *path) {
     size_t n = (size_t)g_cap_w * (size_t)g_cap_h * 4;
     uint8_t *px = malloc(n);
@@ -516,7 +536,7 @@ static void save_capture(const char *path) {
     }
     rt_write_png(path, px, (uint32_t)g_cap_w, (uint32_t)g_cap_h);
     free(px);
-    rt_log("gfx: menu test shot %s (%dx%d)", path, g_cap_w, g_cap_h);
+    rt_log("gfx: screenshot %s (%dx%d)", path, g_cap_w, g_cap_h);
 }
 
 // The rectangle {x, y, w, h} of a dw x dh swapchain image the cw x ch picture goes into: the whole image with
@@ -583,6 +603,19 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
                      g_sc_ext.height, cw, ch, g_scaler};
     int overlay = g_sc_view[idx] &&
                   menu_overlay_frame(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), &mt, &menu_shot);
+    static int64_t shot_at = -2;   // KAR_SCREENSHOT_AT=<frame> (test hook): press F12 once at that frame
+    if (shot_at == -2) shot_at = getenv("KAR_SCREENSHOT_AT") ? atoll(getenv("KAR_SCREENSHOT_AT")) : -1;
+    if (shot_at >= 0 && (int64_t)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) >= shot_at)
+        shot_at = -1, gfx_request_screenshot();
+    static char shot_path[600];   // F12 (gfx_request_screenshot): this frame's image, with the overlay, as a PNG
+    if (!menu_shot && plat_xchg32(&g_shot_req, 0)) {
+        struct tm t;
+        plat_local_time(&t);
+        plat_file_mkdir_p("screenshots");
+        snprintf(shot_path, sizeof shot_path, "screenshots/kar-%04d%02d%02d-%02d%02d%02d.png", t.tm_year + 1900,
+                 t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+        menu_shot = shot_path;
+    }
     int cap = (g_capture || menu_shot) && ensure_capture_buffer();
     int thumb = g_th_n && ensure_thumbs();
 
@@ -801,4 +834,127 @@ void gfx_window_start(void) {
     }
     plat_rmutex_unlock(&g_start_lock);
     vsync_ensure();
+}
+
+// ---- boot screen
+// Boot screen: while the boot prewarm loads shaders and builds pipelines (boot.c boot_main, before the guest starts),
+// a thread draws a native screen (no UI library): a gradient, the title, what is being prepared and a progress bar,
+// rendered on the CPU into an RGBA image (text through plat_text_draw), uploaded and shown with vk_present_image.
+// On a warm driver cache it shows for about a second; on a first start or after a driver update the prewarm compiles
+// for minutes, and without it the window stayed black. TOTK_BOOT_SCREEN=0 turns it off.
+void vk_pipeline_prewarm_progress(uint32_t *done, uint32_t *total);
+void gfx_shader_prewarm_progress(uint64_t *done, uint64_t *total);
+
+#define BS_W 1280
+#define BS_H 720
+
+static volatile int32_t bs_run;
+static PlatThread *bs_thread;
+
+static void fill_rect(uint8_t *px, int x0, int y0, int x1, int y1, uint32_t rgb) {
+    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < BS_H; y++)
+        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < BS_W; x++) {
+            uint8_t *d = px + ((size_t)y * BS_W + x) * 4;
+            d[0] = (uint8_t)(rgb >> 16), d[1] = (uint8_t)(rgb >> 8), d[2] = (uint8_t)rgb, d[3] = 255;
+        }
+}
+
+// Progress 0..1 and the line saying what is prepared: the shaders first, then the pipelines.
+static double progress(const char **what) {
+    uint64_t sd, st;
+    uint32_t pd, pt;
+    gfx_shader_prewarm_progress(&sd, &st);
+    vk_pipeline_prewarm_progress(&pd, &pt);
+    if (pt) { *what = "Pipelines werden vorbereitet"; return 0.5 + 0.5 * (pd < pt ? pd : pt) / pt; }
+    if (st) { *what = "Shader-Cache wird geladen"; return 0.5 * (sd < st ? sd : st) / st; }
+    *what = "Wird gestartet";
+    return 0;
+}
+
+static void render(uint8_t *px, uint64_t t_ms) {
+    for (int y = 0; y < BS_H; y++) {   // vertical gradient, pink to deep rose
+        double f = (double)y / BS_H;
+        uint32_t r = (uint32_t)(0xf7 + (0xc8 - 0xf7) * f), g = (uint32_t)(0xa8 + (0x5a - 0xa8) * f),
+                 b = (uint32_t)(0xc8 + (0x8c - 0xc8) * f);
+        fill_rect(px, 0, y, BS_W, y + 1, r << 16 | g << 8 | b);
+    }
+    const char *what;
+    double p = progress(&what);
+    plat_text_draw(px, BS_W, BS_H, BS_W / 2, 230, 64, 0xffffff, "Kirby Air Riders", 1);
+    plat_text_draw(px, BS_W, BS_H, BS_W / 2, 310, 24, 0xfff0f6, "PC-Port", 1);
+    int bx0 = BS_W / 5, bx1 = BS_W - BS_W / 5, by0 = 470, by1 = 494;
+    fill_rect(px, bx0 - 2, by0 - 2, bx1 + 2, by1 + 2, 0xffffff);   // frame
+    fill_rect(px, bx0, by0, bx1, by1, 0xb04a7c);                   // track
+    fill_rect(px, bx0, by0, bx0 + (int)((bx1 - bx0) * p), by1, 0xffffff);
+    char pct[16];
+    snprintf(pct, sizeof pct, "%d%%", (int)(p * 100 + 0.5));
+    plat_text_draw(px, BS_W, BS_H, BS_W / 2, by1 + 14, 22, 0xffffff, pct, 1);
+    char line[96];
+    snprintf(line, sizeof line, "%s%.*s", what, (int)(t_ms / 400 % 4), "...");
+    plat_text_draw(px, BS_W, BS_H, bx0, by0 - 44, 26, 0xffffff, line, 0);
+}
+
+static void bs_main(void *arg) {
+    (void)arg;
+    while (bs_run && !vk_ctx()) plat_sleep_ms(20);
+    VkCtx *c = vk_ctx();
+    if (!c) return;
+    VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                            .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {BS_W, BS_H, 1}, .mipLevels = 1,
+                            .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VkImage img;
+    VmaAllocation alloc;
+    if (vmaCreateImage(c->vma, &ii, &ai, &img, &alloc, NULL) != VK_SUCCESS) return;
+    uint8_t *px = malloc((size_t)BS_W * BS_H * 4);
+    uint64_t t0 = plat_now_ms();
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    unsigned shown = 0;
+    while (px && bs_run) {
+        render(px, plat_now_ms() - t0);
+        if (!shown && getenv("KAR_BOOT_SHOT")) rt_write_png(getenv("KAR_BOOT_SHOT"), px, BS_W, BS_H);   // diagnostic
+        VkCommandBuffer cb = vk_upload_begin();
+        VkBuffer buf;
+        void *map = vk_staging((VkDeviceSize)BS_W * BS_H * 4, &buf, NULL);
+        if (map) {
+            memcpy(map, px, (size_t)BS_W * BS_H * 4);
+            VkImageMemoryBarrier b = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = 0,
+                                      .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = layout,
+                                      .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                      .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
+                                 NULL, 1, &b);
+            VkBufferImageCopy r = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {BS_W, BS_H, 1}};
+            vkCmdCopyBufferToImage(cb, buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+            b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0,
+                                 NULL, 1, &b);
+            layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        }
+        vk_upload_end();
+        vk_upload_flush(1);
+        if (layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+            vk_present_image(img, layout, VK_FORMAT_R8G8B8A8_UNORM, BS_W, BS_H, NULL), shown++;
+        plat_sleep_ms(50);
+    }
+    rt_log("boot screen: %u frames in %llu ms", shown, (unsigned long long)(plat_now_ms() - t0));
+    free(px);
+    vk_defer_image(img, alloc);
+}
+
+void boot_screen_start(void) {
+    const char *e = cfg_get("TOTK_BOOT_SCREEN");
+    if ((e && e[0] == '0') || rt_config()->shot) return;
+    bs_run = 1;
+    bs_thread = plat_thread_new(bs_main, NULL, "boot screen");
+}
+
+void boot_screen_stop(void) {
+    if (!bs_thread) return;
+    __atomic_store_n(&bs_run, 0, __ATOMIC_RELEASE);
+    plat_thread_join(bs_thread);
+    bs_thread = NULL;
 }

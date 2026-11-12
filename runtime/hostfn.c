@@ -98,10 +98,12 @@ static void hostfn_entry(Cpu *c);
 static uint64_t slot_addr(int i) { return RT_HOSTFN_BASE + 16ull * (uint64_t)i; }
 
 uint64_t hostfn_register(const char *name, GuestFn fn) {
-    if (sealed) rt_fatal("hostfn_register(%s) after hostfn_seal", name);
     if (!name || !fn) rt_fatal("hostfn_register: empty entry");
     for (int i = 0; i < nslots; i++)
         if (slots[i].fn == fn && !strcmp(slots[i].name, name)) return slot_addr(i);
+    // After the seal only an existing (name, fn) pair is found: an NRO relocated at nn::ro::LoadModule time
+    // (ldr_map_nro) binds the overrides the boot modules already registered, never a new one.
+    if (sealed) rt_fatal("hostfn_register(%s) after hostfn_seal", name);
     if (nslots == MAX_HOSTFN) rt_fatal("hostfn_register: more than %d host functions", MAX_HOSTFN);
     uint64_t a = slot_addr(nslots);
     if (a >= RT_RET_HOST) rt_fatal("hostfn_register: host-function window full");

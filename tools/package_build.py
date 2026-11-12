@@ -64,7 +64,10 @@ def main():
     a.out = a.out or ROOT / 'build' / f'{a.version}-portable'
 
     build, out = a.build.resolve(), a.out.resolve()
-    exe = (a.exe or build / f'totk{EXE}').resolve()
+    exe = a.exe or build / f'totk{EXE}'
+    if not a.exe and not exe.exists() and (build / f'kar{EXE}').exists():   # Kirby Air Riders builds kar.exe
+        exe = build / f'kar{EXE}'
+    exe = exe.resolve()
     fonts = a.extracted.resolve().parent / 'firmware' / 'shared-fonts'
     exefs = a.extracted.resolve() / 'exefs'
     romfs = a.extracted.resolve() / 'romfs' / 'romfs.bin'
@@ -80,7 +83,7 @@ def main():
         print('package_build: warning: the folder holds game code; keep it out of the repository')
 
     out.mkdir(parents=True, exist_ok=True)
-    copy(exe, out / f'totk{EXE}')
+    copy(exe, out / exe.name)   # keeps kar.exe its name (window title and icon come from the build, not the name)
     for d in DLLS:
         copy(build / d, out / d)
     copy(a.xlate, out / f'totk_xlate{EXE}')

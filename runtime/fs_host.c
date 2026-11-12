@@ -1050,16 +1050,25 @@ static uint32_t delete_recursive(const char *path) {
 }
 
 static uint32_t open_directory(uint64_t *out, const char *path, int mode) {
-    if (romfs_owns(path)) rt_fatal("fs: OpenDirectory on the RomFS (%s) is not implemented", path);
     if (aoc_owns(path)) rt_fatal("fs: OpenDirectory on add-on content (%s) is not implemented", path);
-    char p[PATH_CAP];
-    uint32_t r = host_path(path, p, sizeof p);
-    if (r) return r;
     if (!out || mode < 1 || mode > 3) return FS_R_INVALID_ARGUMENT;
-    if (plat_fs_kind(p) != PLAT_FS_DIR) return FS_R_PATH_NOT_FOUND;
-    Listing l;
-    int e = list_dir(p, &l);
-    if (e) return fs_result(e);
+    Listing l = {0};
+    if (romfs_owns(path)) {   // the RomFS index's children of the folder (romfs_list); read as host listings are
+        uint32_t r = romfs_list(path, listing_add, &l);
+        if (r) {
+            listing_free(l.e, l.n);
+            return r;
+        }
+        fs_trace("ls", path);
+        for (int i = 0; i < l.n; i++) fs_trace(l.e[i].kind == PLAT_FS_DIR ? "ls dir" : "ls file", l.e[i].name);
+    } else {
+        char p[PATH_CAP];
+        uint32_t r = host_path(path, p, sizeof p);
+        if (r) return r;
+        if (plat_fs_kind(p) != PLAT_FS_DIR) return FS_R_PATH_NOT_FOUND;
+        int e = list_dir(p, &l);
+        if (e) return fs_result(e);
+    }
     plat_mutex_lock(&lock);
     for (int i = 0; i < NDIRS; i++)
         if (!dirs[i].used) {
@@ -1090,6 +1099,22 @@ static uint32_t read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, 
         n++;
     }
     *count = n;
+    return 0;
+}
+
+// nn::fs::GetDirectoryEntryCount(int64_t *out, DirectoryHandle): every entry of the listing taken at open that the
+// open mode admits (1 folders, 2 files, 3 both), whatever ReadDirectory has consumed, as the SDK counts. Kirby Air
+// Riders calls it right after opening app:/Asset; the lifted SDK version reads the handle as an object pointer.
+static uint32_t directory_entry_count(int64_t *out, uint64_t h) {
+    if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !out) return FS_R_INVALID_ARGUMENT;
+    Dir *d = &dirs[h - DIR_BASE];
+    if (!d->used) return FS_R_INVALID_ARGUMENT;
+    int64_t n = 0;
+    for (int i = 0; i < d->n; i++) {
+        if (strlen(d->e[i].name) + 1 > 769) continue;   // as read_directory: a name nn::fs cannot hold
+        n += (d->mode & (d->e[i].kind == PLAT_FS_DIR ? 1 : 2)) != 0;
+    }
+    *out = n;
     return 0;
 }
 
@@ -1125,6 +1150,7 @@ static void ov_delete_recursive(Cpu *c) { ret_x(c, delete_recursive(arg_p(c, 0))
 static void ov_open_directory(Cpu *c) { ret_x(c, open_directory(arg_p(c, 0), arg_p(c, 1), I32(2))); }
 static void ov_read_directory(Cpu *c) { ret_x(c, read_directory(arg_p(c, 0), arg_p(c, 1), arg_x(c, 2), I64(3))); }
 static void ov_close_directory(Cpu *c) { close_directory(arg_x(c, 0)); }
+static void ov_directory_entry_count(Cpu *c) { ret_x(c, directory_entry_count(arg_p(c, 0), arg_x(c, 1))); }
 static void ov_mount_save(Cpu *c) { ret_x(c, mount_save(arg_p(c, 0), arg_p(c, 1))); }
 static void ov_mount_save_ro(Cpu *c) { ret_x(c, mount_save_ro(arg_p(c, 0), arg_x(c, 1), arg_p(c, 2))); }
 static void ov_save_exists(Cpu *c) { ret_x(c, save_exists(arg_x(c, 0), arg_p(c, 1))); }
@@ -1146,6 +1172,47 @@ static void ov_read_cache_list(Cpu *c) { ret_x(c, read_cache_list(arg_p(c, 0), a
 static void ov_close_cache_list(Cpu *c) { close_cache_list(arg_x(c, 0)); }
 // The fs priority only orders I/O inside the system fs process; host I/O is unordered.
 static void ov_set_priority(Cpu *c) { (void)c; }
+
+// ---- Kirby Air Riders' forms. The lifted SDK versions reach for the fs service session, which the host never opens
+// (GetSaveDataSize crashed reading it). Host folders have no fixed capacity, so sizes are generous and fixed: the game
+// never needs to extend anything.
+#define KAR_SAVE_SIZE (256ll << 20)
+#define KAR_CACHE_SIZE (64ll << 20)
+static void put64(Cpu *c, int i, int64_t v) {
+    int64_t *p = arg_p(c, i);
+    if (p) *p = v;
+}
+// Result GetSaveDataSize(int64_t *size, int64_t *journal, const account::Uid &), GetSaveDataSizeMax(int64_t *, int64_t *)
+static void ov_save_size(Cpu *c) {
+    put64(c, 0, KAR_SAVE_SIZE);
+    put64(c, 1, KAR_SAVE_SIZE);
+    ret_x(c, 0);
+}
+// Result ExtendSaveData(const account::Uid &, int64_t size, int64_t journal): the host folder grows as needed
+static void ov_extend_save(Cpu *c) { (void)c; ret_x(c, 0); }
+// Result GetFreeSpaceSize(int64_t *out, const char *path)
+static void ov_free_space(Cpu *c) {
+    put64(c, 0, 4ll << 30);
+    ret_x(c, 0);
+}
+// Result GetCacheStorageSize(int64_t *size, int64_t *journal, int index)
+static void ov_cache_size(Cpu *c) {
+    put64(c, 0, KAR_CACHE_SIZE);
+    put64(c, 1, KAR_CACHE_SIZE);
+    ret_x(c, 0);
+}
+// Result MountCacheStorage(const char *name): cache index 0, created on first use
+static void ov_mount_cache0(Cpu *c) {
+    create_cache(0, KAR_CACHE_SIZE, KAR_CACHE_SIZE);
+    ret_x(c, mount_cache(arg_p(c, 0), 0));
+}
+// size_t GetRamDiskBufferSize(size_t size), Result MountRamDisk(const char *name, void *buffer, size_t size): a
+// RAM disk is scratch storage, so it is the host's temporary folder (as MountTemporaryStorage); the game's buffer is
+// allocated and ignored, so its size only has to be non-zero.
+static void ov_ram_disk_size(Cpu *c) { ret_x(c, 0x1000); }
+static void ov_mount_ram_disk(Cpu *c) { ret_x(c, mount_temp(arg_p(c, 0))); }
+// Result MountRom(const char *name): the Switch 2 form without a cache buffer
+static void ov_mount_rom1(Cpu *c) { ret_x(c, romfs_mount(arg_p(c, 0))); }
 #undef I32
 #undef I64
 
@@ -1204,6 +1271,16 @@ HOST_OVERRIDE(S_DELETE_RECURSIVE, ov_delete_recursive);
 HOST_OVERRIDE(S_OPEN_DIRECTORY, ov_open_directory);
 HOST_OVERRIDE(S_READ_DIRECTORY, ov_read_directory);
 HOST_OVERRIDE(S_CLOSE_DIRECTORY, ov_close_directory);
+HOST_OVERRIDE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", ov_directory_entry_count);
+HOST_OVERRIDE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", ov_save_size);
+HOST_OVERRIDE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", ov_save_size);
+HOST_OVERRIDE("_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", ov_extend_save);
+HOST_OVERRIDE("_ZN2nn2fs16GetFreeSpaceSizeEPlPKc", ov_free_space);
+HOST_OVERRIDE("_ZN2nn2fs19GetCacheStorageSizeEPlS1_i", ov_cache_size);
+HOST_OVERRIDE("_ZN2nn2fs17MountCacheStorageEPKc", ov_mount_cache0);
+HOST_OVERRIDE("_ZN2nn2fs20GetRamDiskBufferSizeEm", ov_ram_disk_size);
+HOST_OVERRIDE("_ZN2nn2fs12MountRamDiskEPKcPvm", ov_mount_ram_disk);
+HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKc", ov_mount_rom1);
 HOST_OVERRIDE(S_MOUNT_SAVE, ov_mount_save);
 HOST_OVERRIDE(S_MOUNT_SAVE_RO, ov_mount_save_ro);
 HOST_OVERRIDE(S_SAVE_EXISTS, ov_save_exists);

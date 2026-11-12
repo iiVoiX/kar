@@ -49,6 +49,7 @@ extern "C" void menu_sdl_event(const SDL_Event *e) {
             menu_toggle();
             return;
         }
+        if (e->key.scancode == SDL_SCANCODE_F12 && !e->key.repeat) gfx_request_screenshot();   // F12 may be bound too
         if (e->key.scancode == SDL_SCANCODE_F10) {
             if (!e->key.repeat) menu_perf_cycle();
             return;

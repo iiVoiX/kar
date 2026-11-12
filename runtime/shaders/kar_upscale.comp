@@ -1,0 +1,53 @@
+// Kirby Air Riders' stand-in for DLSS (runtime/vk_kar_upscale.c): AMD FidelityFX Super Resolution 1 EASU upscales the
+// game's DLSS input, then the result is decoded to linear light. The game stores that input sRGB encoded (its
+// 1536x864 rgb10a2 target, written by fs 184cb4d91dd73177), and its final composite (fs bc440c9e68b1a585)
+// blends the DLSS output with the UI in linear light and encodes the sum with sqrt; so this shader writes the
+// sRGB-decoded value. EASU runs on the encoded values, the
+// perceptual space it is tuned for. ffx/ffx_a.h and ffx/ffx_fsr1.h are AMD's headers, unmodified (MIT,
+// ffx/LICENSE.txt). Each invocation writes four pixels of a 16x16 tile, as AMD's sample does.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1, rgb10_a2) uniform writeonly image2D dst;
+
+layout(push_constant) uniform Params {
+    vec4 view;   // source width, source height, source image width, source image height
+    vec4 out_;   // output width, output height, decode (1: square the result), unused
+} pc;
+
+#define A_GPU 1
+#define A_GLSL 1
+#include "ffx/ffx_a.h"
+#define FSR_EASU_F 1
+AF4 FsrEasuRF(AF2 p) { return textureGather(src, p, 0); }
+AF4 FsrEasuGF(AF2 p) { return textureGather(src, p, 1); }
+AF4 FsrEasuBF(AF2 p) { return textureGather(src, p, 2); }
+#include "ffx/ffx_fsr1.h"
+
+void put(AU2 p, AU4 c0, AU4 c1, AU4 c2, AU4 c3) {
+    if (p.x >= uint(pc.out_.x) || p.y >= uint(pc.out_.y)) return;
+    AF3 c;
+    FsrEasuF(c, p, c0, c1, c2, c3);
+    c = clamp(c, 0.0, 1.0);
+    // decode 1: the sRGB curve the game encoded with (fs 184cb4d91dd73177: 12.92 below 0.0031308, else
+    // 1.055 x^(1/2.4) - 0.055); 2: a plain square (the first stand-in, which lifted the mid-tones: a flat picture)
+    if (pc.out_.z > 1.5) c *= c;
+    else if (pc.out_.z > 0.5) c = mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
+    imageStore(dst, ivec2(p), vec4(c, 1.0));
+}
+
+void main() {
+    AU4 c0, c1, c2, c3;
+    FsrEasuCon(c0, c1, c2, c3, pc.view.x, pc.view.y, pc.view.z, pc.view.w, pc.out_.x, pc.out_.y);
+    AU2 p = ARmp8x8(gl_LocalInvocationID.x) + AU2(gl_WorkGroupID.x << 4u, gl_WorkGroupID.y << 4u);
+    put(p, c0, c1, c2, c3);
+    p.x += 8u;
+    put(p, c0, c1, c2, c3);
+    p.y += 8u;
+    put(p, c0, c1, c2, c3);
+    p.x -= 8u;
+    put(p, c0, c1, c2, c3);
+}

@@ -40,6 +40,39 @@ def layout(exefs):
     return out
 
 
+def layout_nro(mods, nros):
+    """[(name, base, size)] for NROs the game maps at run time through nn::ro, placed after the ExeFS modules in the
+    order given. nros: [(name, path)]. The names become C identifiers (MOD_<NAME>_BASE)."""
+    base = align_up(max((b + s for _, b, s in mods), default=FIRST_BASE))
+    out = []
+    for name, path in nros:
+        if not name.isidentifier():
+            raise ValueError(f'NRO name {name!r} is not a C identifier')
+        size = Nso(str(path)).size
+        out.append((name, base, size))
+        base = align_up(base + size)
+    if base > ADDRESS_LIMIT:
+        raise ValueError(f'NROs end at {base:#x}, above 2^39')
+    return out
+
+
+def write_nro(nros, paths, outdir):
+    """nro_layout.json and nro_layout.h, apart from layout.json/layout.h: the runtime loads the ExeFS modules from
+    MOD_LIST at boot, while an NRO is mapped only when the game calls nn::ro::LoadModule (NRO_LIST)."""
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / 'nro_layout.json').write_text(json.dumps(
+        [{'name': n, 'base': f'{b:#x}', 'size': f'{s:#x}', 'romfs_name': Path(paths[n]).name} for n, b, s in nros],
+        indent=1) + '\n')
+    lines = ['// NRO layout chosen by recomp/layout.py. Generated; do not edit.', '#pragma once', '']
+    for n, b, s in nros:
+        lines.append(f'#define MOD_{n.upper()}_BASE {b:#x}ull')
+        lines.append(f'#define MOD_{n.upper()}_SIZE {s:#x}ull')
+    lines += ['', f'#define NRO_COUNT {len(nros)}',
+              '#define NRO_LIST(X) ' + ' '.join(f'X({n}, {n.upper()})' for n, _, _ in nros), '']
+    (outdir / 'nro_layout.h').write_text('\n'.join(lines))
+
+
 def write(mods, outdir):
     """layout.json for Python tools and layout.h for the runtime."""
     outdir = Path(outdir)

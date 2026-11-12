@@ -2,6 +2,10 @@
 // strings of main, minus nvn_procs.inc and nvnBootstrapLoader. Each gets a stop-with-its-name stand-in
 // (nvn_procs.c) until nvn_api_*.c implements it. API names only; no game data.
 NVN_PROC(nvnCommandBufferBeginDeviceCommands)
+// Kirby Air Riders' DLSS procs absent from Bananza's list (nvn_api_dlss.c)
+NVN_PROC(nvnDlssNetworkResize)
+NVN_PROC(nvnDlssNetworkBuilderGetTexturePool)
+NVN_PROC(nvnDlssNetworkBuilderGetTextureIDs)
 NVN_PROC(nvnCommandBufferBindAccelerationStructure)
 NVN_PROC(nvnCommandBufferBindAccelerationStructures)
 NVN_PROC(nvnCommandBufferBindAccelerationStructuresDeferred)

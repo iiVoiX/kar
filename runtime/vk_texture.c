@@ -49,6 +49,7 @@ typedef struct Tex {
     int last_ch;                  // last vk_mem_changed result of make_fresh: 1 written, 0 clean, -1 not tracked
     uint8_t hashed;               // chash holds the storage hash taken just before the last upload (untracked pages)
     uint64_t chash;
+    uint64_t vhash;               // KAR_TEX_VERIFY: storage hash taken at the last upload
     struct Tex *next_at;          // other entries at the same storage address
     uint8_t gpu_dirty;            // mirrored, and the GPU wrote the image after the last write-back to the storage
     uint32_t gpu_gen;             // page generation when the GPU write that set gpu_dirty was recorded
@@ -57,6 +58,7 @@ typedef struct Tex {
     uint64_t wr_fence;            // any entry: newest submission recorded to write its image (render, copy, clear,
                                   // storage binding); ReadTexels waits for it instead of draining the replay queue
     uint8_t listed;               // in owned[]
+    uint8_t init_sampled;         // diagnostic: logged as sampled before any GPU write
     uint8_t *snap;                // a texture that fills no page: its storage bytes when the GPU write was recorded
     uint32_t wt_n;                // WriteTexels into the storage since the last upload
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
@@ -633,6 +635,19 @@ static void upload(Tex *e) {
     const nvn_texdesc *d = &t->d;
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
     if (!bpb || !t->mem) return;
+    // Storage that runs into pages nobody mapped (a descriptor the game never backed, or one we size wrongly) would
+    // fault in the deswizzle: such a texture is read as zeros instead. Every page run must be readable.
+    int readable = 1;
+    for (uint64_t a = (uintptr_t)t->mem, lim = a + t->L.size, end; a < lim; a = end) {
+        int s = plat_mem_state(a, lim, &end);
+        if ((s != PLAT_PROT_RW && s != PLAT_PROT_READ) || end <= a) { readable = 0; break; }
+    }
+    if (!readable) {
+        static volatile int32_t n_unmapped;
+        log_limited(&n_unmapped, "texture %#llx fmt %#x %ux%u: storage of %#llx bytes runs into unmapped memory; "
+                    "uploaded as zeros", (unsigned long long)e->pub.addr, d->format, d->width, d->height,
+                    (unsigned long long)t->L.size);
+    }
     uint64_t p0 = perf_begin(), u0 = kern_now_ns();
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D, one_d = e->pub.type == VK_IMAGE_TYPE_1D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear ? 1 : e->pub.layers;
@@ -663,7 +678,8 @@ static void upload(Tex *e) {
             uint32_t rb = (w + bw - 1) / bw * (uint32_t)bpb, rows = (h + bh - 1) / bh;
             size_t raw = (size_t)rb * rows * sl;
             uint8_t *dst = stg + rg[k].bufferOffset, *tmp = (astc && !agpu) || rgb ? malloc(raw) : NULL;
-            if (nvn_deswizzle(d, lv, ly, t->mem, tmp ? tmp : dst, rb)) {
+            if (!readable) memset(tmp ? tmp : dst, 0, raw);
+            else if (nvn_deswizzle(d, lv, ly, t->mem, tmp ? tmp : dst, rb)) {
                 log_limited(&n_bad, "texture %#llx fmt %#x target %d: level %u layer %u has no CPU layout; uploaded as zeros",
                             (unsigned long long)e->pub.addr, d->format, d->target, lv, ly);
                 memset(tmp ? tmp : dst, 0, raw);
@@ -814,13 +830,73 @@ static int untracked_same(Tex *e, int ch) {
     return same;
 }
 
+// ---- KAR_TEX_VERIFY=1 (diagnostic): the console's GPU reads texture memory directly, so a texture is never stale
+// there. Here a mirrored texture counts as current while the write watch reports its pages clean. This checks that
+// assumption: every clean answer hashes the storage and compares it with the hash taken at the last upload; a
+// difference is logged (the write was missed: a host write without vk_guest_written, a DMA, an alias) and the texture
+// is uploaded again. Costs a hash of each bound mirrored texture per check, so it is off by default.
+static int tex_verify = -1;
+static volatile int32_t n_stale;
+static int storage_readable(const Tex *e) {   // every page of the storage committed and readable
+    uint64_t a = e->pub.addr, lim = e->pub.addr + e->t.L.size, end;
+    while (a < lim) {
+        int st = plat_mem_state(a, lim, &end);
+        if (st != PLAT_PROT_RW && st != PLAT_PROT_READ) return 0;
+        a = end;
+    }
+    return 1;
+}
+static void verify_note_upload(Tex *e) {
+    if (tex_verify < 0) tex_verify = cfg_get("KAR_TEX_VERIFY") && *cfg_get("KAR_TEX_VERIFY") == '1';
+    if (tex_verify) e->vhash = storage_readable(e) ? storage_hash(e) : 0;
+}
+static int verify_stale(Tex *e) {   // 1: the storage changed although the write watch said clean
+    if (tex_verify < 0) tex_verify = cfg_get("KAR_TEX_VERIFY") && *cfg_get("KAR_TEX_VERIFY") == '1';
+    if (!tex_verify || !e->uploaded || !e->vhash || !storage_readable(e)) return 0;
+    if (storage_hash(e) == e->vhash) return 0;
+    log_limited(&n_stale, "KAR_TEX_VERIFY: stale texture %#llx fmt %#x %ux%ux%u, %llu bytes, uploads %u: storage "
+                "changed without a write-watch report", (unsigned long long)e->pub.addr, e->t.d.format, e->t.d.width,
+                e->t.d.height, e->t.d.depth, (unsigned long long)e->t.L.size, e->n_up);
+    return 1;
+}
+
+// KAR_ZERO_TEX=<w>x<h> (diagnostic): a mirrored 2D texture of that size is logged at its first upload (pool and
+// texture flags, whether its storage is all zero) and, with a trailing '!', its storage is zeroed before the upload.
+// KAR_ZERO_TEX=image[!]: every mirrored IMAGE-flag texture whose storage is not all zero. Found the rainbow: Kirby Air
+// Riders' R11G11B10F vertex-data textures held heap garbage because their ClearTexturei(0) was skipped (vk_exec_xfer.c
+// clear_tex).
+static void zero_tex_diag(Tex *e) {
+    static int parsed, zw, zh, zero;
+    if (!parsed) {
+        parsed = 1;
+        const char *v = getenv("KAR_ZERO_TEX");
+        if (v && sscanf(v, "%dx%d", &zw, &zh) == 2) zero = strchr(v, '!') != NULL;
+        else if (v && !strncmp(v, "image", 5)) zw = zh = -1, zero = strchr(v, '!') != NULL;   // every IMAGE-flag texture
+        else zw = zh = 0;
+    }
+    if (!zw || e->uploaded || !storage_readable(e)) return;
+    if (zw < 0 ? !(e->t.d.flags & NVN_TEXTURE_FLAGS_IMAGE) : (int)e->t.d.width != zw || (int)e->t.d.height != zh) return;
+    const uint8_t *m = (const uint8_t *)(uintptr_t)e->pub.addr;
+    uint64_t nz = 0;
+    uint64_t fnv = 0xcbf29ce484222325ull;   // the storage's hash: two uploads of one texture show whether the game rewrote it
+    for (uint64_t i = 0; i < e->t.L.size; i++) nz += m[i] != 0, fnv = (fnv ^ m[i]) * 0x100000001b3ull;
+    if (zw < 0 && !nz) return;
+    rt_log("vk: KAR_ZERO_TEX: %ux%u format %#x at %#llx size %llu hash %016llx: %llu nonzero bytes, pool flags %#x tex flags %#x, frame %llu%s",
+           e->t.d.width, e->t.d.height, e->t.d.format, (unsigned long long)e->pub.addr, (unsigned long long)e->t.L.size,
+           (unsigned long long)fnv, (unsigned long long)nz, e->t.pool ? (unsigned)e->t.pool->flags : 0u, (unsigned)e->t.d.flags,
+           (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), zero && nz ? ": zeroed" : "");
+    if (zero && nz) memset((void *)(uintptr_t)e->pub.addr, 0, e->t.L.size);
+}
+
 // A mirrored texture is uploaded on first use and again when its storage pages carry a newer write generation.
 static void make_fresh(Tex *e) {
+    if (e->pub.mirrored && !e->pub.gpu_owned) zero_tex_diag(e);
     if (!e->pub.mirrored || e->pub.gpu_owned) return;
     uint64_t size = e->t.L.size;
     if (!e->uploaded) {
         int ch = vk_mem_changed(e->pub.addr, size, 0, &e->wgen);   // resets the write bits before the storage is read
         untracked_same(e, ch);   // takes the hash for the next untracked check
+        verify_note_upload(e);
         upload(e);
         return;
     }
@@ -828,21 +904,35 @@ static void make_fresh(Tex *e) {
     int ch = vk_mem_changed(e->pub.addr, size, e->wgen, &now);
     e->wgen = now;
     e->last_ch = ch;
-    if (ch && !untracked_same(e, ch)) upload(e);   // 1 written, -1 not tracked and the bytes changed: upload again
+    if (!ch && verify_stale(e)) ch = 1;
+    if (ch && !untracked_same(e, ch)) verify_note_upload(e), upload(e);   // 1 written, -1 untracked and changed
 }
 
 // make_fresh for draw bindings: the page check answers from this submission's write-watch snapshot (vk_memory.c
 // vk_mem_changed_snap) instead of a system call per texture. A write the snapshot of the texture's region missed (made
 // after it, during this replay) keeps its write-watch bit and is caught by the next submission's snapshot.
 static void make_fresh_snap(Tex *e) {
+    if (e->pub.mirrored && !e->pub.gpu_owned) zero_tex_diag(e);
+    static int diag_unw = -1;   // KAR_DIAG_UNWRITTEN=1: non-mirrored textures sampled before any GPU write
+    if (diag_unw < 0) diag_unw = getenv("KAR_DIAG_UNWRITTEN") != NULL;
+    if (diag_unw && !e->pub.mirrored && !e->pub.gpu_owned && !e->init_sampled) {
+        e->init_sampled = 1;
+        static volatile int32_t n_unw;
+        if (plat_inc32(&n_unw) <= 400)
+        rt_log("vk: sampled before any GPU write (frame %llu): %ux%ux%u format %#x vk %d at %#llx pool flags %#x tex flags %#x",
+                    (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
+                    e->t.d.width, e->t.d.height, e->t.d.depth, e->t.d.format, (int)e->f.vk, (unsigned long long)e->pub.addr,
+                    e->t.pool ? (unsigned)e->t.pool->flags : 0u, (unsigned)e->t.d.flags);
+    }
     if (!e->pub.mirrored || e->pub.gpu_owned) return;
     uint32_t now;
     n_checks++;
     int ch = vk_mem_changed_snap(e->pub.addr, e->t.L.size, e->uploaded ? e->wgen : 0, submit_epoch, &now);
     e->wgen = now;
-    if (!e->uploaded) { untracked_same(e, ch); upload(e); return; }
+    if (!e->uploaded) { untracked_same(e, ch); verify_note_upload(e); upload(e); return; }
     e->last_ch = ch;
-    if (ch && !untracked_same(e, ch)) upload(e);
+    if (!ch && verify_stale(e)) ch = 1;
+    if (ch && !untracked_same(e, ch)) verify_note_upload(e), upload(e);
 }
 
 // ---------------------------------------------------------------- aliases (TOTK_TEX_ALIAS)
@@ -922,6 +1012,82 @@ static int alias_copy(Tex *e, const Tex *src) {
     vk_exec_inline_end(reopen);
     free(rg);
     return 1;
+}
+
+// KAR_CLEAR_AT=<frame>[:<VkFormat>] (diagnostic): at the first draw of that frame, every image the GPU wrote or that has
+// no CPU copy (render targets, GPU-made textures) is cleared once, colour to 0, depth to 1; with a VkFormat number only
+// images of that format. A rainbow run whose picture then stays clean had its fault stored in one of them; one where it
+// comes back has something that writes it again. Returns the number cleared, -1 when it did not run now.
+// KAR_REUPLOAD_AT=<frame> (diagnostic, the complement of KAR_CLEAR_AT): once, at that frame, marks every mirrored
+// CPU texture as not uploaded, so its next use uploads it again from guest memory. A rainbow that goes away for good
+// means a CPU texture whose image holds other bytes than its storage (an upload made before the game finished writing
+// it, which the write watch did not report).
+int vk_texture_reupload_at(uint64_t frame) {
+    static int parsed, done;
+    static uint64_t at;
+    if (!parsed) {
+        parsed = 1;
+        const char *e = getenv("KAR_REUPLOAD_AT");
+        if (e && *e) at = strtoull(e, NULL, 10);
+    }
+    if (!at || done || frame < at) return -1;
+    done = 1;
+    int n = 0, nc = 0;
+    lock();
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        Tex *e = by_key.vals ? by_key.vals[i] : NULL;
+        if (!e || e->released || !e->pub.mirrored || e->pub.gpu_owned || !e->uploaded) continue;
+        e->uploaded = 0;
+        n++;
+        if (format_compressed(e->f.vk)) nc++;
+    }
+    unlock();
+    rt_log("vk: KAR_REUPLOAD_AT: frame %llu: %d CPU textures marked for upload (%d compressed)",
+           (unsigned long long)frame, n, nc);
+    return n;
+}
+
+int vk_texture_clear_gpu_at(uint64_t frame) {
+    static int parsed, done;
+    static uint64_t at;
+    static int fmt;
+    if (!parsed) {
+        parsed = 1;
+        const char *e = getenv("KAR_CLEAR_AT");
+        if (e && *e) {
+            char *q;
+            at = strtoull(e, &q, 10);
+            fmt = *q == ':' ? atoi(q + 1) : 0;
+        }
+    }
+    if (!at || done || frame < at) return -1;
+    int reopen;
+    VkCommandBuffer cb = vk_exec_inline_begin(&reopen);
+    if (!cb) return -1;
+    done = 1;
+    int n = 0;
+    lock();
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        Tex *e = by_key.vals ? by_key.vals[i] : NULL;
+        if (!e || e->released || (e->pub.mirrored && !e->pub.gpu_owned) || format_compressed(e->f.vk)) continue;
+        if (fmt && (int)e->pub.format != fmt) continue;
+        if (e->pub.samples > 1) continue;
+        VkImageSubresourceRange rg = {e->pub.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+        barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        if (e->pub.aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+            VkClearDepthStencilValue one = {1.0f, 0};
+            vkCmdClearDepthStencilImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &rg);
+        } else {
+            VkClearColorValue zero = {0};
+            vkCmdClearColorImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &rg);
+        }
+        n++;
+    }
+    barrier(cb, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+    unlock();
+    vk_exec_inline_end(reopen);
+    rt_log("vk: KAR_CLEAR_AT: frame %llu: %d GPU images cleared (format %d)", (unsigned long long)frame, n, fmt);
+    return n;
 }
 
 static Tex *entry_of(const tex_t *t) {
@@ -1016,6 +1182,20 @@ static void wb_cfg_init(void) {
 
 void vk_texture_gpu_written(const tex_t *t) {
     if (!t || !t->mem) return;
+    static int diag_w = -1;   // KAR_DIAG_CLEAR=1: GPU writes (render, copy, clear) to 64xN / 4096xN textures
+    static volatile int32_t n_w;
+    if (diag_w < 0) diag_w = getenv("KAR_DIAG_CLEAR") != NULL;
+    if (diag_w && (t->d.width == 64 || t->d.width == 4096) && plat_inc32(&n_w) <= 60)
+        rt_log("vk: gpu write to %ux%u nvn fmt %#x flags %#x at %p, frame %llu", t->d.width, t->d.height, t->d.format,
+               (unsigned)t->d.flags, (void *)t->mem, (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+    static uint64_t diag_at = 1;   // KAR_DIAG_WRITE_AT=<hex address> (diagnostic): log GPU writes to the texture there (1024: every 1024x1024 d16 one from frame 2000)
+    static volatile int32_t n_at;
+    if (diag_at == 1) diag_at = getenv("KAR_DIAG_WRITE_AT") ? strtoull(getenv("KAR_DIAG_WRITE_AT"), NULL, 16) : 0;
+    if (diag_at && ((uint64_t)(uintptr_t)t->mem == diag_at || (diag_at == 0x1024 && t->d.width == 1024 && t->d.height == 1024 && t->d.format == 0x32 &&
+                                                         __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) >= 2000)) &&
+        plat_inc32(&n_at) <= 400)
+        rt_log("vk: gpu write to %ux%u nvn fmt %#x at %p, frame %llu", t->d.width, t->d.height, t->d.format,
+               (void *)t->mem, (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
     vk_exec_frame_written(t);
     lock();
     Tex *e = entry_of(t);
@@ -1505,6 +1685,13 @@ void vk_texture_storage_bound_locked(const VkTexImage *img) {
     Tex *e = (Tex *)img;   // pub is the first member
     uint64_t f = vk_exec_recording_fence();
     if (f > e->wr_fence) e->wr_fence = f;
+    static int diag_s = -1;   // KAR_DIAG_CLEAR=1: storage-image binds of 64xN / 4096xN textures
+    static volatile int32_t n_s;
+    if (diag_s < 0) diag_s = getenv("KAR_DIAG_CLEAR") != NULL;
+    if (diag_s && (e->t.d.width == 64 || e->t.d.width == 4096) && plat_inc32(&n_s) <= 60)
+        rt_log("vk: storage bind of %ux%u nvn fmt %#x flags %#x at %#llx, frame %llu", e->t.d.width, e->t.d.height,
+               e->t.d.format, (unsigned)e->t.d.flags, (unsigned long long)e->pub.addr,
+               (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
 }
 
 uint64_t vk_texture_last_write(const tex_t *t) {

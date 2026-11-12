@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <SDL3/SDL.h>
+
 #include "imgui.h"
 #include "imgui_internal.h"   // SetFocusID, NavCursorVisible
 #include "backends/imgui_impl_vulkan.h"
@@ -54,6 +56,8 @@ int romfs_xbox_prompts_ready(void);
 int romfs_xbox_prompts_active(void);
 extern const char rt_port_version[];
 extern const char rt_game_display[];
+extern const char rt_game_target[];
+int rt_game_is_kar(void);
 }
 
 // Roboto Medium (Apache-2.0, ui/fonts/LICENSE-Roboto.txt) with Latin and Cyrillic glyphs.
@@ -215,6 +219,38 @@ static void style_init(ImGuiStyle &s) {
     c[ImGuiCol_TabSelectedOverline] = gold;
     c[ImGuiCol_NavCursor] = gold;
     c[ImGuiCol_Separator] = ImVec4(0.30f, 0.36f, 0.30f, 1);
+    if (rt_game_is_kar()) {
+        // Kirby Air Riders: our own palette in the series' colours (no game artwork): berry panels, Kirby pink for tabs
+        // and buttons, a warm-star yellow for the focus, the selected tab's line and the headings; rounder corners.
+        // Dark enough that the performance overlay's light text stays readable on the same window colour.
+        s.WindowRounding = 20; s.FrameRounding = 12; s.GrabRounding = 12; s.TabRounding = 12; s.ChildRounding = 14;
+        ImVec4 star(1.00f, 0.84f, 0.26f, 1), pink(0.93f, 0.36f, 0.58f, 1), berry(0.42f, 0.13f, 0.28f, 1);
+        c[ImGuiCol_WindowBg] = ImVec4(0.19f, 0.07f, 0.14f, 0.95f);
+        c[ImGuiCol_PopupBg] = ImVec4(0.22f, 0.08f, 0.16f, 0.98f);
+        c[ImGuiCol_Text] = ImVec4(1.00f, 0.96f, 0.98f, 1);
+        c[ImGuiCol_TextDisabled] = ImVec4(0.86f, 0.70f, 0.79f, 1);
+        c[ImGuiCol_Button] = berry;
+        c[ImGuiCol_ButtonHovered] = pink;
+        c[ImGuiCol_ButtonActive] = ImVec4(1.00f, 0.50f, 0.70f, 1);
+        c[ImGuiCol_FrameBg] = ImVec4(0.31f, 0.10f, 0.21f, 1);
+        c[ImGuiCol_FrameBgHovered] = ImVec4(0.52f, 0.18f, 0.34f, 1);
+        c[ImGuiCol_FrameBgActive] = ImVec4(0.62f, 0.22f, 0.41f, 1);
+        c[ImGuiCol_SliderGrab] = pink;
+        c[ImGuiCol_SliderGrabActive] = star;
+        c[ImGuiCol_CheckMark] = star;
+        c[ImGuiCol_Header] = berry;
+        c[ImGuiCol_HeaderHovered] = pink;
+        c[ImGuiCol_HeaderActive] = ImVec4(1.00f, 0.50f, 0.70f, 1);
+        c[ImGuiCol_Tab] = ImVec4(0.32f, 0.10f, 0.21f, 1);
+        c[ImGuiCol_TabHovered] = pink;
+        c[ImGuiCol_TabSelected] = ImVec4(0.86f, 0.26f, 0.48f, 1);
+        c[ImGuiCol_TabSelectedOverline] = star;
+        c[ImGuiCol_NavCursor] = star;
+        c[ImGuiCol_Separator] = ImVec4(0.55f, 0.25f, 0.40f, 1);
+        c[ImGuiCol_ScrollbarGrab] = berry;
+        c[ImGuiCol_ScrollbarGrabHovered] = pink;
+        c[ImGuiCol_ScrollbarGrabActive] = star;
+    }
 }
 
 static void make_context(void) {
@@ -533,7 +569,7 @@ static void rows_dkb_wide(void) {
     opt_choice_list("TOTK_HUD_POSITION", UI_MENU_HUD_POSITION, positions, names, 2, UI_MENU_HUD_POSITION_DESC);
 }
 
-static void row_render_scale(void) {
+static bool row_render_scale(void) {
     static const char *const vals[] = {"game", "50", "67", "75", "100", "125", "150", "200"};
     enum { N = sizeof vals / sizeof *vals };
     char shown[N][32];
@@ -543,7 +579,7 @@ static void row_render_scale(void) {
         snprintf(shown[i], sizeof shown[i], "%s %%", vals[i]);
         names[i] = shown[i];
     }
-    opt_choice_list("TOTK_RENDER_SCALE", UI_MENU_RENDER_SCALE, vals, names, N, UI_MENU_RENDER_SCALE_DESC);
+    return opt_choice_list("TOTK_RENDER_SCALE", UI_MENU_RENDER_SCALE, vals, names, N, UI_MENU_RENDER_SCALE_DESC);
 }
 
 static void row_gpu(void) {
@@ -653,6 +689,33 @@ static void rows_color(void) {
     }
 }
 
+// The graphics preset: one choice writes the 3D render scale, the upscaler and the sharpness (cfg.c VIDEO_PRESET), as
+// the colour profile writes its four values; moving one of the three rows afterwards makes the preset Custom.
+static void rows_video_preset(void) {
+    static const struct { const char *name, *scale, *up, *sharp; } presets[] = {
+        {"performance", "67", "fsr", "90"}, {"balanced", "game", "fsr", "80"}, {"quality", "100", "fsr", "70"},
+        {"ultra", "150", "fsr", "50"}};
+    static const UiTextId names[] = {UI_MENU_PRESET_PERFORMANCE, UI_MENU_PRESET_BALANCED, UI_MENU_PRESET_QUALITY,
+                                     UI_MENU_PRESET_ULTRA, UI_MENU_COLOR_CUSTOM};
+    if (opt_choice("TOTK_VIDEO_PRESET", UI_MENU_VIDEO_PRESET, names, 5, UI_MENU_VIDEO_PRESET_DESC)) {
+        const char *p = cfg_value("TOTK_VIDEO_PRESET");
+        for (const auto &e : presets)
+            if (!strcmp(p, e.name)) {
+                cfg_set("TOTK_RENDER_SCALE", e.scale), cfg_set("TOTK_UPSCALER", e.up);
+                cfg_set("TOTK_SHARPNESS", e.sharp);
+                cfg_save();
+            }
+    }
+    bool moved = row_render_scale();
+    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
+    moved |= opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
+    moved |= opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
+    if (moved && strcmp(cfg_value("TOTK_VIDEO_PRESET"), "custom")) {
+        cfg_set("TOTK_VIDEO_PRESET", "custom");
+        cfg_save();
+    }
+}
+
 static void tab_screen(float scale) {
     opt_begin("##screen", scale);
     opt_toggle("TOTK_FULLSCREEN", UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC);
@@ -664,11 +727,9 @@ static void tab_screen(float scale) {
     row_gpu();
     static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
     opt_choice("TOTK_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
+    opt_toggle("TOTK_SCREENSHOT_KEY", UI_MENU_SCREENSHOT_KEY, UI_MENU_SCREENSHOT_KEY_DESC);
     opt_group(UI_MENU_GRAPHICS);
-    row_render_scale();
-    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
-    opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
-    opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
+    rows_video_preset();
     static const UiTextId aspect[] = {UI_MENU_ASPECT_FIT, UI_MENU_ASPECT_STRETCH};
     opt_choice("TOTK_ASPECT", UI_MENU_ASPECT, aspect, 2, UI_MENU_ASPECT_DESC);
     opt_slider("TOTK_FOV", UI_MENU_FOV, 70, 140, UI_MENU_FOV_DESC, 5, "%.0f %%");
@@ -690,9 +751,38 @@ static void tab_game(float scale) {
     opt_end();
 }
 
+// The playback devices SDL lists now (read again every two seconds while the tab is shown, so a headset plugged in
+// appears); the first entry is the system default (the key unset). A set device that is gone stays shown by name.
+static void row_audio_device(void) {
+    enum { MAX_DEV = 16 };
+    static char dev_names[MAX_DEV][128];
+    static int n_dev = -1;
+    static uint64_t listed_ns;
+    uint64_t now = plat_now_ns();
+    if (n_dev < 0 || now - listed_ns > 2000000000ull) {
+        listed_ns = now;
+        n_dev = 0;
+        int n = 0;
+        SDL_AudioDeviceID *ids = SDL_WasInit(SDL_INIT_AUDIO) ? SDL_GetAudioPlaybackDevices(&n) : nullptr;
+        for (int i = 0; ids && i < n && n_dev < MAX_DEV; i++)
+            if (const char *name = SDL_GetAudioDeviceName(ids[i]))
+                snprintf(dev_names[n_dev++], sizeof dev_names[0], "%s", name);
+        SDL_free(ids);
+    }
+    const char *vals[MAX_DEV + 1], *names[MAX_DEV + 1];
+    vals[0] = "";
+    names[0] = menu_text(UI_MENU_AUDIO_DEVICE_DEFAULT);
+    for (int i = 0; i < n_dev; i++) vals[i + 1] = names[i + 1] = dev_names[i];
+    const char *now_dev = cfg_get("TOTK_AUDIO_DEVICE");
+    opt_choice_list("TOTK_AUDIO_DEVICE", UI_MENU_AUDIO_DEVICE, vals, names, n_dev + 1, UI_MENU_AUDIO_DEVICE_DESC,
+                    now_dev && *now_dev ? -1 : 0);
+}
+
 static void tab_sound(float scale) {
     opt_begin("##sound", scale);
     opt_slider("TOTK_VOLUME", UI_MENU_VOLUME, 0, 100, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
+    opt_toggle("TOTK_MUTE_UNFOCUSED", UI_MENU_MUTE_UNFOCUSED, UI_MENU_MUTE_UNFOCUSED_DESC);
+    row_audio_device();
     opt_end();
 }
 
@@ -731,8 +821,8 @@ static void tab_controls(float scale) {
 
 static void tab_menu(float scale) {
     opt_begin("##menu", scale);
-    static const UiTextId langs[] = {UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_RU};
-    opt_choice("TOTK_MENU_LANG", UI_MENU_MENU_LANG, langs, 3, UI_MENU_MENU_LANG_DESC);
+    static const UiTextId langs[] = {UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_DE, UI_MENU_LANGNAME_RU};
+    opt_choice("TOTK_MENU_LANG", UI_MENU_MENU_LANG, langs, 4, UI_MENU_MENU_LANG_DESC);
     opt_end();
 }
 
@@ -903,13 +993,13 @@ static int g_focus_page = -1;   // this tab's first row takes the cursor once it
 // ---- the window: title, tabs (L / R or Q / E switch), the page, and the bottom row with "Continue" and "Quit game".
 // B on the gamepad and Esc close it.
 static void layout_menu(uint32_t w, uint32_t h, float scale) {
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2((float)w, (float)h), IM_COL32(0, 0, 0, 120));
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2((float)w, (float)h), !rt_game_is_kar() ? IM_COL32(0, 0, 0, 120) : IM_COL32(48, 8, 28, 140));
     float ww = fminf(w * 0.88f, 1400 * scale), wh = fminf(h * 0.86f, 820 * scale);
     ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(ww, wh), ImGuiCond_Always);
     ImGui::Begin("##menu", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                         ImGuiWindowFlags_NoSavedSettings);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", menu_text(UI_MENU_TITLE));
+    ImGui::TextColored(ImGui::GetStyleColorVec4(ImGuiCol_TabSelectedOverline), "%s", menu_text(UI_MENU_TITLE));   // the theme's accent
     // the port version and the game update, right-aligned on the title line: what a bug report needs first
     char version[96];
     snprintf(version, sizeof version, menu_text(UI_MENU_VERSION), rt_port_version, rt_game_display);

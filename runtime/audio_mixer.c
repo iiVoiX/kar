@@ -68,18 +68,8 @@ typedef struct Mixer {
 
 static _Atomic float device_volume = 1.0f;
 
-// TOTK_VOLUME: the player's volume in percent (0..100) on top of the game's own; a live setting (the
-// menu), parsed again when cfg_version changes. Render thread only.
-static float host_volume(void) {
-    static float v = 1.0f;
-    static unsigned seen = ~0u;
-    unsigned ver = cfg_version();
-    if (ver == seen) return v;
-    seen = ver;
-    double pct = cfg_double("TOTK_VOLUME");
-    v = (float)((pct < 0 ? 0 : pct > 100 ? 100 : pct) / 100);
-    return v;
-}
+// TOTK_VOLUME and TOTK_MUTE_UNFOCUSED (audout.c audio_menu_gain), on top of the game's own volume. Render thread only.
+static float host_volume(void) { return audio_menu_gain(); }
 static unsigned audio_revision(const AudioRenderer *r) { unsigned byte = r->revision >> 24; return byte >= '0' ? byte - '0' : 0; }
 static void report_once(Mixer *m, unsigned bit, const char *msg, int value) {
     if (m->reported & (1u << bit)) return;
@@ -180,7 +170,7 @@ static void output_open(Mixer *m, int rate) {
         return;
     }
     SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, rate};
-    m->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, sdl_pull, m);
+    m->stream = SDL_OpenAudioDeviceStream(audio_pick_device(), &spec, sdl_pull, m);
     if (!m->stream) {
         rt_log("audio: no output device (%s): mixing without sound", SDL_GetError());
         return;
@@ -894,6 +884,10 @@ void audio_device_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) 
         IPC_OUT(rs, v);
         return;
     }
+    case 16: case 18: return;   // Release{Input,Output}DeviceNotification [17.0.0+]: nothing to release
+    // Acquire{Input,Output}DeviceNotification(u64) -> handle [17.0.0+] (Switchbrew "Audio services": on the Switch 1
+    // an error; Kirby Air Riders on the Switch 2 waits on the handle): the same never-signalled change event.
+    case 15: case 17:
     case 4: case 11: case 12: {   // QueryAudioDeviceSystemEvent, ...InputEvent, ...OutputEvent
         uint32_t ev = __atomic_load_n(&change_event, __ATOMIC_ACQUIRE);
         if (!ev) {

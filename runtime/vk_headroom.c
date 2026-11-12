@@ -49,7 +49,10 @@ static void VKAPI_PTR on_allocate(VmaAllocator a, uint32_t type, VkDeviceMemory 
 
 const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void) {
     static const VmaDeviceMemoryCallbacks cb = {.pfnAllocate = on_allocate};
-    H.on = !cfg_get("TOTK_VRAM_HEADROOM") || cfg_bool("TOTK_VRAM_HEADROOM");
+    // Kirby Air Riders: off unless set. The blocks allocated ahead sat unused, ~0.9 GB of commit (VMA blocks 2081 ->
+    // 1188 MiB on a race, rmem5 against rmem6) for the same race frame rate; on an APU that is system RAM (16.9).
+    const char *set = cfg_get("TOTK_VRAM_HEADROOM");
+    H.on = set && *set ? cfg_bool("TOTK_VRAM_HEADROOM") : !rt_game_is_kar();
     return H.on ? &cb : NULL;
 }
 

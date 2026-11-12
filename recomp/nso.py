@@ -13,9 +13,15 @@ R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 2
 
 
 class Nso:
+    """An NSO (ExeFS module) or an NRO (a module the game maps at run time through nn::ro, read from the RomFS)."""
+
     def __init__(self, path):
         raw = open(path, 'rb').read()
+        if raw[0x10:0x14] == b'NRO0':
+            self._init_nro(raw)
+            return
         assert raw[:4] == b'NSO0', path
+        self.kind = 'nso'
         flags = struct.unpack_from('<I', raw, 0xC)[0]
         self.build_id = raw[0x40:0x60].rstrip(b'\0').hex()
         segs = []
@@ -35,6 +41,23 @@ class Nso:
         img = bytearray(self.size)
         for off, d in segs:
             img[off:off + len(d)] = d
+        self.image = img
+        self._parse_mod0()
+
+    def _init_nro(self, raw):
+        """NRO: the file is the memory image of .text, .rodata and .data, uncompressed, with the NRO header inside
+        .text at 0x10 and the MOD0 offset at 4 as in an NSO. Header: segments as (offset, size) at 0x20, 0x28 and
+        0x30, the .bss size at 0x38, the build id at 0x40."""
+        self.kind = 'nro'
+        self.build_id = raw[0x40:0x60].rstrip(b'\0').hex()
+        segs = [struct.unpack_from('<II', raw, 0x20 + i * 8) for i in range(3)]
+        self.text, self.rodata, self.data = segs
+        self.bss_size = struct.unpack_from('<I', raw, 0x38)[0]
+        end = self.data[0] + self.data[1] + self.bss_size
+        self.size = (end + 0xFFF) & ~0xFFF
+        img = bytearray(self.size)
+        for off, n in segs:
+            img[off:off + n] = raw[off:off + n]
         self.image = img
         self._parse_mod0()
 

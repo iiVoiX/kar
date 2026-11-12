@@ -1,0 +1,13 @@
+{
+  "_comment": "Kirby Air Riders 1.3.3 ExeFS. Hashes only; no game data.",
+  "title_id": "040077201BE50000",
+  "display_version": "1.3.3",
+  "exefs_sha256": {
+    "main": "dea39f47c05f7efaaeb0f5da8e2ef09c2041fa415ae7cdbbb99b095b2f80d6c2",
+    "main.npdm": "d24822c660b9b47c3fb664841bbead3a9746f49fdc118dc6f208abe688a6aa31",
+    "rtld": "2919c757f0e2ce8ead556b60ffcb4315cc4229b224fb2f26b222ec547d442985",
+    "sdk": "7558f288e89f81954a4d233def5f55768d67d31c00b4cc383ce9189e1f4a0dc3",
+    "subsdk0": "f2ee1f0fe08e05d5f3db3f1dc74051aca9908c7198bc92b6414a888fa82c2b0f",
+    "subsdk1": "aba21a78076103f50c7d2372a6a3e3fc32651dd7bfccd57e07ad7077720c019e"
+  }
+}

@@ -121,6 +121,10 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     vk_exec_frame_log(t, frame);
     vk_mem_census(frame);
     if (vk_dump_armed) vk_dump_present(frame);
+    if (frame % 300 == 0 && getenv("KAR_DLSS_WATCH")) {   // KAR diagnostic: the engine's EnableDLSS flag (nvn_api_dlss.c)
+        extern void kar_dlss_watch(uint64_t frame);
+        kar_dlss_watch(frame);
+    }
     __atomic_store_n(&gfx_counters.validation_errors, (uint64_t)vk_validation_errors_total(), __ATOMIC_RELAXED);
     const VkTexImage *img = vk_texture_get(t);
     if (!img || !(img->aspect & VK_IMAGE_ASPECT_COLOR_BIT)) {

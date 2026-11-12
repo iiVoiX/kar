@@ -28,10 +28,11 @@ def main():
     ap.add_argument('--exefs', type=Path, required=True)
     ap.add_argument('--name', required=True, help='build version name, e.g. dkb100')
     ap.add_argument('--display', required=True, help='display version, e.g. 1.0.0')
+    ap.add_argument('--game', default='Donkey Kong Bananza', help='game name for the comment line')
     args = ap.parse_args()
     files = sorted(p for p in args.exefs.iterdir() if p.is_file() and not p.name.startswith('.'))
     out = {
-        '_comment': f'Donkey Kong Bananza {args.display} ExeFS. Hashes only; no game data.',
+        '_comment': f'{args.game} {args.display} ExeFS. Hashes only; no game data.',
         'title_id': title_id(args.exefs / 'main.npdm'),
         'display_version': args.display,
         'exefs_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in files},

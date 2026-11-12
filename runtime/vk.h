@@ -237,6 +237,7 @@ void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size);
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence);
 void vk_usnap_end(uint64_t fence);
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out);
+int vk_usnap_read(uint64_t addr, void *out, uint64_t n);   // bytes of the submit-time copy, 0 if none
 void vk_usnap_drop(uint64_t addr, uint64_t n);   // the replay makes the GPU write [addr, addr+n) of guest memory
 uint64_t vk_usnap_gen(void);                      // changes whenever a binding may resolve differently
 void vk_usnap_shutdown(void);                     // vk_exec_draw_shutdown: frees the arenas
@@ -297,6 +298,10 @@ VkQueryPool vk_ts_pool(uint32_t pairs, float *period);
 // Deferred destruction: freed once the upload batches recorded so far and the timeline value last noted have completed.
 void vk_defer_image(VkImage img, VmaAllocation alloc);   // alloc NULL: vkDestroyImage only
 void vk_defer_view(VkImageView view);
+// Kirby Air Riders' DLSS stand-in (vk_kar_upscale.c): FSR 1 EASU of src into dst (a storage image) with the linear
+// decode the game's composite expects. 0 when off or not applicable (the caller blits instead).
+int vk_kar_upscale_record(VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32_t sw, uint32_t sh, VkImage dst,
+                          VkFormat dfmt, uint32_t dw, uint32_t dh);
 void vk_exec_image_gone(VkImage image);   // destroy_tex, texture lock held: the replay's views of image go with it
 void vk_defer_buffer(VkBuffer buf, VmaAllocation alloc);
 // ---- ASTC (vk_astc.c). TOTK_ASTC = auto | gpu | native | cpu | check; see vk_astc.c.
@@ -354,6 +359,8 @@ typedef struct {
     uint8_t fb_learned;            // a draw sampled it while it was a written attachment of the open pass: its passes
                                    // attach it in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT (vk_exec.c vk_exec_pass_begin)
 } VkTexImage;
+int vk_texture_reupload_at(uint64_t frame);   // KAR_REUPLOAD_AT diagnostic (vk_texture.c)
+int vk_texture_clear_gpu_at(uint64_t frame);   // KAR_CLEAR_AT diagnostic (vk_texture.c)
 const VkTexImage *vk_texture_get(const tex_t *t);   // created and made current; NULL for BUFFER or unmapped formats
 // A texture slot; a slot whose texture was finalized follows the live texture at the same storage (hle_nvn.c).
 const VkTexImage *vk_texture_by_id(const dpool_ref *pool, int id, view_t *view, int *has_view);
@@ -539,6 +546,8 @@ int vk_pipeline_async_on(void);   // 1 after vk_pipeline_async_enable: graphics 
 // No-op without vk_pipeline_async_enable, with TOTK_PIPE_PREBUILD=0 or with TOTK_GPU=null.
 void vk_pipeline_prewarm(void);
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info);
+// As vk_pipeline_compute, but a pipeline not built yet is queued to background workers: none returned, *pending = 1.
+VkPipeline vk_pipeline_compute_async(const GfxShader *cs, const VkPipeInfo **info, int *pending);
 // Records every dynamic state that VkPipeState determines, after binding a graphics pipeline: cull mode, front face,
 // topology, depth and stencil tests and ops, depth bias enable, rasterizer discard, vertex input, and, where the GPU
 // has them dynamic, depth clamp, polygon mode, blend enables, equations, write masks and alpha to coverage. The replay

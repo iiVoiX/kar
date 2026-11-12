@@ -80,6 +80,9 @@ static void ov_style_set(Cpu *c) {
 
 // int GetNpadStates(<State> *out, int count, const NpadIdType &id): the newest state only. want: the style of the
 // overload, 0 for the Joy-Con overloads (never connected).
+static uint64_t game_buttons;   // the buttons GetNpadStates last reported to the game
+uint64_t input_game_buttons(void) { return __atomic_load_n(&game_buttons, __ATOMIC_RELAXED); }
+
 static void npad_states(Cpu *c, uint32_t want) {
     NpadState *out = arg_p(c, 0);
     int max = (int)arg_x(c, 1);
@@ -94,6 +97,7 @@ static void npad_states(Cpu *c, uint32_t want) {
         s.attributes = ATTR_CONNECTED;
         input_poll(&s.buttons, &s.lx, &s.ly, &s.rx, &s.ry);
     }
+    __atomic_store_n(&game_buttons, s.buttons, __ATOMIC_RELAXED);
     *out = s;
     ret_x(c, 1);
 }
@@ -102,10 +106,38 @@ static void ov_states_handheld(Cpu *c) { npad_states(c, STYLE_HANDHELD); }
 static void ov_states_joycon(Cpu *c) { npad_states(c, 0); }
 
 // void SetNpadJoyHoldType(NpadJoyHoldType type)
+static volatile int32_t hold_type;   // as the game last set it; read back by GetNpadJoyHoldType
+
 static void ov_hold_type(Cpu *c) {
     int64_t t = (int32_t)arg_x(c, 0);
     if (t < 0 || t > 1) rt_fatal("nn::hid::SetNpadJoyHoldType: invalid hold type %lld", (long long)t);
+    plat_xchg32(&hold_type, (int32_t)t);
 }
+
+// ---- Kirby Air Riders' forms (Switch 2 SDK)
+// void GetNpadState(<State> *out, const NpadIdType &id): GetNpadStates with a count of one.
+static void npad_state1(Cpu *c, uint32_t want) {
+    c->x[2] = c->x[1];
+    c->x[1] = 1;
+    npad_states(c, want);
+}
+static void ov_state_full_key(Cpu *c) { npad_state1(c, STYLE_FULL_KEY); }
+static void ov_state_handheld(Cpu *c) { npad_state1(c, STYLE_HANDHELD); }
+// The Joy-Con and GameCube styles are never connected (as the Joy-Con GetNpadStates): the newest state is written as a
+// disconnected NpadState, the leading 40 bytes all of these states share; the GameCube state's trigger fields after it
+// stay as the game left them, never read while the pad reports disconnected.
+static void ov_state_none(Cpu *c) { npad_state1(c, 0); }
+// NpadJoyAssignmentMode GetNpadJoyAssignment(const NpadIdType &): the one controller is a full pad, so Dual (0).
+static void ov_joy_assignment_get(Cpu *c) { ret_x(c, 0); }
+// NpadJoyHoldType GetNpadJoyHoldType()
+static void ov_hold_type_get(Cpu *c) { ret_x(c, (uint64_t)(uint32_t)__atomic_load_n(&hold_type, __ATOMIC_RELAXED)); }
+// bool IsOunceVibrationDeviceMounted(const VibrationDeviceHandle &): the Switch 2 controllers' vibration; none here.
+static void ov_false(Cpu *c) { ret_x(c, 0); }
+// Result SendVibrationGcErmCommand(const VibrationDeviceHandle &, const VibrationGcErmCommand &): a GameCube controller's
+// rumble motor; no GameCube controller is ever connected, so there is nothing to start or stop.
+static void ov_ok(Cpu *c) { ret_x(c, 0); }
+// bool IsSixAxisSensorAtRest(const SixAxisSensorHandle &): the host's motion source has no rest detection; at rest.
+static void ov_true(Cpu *c) { ret_x(c, 1); }
 
 // void DisconnectNpad(const NpadIdType &id): only the controller in use (handheld mode disconnects player 1)
 static void ov_disconnect(Cpu *c) {
@@ -510,10 +542,31 @@ static void ov_touch_state1(Cpu *c) {
     memcpy(out, &n, 8);
 }
 
+// void GetTouchScreenState<16>(TouchScreenState<16> *out), Kirby Air Riders' form: the same header as <1>
+// (int64 sampling number, int32 count, int32 reserved) and sixteen 0x28-byte TouchStates; count 0, no touches
+static void ov_touch_state16(Cpu *c) {
+    static volatile int64_t sampling;
+    uint8_t *out = arg_p(c, 0);
+    if (!out) rt_fatal("nn::hid::GetTouchScreenState<16>: null output");
+    memset(out, 0, 0x10 + 16 * 0x28);
+    int64_t n = __atomic_add_fetch(&sampling, 1, __ATOMIC_RELAXED);
+    memcpy(out, &n, 8);
+}
+
 // void SetNpadJoyAssignmentModeDual(const NpadIdType &), SetNpadJoyAssignmentModeSingle(const NpadIdType &,
 // NpadJoyDeviceType), Result MergeSingleJoyAsDualJoy(const NpadIdType &, const NpadIdType &): the host's one pad is
 // always a full controller, so the assignment mode changes nothing
 static void ov_joy_assignment(Cpu *c) { ret_x(c, 0); }
+
+// uint8_t GetPlayerLedPattern(const NpadIdType &id): the player-number lamp pattern of pad id (Kirby Air Riders asks
+// at character select; the SDK opens the hid service for it). The Switch's patterns for players 1 to 8, in bits 0-3;
+// handheld and other ids light lamp 1.
+static void ov_player_led(Cpu *c) {
+    static const uint8_t pat[8] = {0x1, 0x3, 0x7, 0xf, 0x9, 0x5, 0xd, 0x6};
+    const uint32_t *id = arg_p(c, 0);
+    uint32_t i = id ? *id : 0;
+    ret_x(c, i < 8 ? pat[i] : 0x1);
+}
 
 HOST_OVERRIDE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", ov_six_start);
 HOST_OVERRIDE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE",
@@ -522,8 +575,11 @@ HOST_OVERRIDE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS
 HOST_OVERRIDE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", ov_vib_init);
 HOST_OVERRIDE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", ov_vib_info);
 HOST_OVERRIDE("_ZN2nn3hid21InitializeTouchScreenEv", ov_touch_init);
+HOST_OVERRIDE("_ZN2nn3hid21InitializeTouchScreenEii", ov_touch_init);   // Switch 2 form (Kirby Air Riders)
+HOST_OVERRIDE("_ZN2nn3hid19GetTouchScreenStateILm16EEEvPNS0_16TouchScreenStateIXT_EEE", ov_touch_state16);
 HOST_OVERRIDE("_ZN2nn3hid19GetTouchScreenStateILm1EEEvPNS0_16TouchScreenStateIXT_EEE", ov_touch_state1);
 HOST_OVERRIDE("_ZN2nn3hid28SetNpadJoyAssignmentModeDualERKj", ov_joy_assignment);
+HOST_OVERRIDE("_ZN2nn3hid19GetPlayerLedPatternERKj", ov_player_led);
 HOST_OVERRIDE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKjNS0_17NpadJoyDeviceTypeE", ov_joy_assignment);
 HOST_OVERRIDE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", ov_joy_assignment);
 
@@ -570,3 +626,19 @@ HOST_OVERRIDE("_ZN2nn3hid6detail22GetSixAxisSensorStatesEPiPNS0_18SixAxisSensorS
               ov_six_states);
 HOST_OVERRIDE("_ZN2nn3hid6detail21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE",
               ov_six_state);
+
+// Kirby Air Riders' forms (see "Kirby Air Riders' forms" above)
+HOST_OVERRIDE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", ov_state_full_key);
+HOST_OVERRIDE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", ov_state_handheld);
+HOST_OVERRIDE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", ov_state_none);
+HOST_OVERRIDE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", ov_state_none);
+HOST_OVERRIDE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", ov_state_none);
+HOST_OVERRIDE("_ZN2nn3hid12GetNpadStateEPNS0_11NpadGcStateERKj", ov_state_none);
+HOST_OVERRIDE("_ZN2nn3hid13GetNpadStatesEPNS0_11NpadGcStateEiRKj", ov_states_joycon);
+HOST_OVERRIDE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", ov_joy_assignment_get);
+HOST_OVERRIDE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", ov_joy_assignment);
+HOST_OVERRIDE("_ZN2nn3hid18GetNpadJoyHoldTypeEv", ov_hold_type_get);
+HOST_OVERRIDE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", ov_false);
+HOST_OVERRIDE("_ZN2nn3hid25SendVibrationGcErmCommandERKNS0_21VibrationDeviceHandleERKNS0_21VibrationGcErmCommandE", ov_ok);
+HOST_OVERRIDE("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", ov_true);
+HOST_OVERRIDE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", ov_six_stop);

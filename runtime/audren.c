@@ -462,9 +462,13 @@ static void renderer_close(void *p) {
 
 // ---- aud:u, nn::audio::IUserClientSession (Switch 2): the SDK reaches the audio managers through it
 // (nn::audio::CreateUserClientSessionByHipc) instead of opening audren:u itself. Switchbrew, "Audio services": command
-// 2 returns an IAudioRendererManager. 0 (IAudioInManager), 1 (IAudioOutManager), 3 and 4 are not served yet.
+// 2 returns an IAudioRendererManager, 1 an IAudioOutManager (audout.c). 0 (IAudioInManager), 3 and 4 are not served yet.
+void audout_manager_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs);   // audout.c
 void aud_user_handler(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     switch (rq->cmd) {
+    case 1:
+        rs->move[rs->nmove++] = ipc_session_new("IAudioOutManager", audout_manager_handler, NULL, NULL);
+        return;
     case 2:
         rs->move[rs->nmove++] = ipc_session_new("audren:u", audren_manager_handler, NULL, NULL);
         return;

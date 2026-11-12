@@ -81,6 +81,7 @@ void plat_fiber_free(PlatFiber *f);       // a fiber nobody runs
 enum { PLAT_PRIO_IDLE = -15, PLAT_PRIO_LOWEST = -2, PLAT_PRIO_BELOW_NORMAL = -1, PLAT_PRIO_NORMAL = 0,
        PLAT_PRIO_ABOVE_NORMAL = 1, PLAT_PRIO_HIGHEST = 2, PLAT_PRIO_TIME_CRITICAL = 15 };
 void plat_thread_priority(int prio);
+void plat_diag_watch_write(uint64_t lo, uint64_t len);   // win32.c: KAR_WATCH_WRITE diagnostic (logs writers)
 void plat_thread_set_priority(PlatThread *t, int prio);
 int plat_thread_priority_get(void);       // the calling thread's level
 void plat_yield(void);                    // gives the rest of the time slice to another ready thread
@@ -403,6 +404,9 @@ void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb);
 // This process's memory in bytes: resident (the working set) and private (Windows: committed private bytes; Linux: the
 // resident anonymous pages). 0 when unknown.
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);
+void plat_text_draw(uint8_t *rgba, int w, int h, int x, int y, int px, uint32_t rgb, const char *utf8, int center);   // native text (boot screen)
+void plat_thread_cpu_report(void (*log)(const char *line));   // diagnostic: busiest threads since the last call
+void plat_mem_map_report(uint64_t guest_limit, void (*log)(const char *line));   // diagnostic: committed memory by kind
 
 // ---- child processes: a program with stdin and stdout piped to us (stderr discarded), no console window.
 typedef struct PlatChild PlatChild;

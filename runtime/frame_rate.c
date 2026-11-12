@@ -102,6 +102,22 @@ void frame_step_init(void) {
 
 int frame_step_realtime(void) { return step_word != NULL; }
 
+// Kirby Air Riders steps its game by the measured time already (16.11: the race timer kept wall time at 30 and at
+// 144 presents per second), so it needs no real-time patch: the host presents at the limit and ticks the vsync event
+// the game waits on each frame at the same rate (gfx_present.c vsync_main). The other games keep their own timing.
+int frame_rate_self_timed(void) {
+    static int on = -1;
+    if (on < 0) on = rt_game_is_kar();
+    return on;
+}
+
+// The vsync event's rate: 60, or for a self-timed game the limit when it is above 60.
+double frame_rate_vsync_hz(void) {
+    if (!frame_rate_self_timed()) return 60;
+    double hz = 1e9 / (double)frame_step_cap_ns();
+    return hz > 60 ? hz : 60;
+}
+
 // The frame limit (menu, TOTK_FPS_LIMIT, live): 30, 60, 90, 120, 144, any whole rate from 30 to 360, or display (the
 // refresh rate of the window's monitor). Unset, the older TOTK_FPS60=0 still means 30. A limit of 30 switches the set
 // fps60 off (the shipping minimum interval 2), every other limit switches it on; the controller reads its minimum
@@ -136,7 +152,7 @@ static void frame_limit_live(void) {
     limit_hz = hz;
     if (fps60_set == -2) fps60_set = rt_patch_set("fps60");
     if (fps60_set >= 0) rt_patch_switch(fps60_set, hz != 30);
-    if ((hz > 60 || hz == 0) && !step_word)
+    if ((hz > 60 || hz == 0) && !step_word && !frame_rate_self_timed())
         rt_log("frame rate: limits above 60 need the real-time step (TOTK_REALTIME=1); 60 fps");
     else if (hz && hz < 60 && !step_word && !rt_game_version)
         // Bananza's own controller picks the present interval and the pacer follows it, so a lower limit is not held
@@ -162,7 +178,7 @@ double frame_step_limit_hz(void) {
     if (hz < 0) return 0;
     double r = hz ? hz : gfx_window_refresh_hz();
     if (r < LIMIT_MIN_HZ) r = 60;
-    return !step_word && r > 60 ? 60 : r > LIMIT_MAX_HZ ? LIMIT_MAX_HZ : r;
+    return !step_word && !frame_rate_self_timed() && r > 60 ? 60 : r > LIMIT_MAX_HZ ? LIMIT_MAX_HZ : r;
 }
 
 // ---- TOTK_TRACE=perf speed lines
@@ -284,6 +300,9 @@ void frame_step_present(uint64_t display_ns, int interval) {
     // The game clock of untimed script lines: what the game stepped this frame, the patch page's step with the
     // real-time step (kept through a reset), whole vsyncs without it.
     double game = step_word ? step_now : (interval > 0 ? interval : 1) / 60.0;
+    // A self-timed game (Kirby) steps by the time a frame took: above 60 fps that is less than a tick, so the script
+    // follows wall time; at 60 or below it stays one tick a frame, as before (scripts written at 60 keep working).
+    if (!step_word && frame_rate_self_timed() && dt > 0 && dt < game) game = dt;
     atomic_store_explicit(&game_us, atomic_load_explicit(&game_us, memory_order_relaxed) + (uint64_t)(game * 1e6 + 0.5),
                           memory_order_relaxed);
     world_clock(dt, step);

@@ -1269,6 +1269,112 @@ static void crit_frame(RtThread *self, uint64_t frame) {
            (unsigned long long)g_crit_hi, g_crit_n >= CRIT_N ? " (buffer full: the last frames are incomplete)" : "");
 }
 
+// KAR_HANG_DUMP=<seconds>: once, that long after the guest main thread starts, log every guest thread: handle,
+// priority, core held, start/exit flags, what it waits on (wkind, wobj, wtag), its latest SVC and its guest pc and lr.
+// For a game that runs without presenting (Kirby Air Riders' first loop): which thread is blocked on what. The other
+// threads are read without stopping them, so a running thread's pc may be a moment old.
+static void hang_dump(void) {
+    char pc[128], lr[128];
+    lock();
+    rt_log("hang dump: guest threads (wkind 0 = not waiting)");
+    for (RtThread *t = g_all; t; t = t->all) {
+        const Cpu *cu = t->cur ? t->cur : t->cpu;
+        rt_log("  thread %#x prio %d core %d%s%s%s: wkind %d wobj %#llx wtag %#x svc %#x, pc %s, lr %s", t->handle,
+               t->prio, t->cur_core, t->is_main ? " main" : "", t->started ? "" : " not-started",
+               t->exited ? " exited" : "", t->wkind, (unsigned long long)t->wobj, t->wtag, t->dg_svc,
+               cu ? ldr_describe(cu->pc, pc, sizeof pc) : "-", cu ? ldr_describe(cu->x[30], lr, sizeof lr) : "-");
+        // The guest frame chain: x29 -> {saved x29, saved x30}, read without faulting (plat_mem_read)
+        uint64_t fp = cu ? cu->x[29] : 0;
+        for (int k = 0; k < 14 && fp && !(fp & 7); k++) {
+            uint64_t fr[2];
+            if (!plat_mem_read(fp, fr, sizeof fr) || !fr[1]) break;
+            rt_log("      frame %2d: %s", k, ldr_describe(fr[1] - 4, pc, sizeof pc));
+            if (fr[0] <= fp) break;   // frames grow upwards; anything else is not a chain
+            fp = fr[0];
+        }
+    }
+    unlock();
+}
+
+// Every 10 ms for 2 s, the (function entered, return address) pair of each running guest thread: the busiest pairs
+// show what a stuck loop keeps calling and from where (a thread's pc is the function it entered last).
+#define HANG_SAMPLES 200
+#define HANG_PAIRS 64
+static void hang_sample(void) {
+    struct { uint32_t h; uint64_t pc, lr; uint32_t n; } pairs[HANG_PAIRS];
+    int np = 0;
+    for (int s = 0; s < HANG_SAMPLES; s++) {
+        lock();
+        for (RtThread *t = g_all; t; t = t->all) {
+            if (t->cur_core < 0 || t->exited) continue;   // only threads holding a core
+            const Cpu *cu = t->cur ? t->cur : t->cpu;
+            if (!cu) continue;
+            uint64_t pc = cu->pc, lr = cu->x[30];
+            int k = 0;
+            while (k < np && !(pairs[k].h == t->handle && pairs[k].pc == pc && pairs[k].lr == lr)) k++;
+            if (k == np && np < HANG_PAIRS) pairs[np++] = (typeof(pairs[0])){t->handle, pc, lr, 0};
+            if (k < np) pairs[k].n++;
+        }
+        unlock();
+        plat_sleep_ms(10);
+    }
+    for (int a = 0; a < np; a++)   // busiest first
+        for (int b = a + 1; b < np; b++)
+            if (pairs[b].n > pairs[a].n) {
+                typeof(pairs[0]) tmp = pairs[a];
+                pairs[a] = pairs[b];
+                pairs[b] = tmp;
+            }
+    char pc[128], lr[128];
+    rt_log("hang dump: %d samples of the running threads, busiest (function entered, return address) first", HANG_SAMPLES);
+    for (int k = 0; k < np && k < 24; k++)
+        rt_log("  %3u  thread %#x  pc %s  lr %s", pairs[k].n, pairs[k].h, ldr_describe(pairs[k].pc, pc, sizeof pc),
+               ldr_describe(pairs[k].lr, lr, sizeof lr));
+    // KAR_HANG_PEEK=<n>+<hex offset>: for each running thread, x<n> and the 8 bytes at x<n> + offset, plus x19-x28.
+    // For a lock a loop spins on (Kirby Air Riders: the job scheduler's switch lock, 22+20): the owner it names.
+    const char *peek = cfg_get("KAR_HANG_PEEK");
+    int preg = -1;
+    unsigned long long poff = 0;
+    if (peek && *peek && sscanf(peek, "%d+%llx", &preg, &poff) == 2 && preg >= 0 && preg < 31) {
+        lock();
+        for (RtThread *t = g_all; t; t = t->all) {
+            if (t->cur_core < 0 || t->exited) continue;
+            const Cpu *cu = t->cur ? t->cur : t->cpu;
+            if (!cu) continue;
+            uint64_t base = cu->x[preg], v = 0;
+            int ok = plat_mem_read(base + poff, &v, sizeof v);
+            rt_log("  thread %#x: x%d %#llx, [x%d+%#llx] %s%#llx; x19-x28 %llx %llx %llx %llx %llx %llx %llx %llx %llx %llx",
+                   t->handle, preg, (unsigned long long)base, preg, poff, ok ? "" : "unreadable ", (unsigned long long)v,
+                   (unsigned long long)cu->x[19], (unsigned long long)cu->x[20], (unsigned long long)cu->x[21],
+                   (unsigned long long)cu->x[22], (unsigned long long)cu->x[23], (unsigned long long)cu->x[24],
+                   (unsigned long long)cu->x[25], (unsigned long long)cu->x[26], (unsigned long long)cu->x[27],
+                   (unsigned long long)cu->x[28]);
+        }
+        unlock();
+    }
+}
+
+// The thread dump, then the host-call counts twice 5 s apart: what the counts gain in between is what the stuck loop
+// keeps calling.
+static void hang_watch(void *arg) {
+    plat_sleep_ms((uint32_t)(uintptr_t)arg * 1000u);
+    hang_dump();
+    hang_sample();
+    rt_log("hang dump: host calls now");
+    hostfn_report();
+    plat_sleep_ms(5000);
+    rt_log("hang dump: host calls 5 s later");
+    hostfn_report();
+}
+
+static void hang_watch_start(void) {
+    const char *s = cfg_get("KAR_HANG_DUMP");
+    int secs = s && *s ? atoi(s) : 0;
+    if (secs <= 0) return;
+    if (!plat_thread_spawn(hang_watch, (void *)(uintptr_t)secs, "hang-dump", 0)) rt_log("hang dump: no watcher thread");
+    else rt_log("hang dump: guest threads logged %d s from now (KAR_HANG_DUMP)", secs);
+}
+
 void kern_sched_report(uint64_t frame) {
     static uint64_t last;
     typedef struct {
@@ -1576,6 +1682,7 @@ uint32_t kern_main_thread(Cpu **cpu) {
     g_main_stack = stack;
     core_take(t);
     unlock();
+    hang_watch_start();
     tcur = t;
     *cpu = t->cpu;
     return t->handle;
@@ -1697,7 +1804,12 @@ int kern_svc(Cpu *c, uint32_t imm) {
     switch (imm) {
     case 0x08: {   // CreateThread(-> w1 handle; x1 entry, x2 arg, x3 stack top, w4 priority, w5 core)
         int prio = (int)x[4], core = (int)x[5];
-        if (!x[1] || !x[3] || prio < 28 || prio > 59 || core < -3 || core > 2) {
+        // Cores 0..NCORE-1: Switch 2 applications get cores 0-5 (Kirby Air Riders' main.npdm ThreadInfo: priorities
+        // 28-59, cores 0-5; it creates threads on cores above 2, which TotK's limit of 2 rejected).
+        if (!x[1] || !x[3] || prio < 28 || prio > 59 || core < -3 || core > NCORE - 1) {
+            char d[128];
+            rt_log("CreateThread rejected: entry %s stack %#llx prio %d core %d", ldr_describe(x[1], d, sizeof d),
+                   (unsigned long long)x[3], prio, core);
             x[0] = R_BAD_STATE;
             return 1;
         }

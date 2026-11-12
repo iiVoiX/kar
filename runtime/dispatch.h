@@ -23,6 +23,10 @@ typedef struct RtModule {
 typedef struct RtLayoutEntry { const char *name; uint64_t base, size; } RtLayoutEntry;
 extern const RtLayoutEntry rt_layout[];
 extern const int rt_layout_count;
+// NROs lifted ahead of time (recomp/gen.py --nro): in the dispatch table from the start, mapped when the game calls
+// nn::ro::LoadModule (ldr_map_nro). tools/build_game.py writes both, count 0 without NROs.
+extern const RtLayoutEntry rt_nro_layout[];
+extern const int rt_nro_layout_count;
 int rt_linked_modules(RtModule *out, int max);
 
 // Register a host function at a guest address outside every module (HLE entry points). Allowed only before

@@ -46,6 +46,8 @@ static struct {
     int on;                     // this submission has a snapshot
     uint64_t fence, gen;
     Arena *arena;
+    uint8_t *shadow;            // the snapshot in system memory, same offsets as the arena (vk_usnap_read)
+    uint64_t shadow_cap;
     Rng *col;                   // collected ranges
     int ncol, ccol;
     Reg *reg;                   // merged, sorted by lo, disjoint
@@ -117,7 +119,14 @@ static void collect(const op_hdr *h, int depth) {
             continue;
         }
         if (h->op == OP_CALL && depth < CALL_DEPTH) collect(nvn_op_first(((const p_jump *)a)->target), depth + 1);
-        if (h->op == OP_BIND_UBO) {
+        // KAR_SSBO_SNAPSHOT=1 (diagnostic, off by default; no effect on the dark Kirby in the race): vertex and fragment storage buffers too. Kirby Air Riders writes its
+        // per-object local light records (vertex slot 6) into one buffer per frame and starts on the next frame's
+        // records right after the submit; read live, late draws saw another object's record or zeros (dark Kirby).
+        static int ssbo_snap = -1;
+        if (ssbo_snap < 0) ssbo_snap = getenv("KAR_SSBO_SNAPSHOT") && *getenv("KAR_SSBO_SNAPSHOT") == '1';
+        if (h->op == OP_BIND_UBO ||
+            (h->op == OP_BIND_SSBO && ssbo_snap && (((const p_bind_buf *)a)->stage == 0 ||
+                                                    ((const p_bind_buf *)a)->stage == 1))) {   // stages as vk_exec_draw.c: 0 vertex, 1 fragment
             const p_bind_buf *b = a;
             if (b->addr && b->size) {
                 if (U.ncol == U.ccol) U.col = grow(U.col, &U.ccol, sizeof *U.col);
@@ -253,8 +262,18 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
     }
     if (!U.nreg) return;
     if (!(U.arena = arena_get(total))) return;
-    for (int i = 0; i < U.nreg; i++)
+    // The same bytes in system memory for vk_usnap_read: the arena is host-visible device memory, uncached for CPU
+    // reads, and the replay reads material array handles from it word by word (61% of the render thread with
+    // 256-element arrays, vk_usnap_read < ubo_word < bind_resources).
+    if (total > U.shadow_cap) {
+        free(U.shadow);
+        U.shadow_cap = total * 2;
+        if (!(U.shadow = malloc(U.shadow_cap))) rt_fatal("vk_usnap: out of memory for the read copy");
+    }
+    for (int i = 0; i < U.nreg; i++) {
         memcpy(U.arena->map + U.reg[i].off, (const void *)(uintptr_t)U.reg[i].lo, U.reg[i].hi - U.reg[i].lo);
+        memcpy(U.shadow + U.reg[i].off, (const void *)(uintptr_t)U.reg[i].lo, U.reg[i].hi - U.reg[i].lo);
+    }
     vmaFlushAllocation(vk_ctx()->vma, U.arena->alloc, 0, total);   // a no-op on coherent memory
     U.on = 1;
     U.subs++, U.regions += (uint64_t)U.nreg, U.bytes += total, U.copy_ns += kern_now_ns() - t0;
@@ -286,6 +305,19 @@ int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferI
     if (off % align) return 0;
     *out = (VkDescriptorBufferInfo){U.arena->buf, off, n};
     U.hits++;
+    return 1;
+}
+
+// The bytes the shaders of this submission see at [addr, addr+n) (the copy taken at the submit call), for CPU-side
+// readers that must agree with them: texture handles the replay reads out of a material uniform buffer
+// (vk_exec_draw.c ubo_word). 0 when no live copy covers the range.
+int vk_usnap_read(uint64_t addr, void *out, uint64_t n) {
+    if (!U.on || !n || !U.arena) return 0;
+    int i = first_above(addr);
+    if (i >= U.nreg) return 0;
+    const Reg *r = &U.reg[i];
+    if (r->dropped || addr < r->lo || addr + n > r->hi) return 0;
+    memcpy(out, U.shadow + r->off + (addr - r->lo), n);
     return 1;
 }
 

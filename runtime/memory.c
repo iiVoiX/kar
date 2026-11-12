@@ -197,10 +197,14 @@ static int thaw_fault(uint64_t a) {
 }
 
 // Mapping changes thaw the regions they touch and run under frz_lock, so no freeze sees them half done.
+static volatile int64_t guest_committed;   // bytes of guest memory committed (vk_memory.c census, 16.9 memory budget)
+int64_t mem_guest_committed(void) { return guest_committed; }
+
 static void commit(uint64_t a, uint64_t n, const char *what) {
     plat_mutex_lock(&frz_lock);
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_commit(a, n);
+    if (ok) plat_add64(&guest_committed, (int64_t)n);   // a re-commit of committed pages counts again: an upper bound
     plat_mutex_unlock(&frz_lock);
     if (!ok) rt_fatal("memory: commit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
@@ -209,6 +213,7 @@ static void decommit(uint64_t a, uint64_t n, const char *what) {
     plat_mutex_lock(&frz_lock);
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_decommit(a, n);
+    if (ok) plat_add64(&guest_committed, -(int64_t)n);
     plat_mutex_unlock(&frz_lock);
     if (!ok) rt_fatal("memory: decommit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
@@ -241,6 +246,9 @@ void mem_init(void) {
     // Fixed window: modules, kernel region, host-function addresses.
     mods_lo = MOD_MAIN_BASE;
     mods_hi = align_up(rt_layout[rt_layout_count - 1].base + rt_layout[rt_layout_count - 1].size, 0x10000);
+    for (int i = 0; i < rt_nro_layout_count; i++)   // NROs sit above the ExeFS modules; mapped at nn::ro::LoadModule
+        if (align_up(rt_nro_layout[i].base + rt_nro_layout[i].size, 0x10000) > mods_hi)
+            mods_hi = align_up(rt_nro_layout[i].base + rt_nro_layout[i].size, 0x10000);
     if (mods_hi > RT_KERNEL_BASE) rt_fatal("memory: modules end at %#llx, inside the kernel region",
                                            (unsigned long long)mods_hi);
     if (!reserve_at(mods_lo, mods_hi - mods_lo, 0)) reexec_or_fail("the module window");

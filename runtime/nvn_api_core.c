@@ -203,9 +203,20 @@ NVN_API(nvnDeviceFinalize) { ((dev_t_ *)arg_p(c, 0))->magic = 0; }
 NVN_API(nvnDeviceGetInteger) {
     unsigned w = (unsigned)arg_x(c, 1);
     int *out = arg_p(c, 2);
-    if (w >= sizeof devinfo / sizeof *devinfo) rt_fatal("nvn: unsupported NVN device property %#x", w);
+    if (w >= sizeof devinfo / sizeof *devinfo) {
+        // NVN 2 properties past the NVN 1 table. 0x95 is what Kirby Air Riders' DLSS setup asks first (with
+        // KAR_FORCE_DLSS): answered 1, DLSS available, which the host provides as a plain upscale (nvn_api_dlss.c).
+        // Any other answers 0 and is logged once per property.
+        static uint8_t told[256];
+        int v = w == 0x95 ? 1 : 0;
+        if (w < 256 && !told[w]++) rt_log("nvn: NVN 2 device property %#x answered %d", w, v);
+        *out = v;
+        return;
+    }
     // Update 458752's graphics initializer (main+0x5c61ac) rejects the base ABI before creating its device singleton.
-    *out = w == NVN_DEVICE_INFO_API_MINOR_VERSION && !strcmp(rt_game_target, "dkb458752") ? 30 : devinfo[w];
+    // Kirby Air Riders (kar*) is built against a newer NVN 2 SDK than base Bananza; its DLSS path never starts with 16.
+    int newer = !strcmp(rt_game_target, "dkb458752") || rt_game_is_kar();
+    *out = w == NVN_DEVICE_INFO_API_MINOR_VERSION && newer ? 30 : devinfo[w];
     NVN_LOG("DeviceGetInteger %#x -> %d", w, *out);
 }
 // NVNboolean nvnDeviceRegisterFastClearColor{,i,ui}(NVNdevice *d, const T *color, NVNformat format), ...Depth(d, float):
@@ -473,6 +484,11 @@ NVN_API(nvnQueueFenceSync) {
     s->fenced = 1;
     s->fence = nvn_fence_last();
 }
+// void nvnQueueWaitSync(NVNqueue *q, const NVNsync *s): later commands of q wait for s on the GPU. Every queue here
+// replays onto one back-end timeline in submission order (nvn_fence_last is global), so a sync fenced by an earlier
+// submission has completed before anything q submits next runs; a sync never fenced has nothing to wait for. Kirby Air
+// Riders orders its queues this way at boot.
+NVN_API(nvnQueueWaitSync) { (void)c; }
 // NVNsyncWaitResult nvnSyncWait(const NVNsync *s, uint64_t timeout_ns): a sync never fenced reports a timeout at once;
 // a fenced one is released only after the back end completed that fence value
 NVN_API(nvnSyncWait) {
