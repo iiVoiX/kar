@@ -1841,6 +1841,13 @@ int vk_mem_wb_kind;            // KAR_MIRROR_LOOP: the caller's kind (storage, u
 static uint64_t wb_kind_bytes[6];
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     PoolRec *r = sp->pool;
+    if (r && r->mstate == MS_ON && sp->buffer != r->mbuf && size && getenv("KAR_WB_BYPASS_LOG")) {
+        static int told;   // a GPU write into a mirrored pool's guest memory, past the mirror (16.7 diagnostic)
+        if (told++ < 20)
+            rt_log("mem: GPU write past the mirror: pool %#llx offset %#llx size %#llx kind %d shadow %d",
+                   (unsigned long long)r->import_lo, (unsigned long long)sp->offset, (unsigned long long)size,
+                   vk_mem_wb_kind, r->wsready);
+    }
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
     if (mloop_on > 0 && vk_mem_wb_kind >= 0 && vk_mem_wb_kind < 6) wb_kind_bytes[vk_mem_wb_kind] += size;
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
@@ -2073,7 +2080,7 @@ static struct {
 
 static int wb_shadow_on(void) {
     static int on = -1;
-    if (on < 0) on = getenv("KAR_WB_SHADOW") && *getenv("KAR_WB_SHADOW") == '1';
+    if (on < 0) on = !(getenv("KAR_WB_SHADOW") && *getenv("KAR_WB_SHADOW") == '0');   // on unless KAR_WB_SHADOW=0
     if (!on || WS.tried) return on && WS.ok;
     WS.tried = 1;
     VkCtx *c = vk_ctx();

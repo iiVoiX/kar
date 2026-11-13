@@ -1371,7 +1371,7 @@ static int bindless_patch(GfxShader *s) {
            CAP_SAMPLED_NU = 5307, SC_UNIFORM_CONSTANT = 0, SC_UNIFORM = 2, SEQ = 13, OP_MEMBER_DECOR = 72, DEC_BLOCK = 2,
            DEC_ARRAY_STRIDE = 6, DEC_OFFSET = 35 };
     static int on = -1;
-    if (on < 0) on = getenv("KAR_BINDLESS") && *getenv("KAR_BINDLESS") == '1';
+    if (on < 0) on = !(getenv("KAR_BINDLESS") && *getenv("KAR_BINDLESS") == '0');   // on unless KAR_BINDLESS=0
     if (!on) return 0;
     int want = 0;
     for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {

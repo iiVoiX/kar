@@ -88,7 +88,7 @@ int vk_bindless_active(void) {
     if (!c) return 0;
     const char *e = getenv("KAR_BINDLESS");
     BL.state = -1;
-    if (!rt_game_is_kar() || !e || *e != '1' || !supported(c)) return 0;
+    if (!rt_game_is_kar() || (e && *e == '0') || !supported(c)) return 0;   // on unless KAR_BINDLESS=0
     plat_mutex_init(&BL.mu);
     if (!create(c)) {
         rt_log("vk bindless: off, creating the set failed");
