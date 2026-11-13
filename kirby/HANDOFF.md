@@ -736,3 +736,8 @@ same fps. Plan: default prebuild off for kar* (or keep fewer), then lazy heap co
 - Frame generation B1 (2026-11-13): `KAR_FG=1` → runtime/vk_fg.cpp (FFX optical flow + frame interpolation, motion
   vectors 0, depth far), interpolated picture presented halfway between real ones (vk_backend.c present_main).
   build_game.py links build/ffx-src/bin/ffx_sdk libs when present. Built; NOT yet run in the game.
+- FG B1 runs (2026-11-13): FFX needed 16-byte aligned scratch arrays (build_ffx.py patches), KHR proc fallback, fp16
+  off. Works: fresh_race limit 60, real fps unchanged vs no FG; own pacing (real picture iv/2 after interpolated).
+  Test with: build/profile-kar-fresh (delete save/, save-backup/, cache/), kirby/scripts/fresh_race.txt,
+  TOTK_FPS_LIMIT=60, race from ~3600. toRace.txt no longer reaches a race. Ultrawide figure/machine select broken
+  (user picture): 3D figures clipped in their frames.

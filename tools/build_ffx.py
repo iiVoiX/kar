@@ -13,6 +13,7 @@ Changes:
   - ffx_message.cpp: <wchar.h> and plain swprintf.
   - FrameInterpolationSwapchainVK.cpp: a function-pointer reinterpret_cast, and named SubmissionSemaphores where a
     temporary was bound to a non-const reference (an MSVC extension).
+  - ffx_vk.cpp: the arrays in the scratch memory start 16-byte aligned (Clang uses aligned SSE stores there).
   - Compiler flags: MINGW_HAS_SECURE_API, forced includes of wchar.h, stdio.h, cmath and new (MSVC pulls them in).
 
 Usage: .venv/Scripts/python tools/build_ffx.py
@@ -70,6 +71,25 @@ def main():
     if n != 2:
         raise SystemExit(f'{fi}: expected 2 temporary SubmissionSemaphores, found {n}')
     p.write_text('\n'.join(lines), encoding='utf-8', errors='surrogateescape')
+    # The back end carves its arrays out of the caller's scratch memory, each start aligned to 4 bytes only. Clang
+    # stores to them with 16-byte aligned SSE moves (structures with 16-byte members), which fault on such an address;
+    # MSVC's code happens not to. Every array start becomes 16-byte aligned.
+    vk = COPY / 'src/backends/vk/ffx_vk.cpp'
+    s = vk.read_text(encoding='utf-8', errors='surrogateescape')
+    s, k = re.subn(r'(FFX_ALIGN_UP\(.*), sizeof\(uint32_t\)\);', r'\1, 16);', s)
+    if k != 12:
+        raise SystemExit(f'ffx_vk.cpp: expected 12 array sizes aligned to 4 bytes, found {k}')
+    # The arrays follow the back end's own structure, whose size need not be a multiple of 16: they start at the
+    # next 16-byte boundary after it (16 bytes more scratch memory for that).
+    old = 'uint8_t* pMem = (uint8_t*)((BackendContext_VK*)(backendContext + 1));'
+    if s.count(old) != 1:
+        raise SystemExit('ffx_vk.cpp: start of the scratch arrays not found')
+    s = s.replace(old, 'uint8_t* pMem = (uint8_t*)FFX_ALIGN_UP((uintptr_t)(backendContext + 1), 16);')
+    old = 'return FFX_ALIGN_UP(sizeof(BackendContext_VK) + extensionPropArraySize'
+    if s.count(old) != 1:
+        raise SystemExit('ffx_vk.cpp: scratch memory size not found')
+    s = s.replace(old, 'return FFX_ALIGN_UP(sizeof(BackendContext_VK) + 16 + extensionPropArraySize')
+    vk.write_text(s, encoding='utf-8', errors='surrogateescape')
 
     env = dict(os.environ)
     env['PATH'] = str(UCRT) + os.pathsep + env.get('PATH', '')

@@ -76,7 +76,8 @@ static int present_hold(void) {
 
 static void present_main(void *arg) {
     (void)arg;
-    uint64_t last = 0, last_queued = 0, last_at = 0;   // last_at: the previous display time (frame generation)
+    uint64_t last = 0, last_queued = 0;
+    uint64_t fg_prev = 0, fg_iv = 0;   // frame generation: when the previous picture arrived, mean interval (ns)
     plat_mutex_lock(&pl);
     for (;;) {
         while (!pending) plat_cond_wait(&pcv, &pl);
@@ -89,19 +90,22 @@ static void present_main(void *arg) {
         static int plog = -1, pn;   // KAR_DEAD_LOG=1: the images the present thread blits, first ones
         if (plog < 0) plog = getenv("KAR_DEAD_LOG") != NULL;
         if (plog && pn++ < 40) rt_log("present: blit of image %#llx (frame %llu)", (unsigned long long)(uintptr_t)j.image, (unsigned long long)j.frame);
-        // Frame generation (vk_fg.cpp): the interpolated picture first, shown halfway between the previous real
-        // picture's display time and this one's, then the real picture as usual
+        // Frame generation (vk_fg.cpp): the interpolated picture goes out as soon as this picture arrived, the real
+        // one half the mean interval between the game's pictures later (fg_due), so the two alternate evenly. The game
+        // gives no display time here (j.at is 0 without back-edge pacing), hence the own interval estimate.
+        uint64_t fg_due = 0;
         if (vk_fg_on()) {
+            uint64_t now = kern_now_ns();
+            if (fg_prev && now - fg_prev < 100000000ull) fg_iv = fg_iv ? (fg_iv * 7 + (now - fg_prev)) / 8 : now - fg_prev;
+            fg_prev = now;
             VkFormat ff = VK_FORMAT_UNDEFINED;
             VkImage mid = vk_fg_interpolate(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, &ff);
             if (mid) {
                 vk_present_blit(mid, VK_IMAGE_LAYOUT_GENERAL, ff, j.has_crop ? j.crop[2] : j.w,
                                 j.has_crop ? j.crop[3] : j.h, NULL);
-                if (present_hold() && last_at && j.at > last_at && j.at - last_at < 100000000ull)
-                    wait_until(j.at - (j.at - last_at) / 2);
                 vk_present_flip();
+                if (fg_iv) fg_due = kern_now_ns() + fg_iv / 2;
             }
-            last_at = j.at;
         }
         uint64_t q0 = kern_now_ns();
         vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
@@ -117,6 +121,7 @@ static void present_main(void *arg) {
         plat_mutex_unlock(&pl);
         uint64_t t0 = kern_now_ns();
         if (present_hold()) wait_until(j.at);
+        if (fg_due) wait_until(fg_due);
         uint64_t t1 = kern_now_ns();
         vk_present_flip();
         if (pp_enabled()) {

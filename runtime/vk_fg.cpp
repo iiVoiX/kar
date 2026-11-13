@@ -12,6 +12,7 @@
 // the picture halfway between the previous call's picture and this one, in GENERAL layout, for vk_present_blit.
 // Without the FidelityFX SDK in the build (no build/ffx-src/bin/ffx_sdk), vk_fg_interpolate returns VK_NULL_HANDLE.
 extern "C" {
+#include <malloc.h>   // _aligned_malloc
 #include <stdlib.h>
 #include <string.h>
 #include "host.h"
@@ -45,8 +46,10 @@ struct Fg {
     void *scratch = nullptr;
     FfxInterface iface = {};
     FfxUInt32 shared_id = 0;
-    FfxOpticalflowContext of = {};
-    FfxFrameInterpolationContext fi = {};
+    // The SDK casts these opaque uint32_t arrays to its private structures, which Clang accesses with 16-byte
+    // aligned SSE moves (see tools/build_ffx.py)
+    alignas(64) FfxOpticalflowContext of = {};
+    alignas(64) FfxFrameInterpolationContext fi = {};
     int have_ctx = 0;
     FfxResourceInternal res[5] = {};   // optical flow vector, scene change; dilated depth, dilated motion, prev depth
     int nres = 0;
@@ -127,6 +130,31 @@ void to_general(VkCommandBuffer cb, VkImage img) {
     vkCmdPipelineBarrier2(cb, &d);
 }
 
+// The SDK loads some functions by their extension names (vkGetBufferMemoryRequirements2KHR ...). The device has
+// them as Vulkan 1.1-1.3 core functions without enabling those extensions, where the KHR name may return NULL and
+// the SDK would call through it: retry under the core name, and log what stays missing.
+PFN_vkVoidFunction VKAPI_CALL proc_addr(VkDevice d, const char *name) {
+    PFN_vkVoidFunction f = vkGetDeviceProcAddr(d, name);
+    size_t n = strlen(name);
+    if (!f && n > 3 && n < 120 && !strcmp(name + n - 3, "KHR")) {
+        char core[128];
+        memcpy(core, name, n - 3);
+        core[n - 3] = 0;
+        f = vkGetDeviceProcAddr(d, core);
+    }
+    if (!f) rt_log("fg: the FidelityFX back end found no %s", name);
+    return f;
+}
+
+// The back end reports fp16 support from the extension list alone; this device does not enable shaderFloat16
+// (vk_device.c), so the SDK must pick its 32-bit shader permutations.
+FfxGetDeviceCapabilitiesFunc caps_orig;
+FfxErrorCode caps_no_fp16(FfxInterface *i, FfxDeviceCapabilities *d) {
+    FfxErrorCode e = caps_orig(i, d);
+    d->fp16Supported = false;
+    return e;
+}
+
 void destroy_ctx(VkCtx *c) {
     if (G.fence) vkWaitForFences(c->device, 1, &G.fence, VK_TRUE, 5000000000ull);
     if (G.have_ctx) {
@@ -137,7 +165,7 @@ void destroy_ctx(VkCtx *c) {
         G.have_ctx = 0, G.nres = 0;
     }
     free_image(c, &G.cur), free_image(c, &G.out), free_image(c, &G.depth), free_image(c, &G.mv);
-    free(G.scratch);
+    _aligned_free(G.scratch);
     G.scratch = nullptr;
     G.w = G.h = 0;
 }
@@ -157,10 +185,14 @@ int create_ctx(VkCtx *c, VkFormat fmt, int w, int h) {
     if (!make_image(c, &G.cur, fmt, w, h) || !make_image(c, &G.out, fmt, w, h) ||
         !make_image(c, &G.depth, VK_FORMAT_R32_SFLOAT, w, h) || !make_image(c, &G.mv, VK_FORMAT_R16G16_SFLOAT, w, h))
         return 0;
-    VkDeviceContext dc = {c->device, c->phys, vkGetDeviceProcAddr};
+    VkDeviceContext dc = {c->device, c->phys, proc_addr};
     size_t n = ffxGetScratchMemorySizeVK(c->phys, 4);
-    G.scratch = calloc(1, n);
+    G.scratch = _aligned_malloc(n, 64);
+    if (G.scratch) memset(G.scratch, 0, n);
+    rt_log("fg: creating the FidelityFX contexts for %dx%d", w, h);
     if (!G.scratch || ffxGetInterfaceVK(&G.iface, ffxGetDeviceVK(&dc), G.scratch, n, 4) != FFX_OK) return 0;
+    caps_orig = G.iface.fpGetDeviceCapabilities;
+    G.iface.fpGetDeviceCapabilities = caps_no_fp16;
     if (G.iface.fpCreateBackendContext(&G.iface, FFX_EFFECT_SHAREDRESOURCES, nullptr, &G.shared_id) != FFX_OK) return 0;
     FfxOpticalflowContextDescription od = {};
     od.backendInterface = G.iface;
@@ -320,6 +352,8 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
         return VK_NULL_HANDLE;
     }
     if (reset || G.calls < 2) return VK_NULL_HANDLE;   // nothing before this picture to interpolate from
+    static uint64_t made;
+    if (++made % 1800 == 0) rt_log("fg: %llu interpolated pictures so far", (unsigned long long)made);
     if (out_fmt) *out_fmt = fmt;
     return G.out.image;
 }
