@@ -2631,6 +2631,11 @@ static void defer(int kind, uint64_t handle, VmaAllocation alloc) {
     if (ndead == cap_dead) grow((void **)&dead, &cap_dead, sizeof *dead);
     // The open batch may record into the object: it counts as the newest user.
     dead[ndead++] = (Dead){kind, handle, alloc, open_active ? open_b.seq : next_seq, tl_protected};
+    static int dlog = -1, dn;   // KAR_DEAD_LOG=1 (diagnostic): the first deferred images with their protection value
+    if (dlog < 0) dlog = getenv("KAR_DEAD_LOG") != NULL;
+    if (dlog && kind <= DEAD_IMAGE_VMA && dn++ < 40)
+        rt_log("mem: image %#llx deferred, protected to %llu, issued %llu", (unsigned long long)handle,
+               (unsigned long long)tl_protected, (unsigned long long)vk_sync_issued());
     plat_rmutex_unlock(&cmd_lock);
 }
 

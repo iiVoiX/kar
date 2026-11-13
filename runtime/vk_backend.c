@@ -86,6 +86,9 @@ static void present_main(void *arg) {
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
         if (flight_on) vk_thumbs_frame(j.frame);
+        static int plog = -1, pn;   // KAR_DEAD_LOG=1: the images the present thread blits, first ones
+        if (plog < 0) plog = getenv("KAR_DEAD_LOG") != NULL;
+        if (plog && pn++ < 40) rt_log("present: blit of image %#llx (frame %llu)", (unsigned long long)(uintptr_t)j.image, (unsigned long long)j.frame);
         uint64_t q0 = kern_now_ns();
         vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
         uint64_t q1 = kern_now_ns();

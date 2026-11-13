@@ -746,6 +746,18 @@ out:
     plat_rmutex_unlock(&g_pl);
 }
 
+// Waits until every present this file submitted (and a flip still pending) has completed: their blits read the source
+// image, and these fences are not part of the timeline the deferred destruction list (vk_memory.c) waits for. The boot
+// screen calls it before it retires its image (validation: VUID-vkDestroyImage-image-01000 at the first collect).
+void vk_present_wait_idle(void) {
+    VkCtx *c = vk_ctx();
+    if (!c || !g_started) return;
+    plat_rmutex_lock(&g_pl);
+    flip_locked();
+    vkWaitForFences(c->device, FRAMES, g_fence, VK_TRUE, 5000000000ull);
+    plat_rmutex_unlock(&g_pl);
+}
+
 void vk_present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {
     present_image(src, layout, fmt, w, h, crop, 0);
 }
@@ -942,6 +954,7 @@ static void bs_main(void *arg) {
     }
     rt_log("boot screen: %u frames in %llu ms", shown, (unsigned long long)(plat_now_ms() - t0));
     free(px);
+    vk_present_wait_idle();   // the last blits read img
     vk_defer_image(img, alloc);
 }
 
