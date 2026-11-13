@@ -100,6 +100,8 @@ if DARWIN and (HOMEBREW_LLVM / 'clang').is_file():
 # Flags for generated code as LAS Recomp builds it (Makefile GENFLAGS, Windows), plus -march for the FP/SIMD lowering.
 # On AArch64 the lowering uses GCC vector extensions and fma, both baseline there, so no -mcpu is needed.
 # RECOMP_GEN_OPT (e.g. -O2): another optimisation level for the generated code, for A/B builds with --out.
+# RECOMP_GEN_O1_FILES: comma-separated chunk names (main_0271, ...) kept at -O1, for chunks clang needs hours for at -O2.
+GEN_KEEP_O1 = set(filter(None, os.environ.get('RECOMP_GEN_O1_FILES', '').split(',')))
 GEN_FLAGS = [os.environ.get('RECOMP_GEN_OPT', '-O1'), '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-label', '-fvisibility=hidden']
 RT_FLAGS = ['-O2', '-g', '-Wall', '-fno-strict-aliasing']
 if platform.machine().lower() in ('x86_64', 'amd64'):
@@ -436,6 +438,8 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
             if not prebuilt:
                 lines.append(f'build {ninja_path(o)}: cc_gen {ninja_path(f)}')
                 lines.append('  pool = gen')
+                if f.stem in GEN_KEEP_O1:   # the last -O wins: these stay at -O1 in an A/B build at another level
+                    lines.append('  genflags = $genflags -O1')
             objs[mod].append(o)
     rt = []
     sources = runtime_sources(skip)
