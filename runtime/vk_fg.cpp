@@ -270,6 +270,7 @@ int create_ctx(VkCtx *c, VkFormat fmt, int w, int h) {
     FfxFrameInterpolationContextDescription fd = {};
     fd.backendInterface = G.iface;
     fd.maxRenderSize = fd.displaySize = {(uint32_t)w, (uint32_t)h};
+    fd.flags = FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INVERTED;   // the game's projection: near 1, far 0
     fd.backBufferFormat = fd.previousInterpolationSourceFormat = ffxGetSurfaceFormatVK(fmt);
     if (ffxFrameInterpolationContextCreate(&G.fi, &fd) != FFX_OK) {
         ffxOpticalflowContextDestroy(&G.of);
@@ -293,7 +294,22 @@ int create_ctx(VkCtx *c, VkFormat fmt, int w, int h) {
 }
 }   // namespace
 
-extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h, const int crop[4], VkFormat *out_fmt) {
+// The FidelityFX resource of one of vk_fg_mv.c's images (GENERAL, storage and sampled).
+FfxResource res_ext(VkImage image, VkFormat f, uint32_t w, uint32_t h, const wchar_t *name) {
+    VkImageCreateInfo ci = {};
+    ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.imageType = VK_IMAGE_TYPE_2D;
+    ci.format = f;
+    ci.extent = {w, h, 1};
+    ci.mipLevels = ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    return ffxGetResourceVK((void *)image, ffxGetImageResourceDescriptionVK(image, ci, FFX_RESOURCE_USAGE_READ_ONLY), name,
+                            FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h, const int crop[4], int mv_slot,
+                                     VkFormat *out_fmt) {
     VkCtx *c = vk_ctx();
     if (!vk_fg_on() || G.failed || !c) return VK_NULL_HANDLE;
     int cx = 0, cy = 0, cw = w, ch = h;
@@ -325,7 +341,7 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
     if (!G.cleared) {   // own images to GENERAL; depth far (1) and motion vectors 0 for good
         Img *all[4] = {&G.cur, &G.out, &G.depth, &G.mv};
         for (Img *m : all) to_general(G.cb, m->image);
-        VkClearColorValue one = {{1, 1, 1, 1}}, zero = {{0, 0, 0, 0}};
+        VkClearColorValue one = {{0, 0, 0, 0}}, zero = {{0, 0, 0, 0}};   // reversed depth: 0 is far
         VkImageSubresourceRange r = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdClearColorImage(G.cb, G.depth.image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &r);
         vkCmdClearColorImage(G.cb, G.mv.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
@@ -371,13 +387,24 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
 
     FfxFrameInterpolationPrepareDescription pd_ = {};
     pd_.commandList = cl;
-    pd_.renderSize = {(uint32_t)cw, (uint32_t)ch};
+    // camera motion vectors of this picture (vk_fg_mv.c) at the scene's render size, else the constant zero ones
+    VkFgMv mv = {};
+    int have_mv = mv_slot && vk_fg_mv_get(mv_slot, &mv) && mv.w <= (uint32_t)cw && mv.h <= (uint32_t)ch;
+    static int told_mv = -1;
+    if (have_mv != told_mv) {
+        told_mv = have_mv;
+        rt_log("fg: %s", have_mv ? "camera motion vectors in use" : "no camera motion vectors: zero ones");
+    }
+    pd_.renderSize = have_mv ? FfxDimensions2D{mv.w, mv.h} : FfxDimensions2D{(uint32_t)cw, (uint32_t)ch};
     pd_.motionVectorScale = {1.0f, 1.0f};
     pd_.frameTimeDelta = dt_ms;
-    pd_.cameraNear = 0.1f, pd_.cameraFar = 1000.0f, pd_.viewSpaceToMetersFactor = 1.0f;
-    pd_.cameraFovAngleVertical = 1.0f;
-    pd_.depth = res_of(&G.depth, L"KAR_FG_Depth");
-    pd_.motionVectors = res_of(&G.mv, L"KAR_FG_MotionVectors");
+    pd_.cameraNear = have_mv ? mv.nearv : 0.1f, pd_.cameraFar = have_mv ? mv.farv : 1000.0f;
+    pd_.viewSpaceToMetersFactor = 1.0f;
+    pd_.cameraFovAngleVertical = have_mv ? mv.fov : 1.0f;
+    pd_.depth = have_mv ? res_ext(mv.depth, VK_FORMAT_R32_SFLOAT, mv.w, mv.h, L"KAR_FG_Depth")
+                        : res_of(&G.depth, L"KAR_FG_Depth");
+    pd_.motionVectors = have_mv ? res_ext(mv.mv, VK_FORMAT_R16G16_SFLOAT, mv.w, mv.h, L"KAR_FG_MotionVectors")
+                                : res_of(&G.mv, L"KAR_FG_MotionVectors");
     pd_.frameID = G.frame_id;
     pd_.dilatedDepth = dd, pd_.dilatedMotionVectors = dm, pd_.reconstructedPrevDepth = pd;
     e |= ffxFrameInterpolationPrepare(&G.fi, &pd_);
@@ -389,7 +416,8 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
         if (dbg < 0) dbg = getenv("KAR_FG_DEBUG") && *getenv("KAR_FG_DEBUG") == '1';
         if (dbg) fd.flags |= FFX_FRAMEINTERPOLATION_DISPATCH_DRAW_DEBUG_VIEW;
     }
-    fd.displaySize = fd.renderSize = {(uint32_t)cw, (uint32_t)ch};
+    fd.displaySize = {(uint32_t)cw, (uint32_t)ch};
+    fd.renderSize = pd_.renderSize;
     fd.currentBackBuffer = cur;
     fd.output = out;
     fd.interpolationRect = {0, 0, cw, ch};
@@ -445,8 +473,9 @@ extern "C" void vk_fg_release(void) {
 }
 
 #else
-extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h, const int crop[4], VkFormat *out_fmt) {
-    (void)src, (void)src_fmt, (void)w, (void)h, (void)crop, (void)out_fmt;
+extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h, const int crop[4], int mv_slot,
+                                     VkFormat *out_fmt) {
+    (void)src, (void)src_fmt, (void)w, (void)h, (void)crop, (void)mv_slot, (void)out_fmt;
     static int told;
     if (vk_fg_on() && !told++) rt_log("fg: KAR_FG=1, but this build has no FidelityFX SDK (tools/build_ffx.py)");
     return VK_NULL_HANDLE;

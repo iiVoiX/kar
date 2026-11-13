@@ -291,6 +291,7 @@ int kar_wide_size(int *w, int *h);                         // Kirby ultrawide di
 int kar_wide_ui(uint32_t w, uint32_t h);                  // the target is the widened interface layer (centre its 16:9 rectangles)
 int kar_wide_output(uint32_t w, uint32_t h);              // the target has the widened output size (stretch there, centre elsewhere)
 int kar_wide_active(void);                                 // the karwide patches are on with a wide size
+void kar_fg_cam_init(void);                               // Kirby camera blocks for frame generation (kar_fg_cam.c), before hostfn_seal
 void kar_wide_init(void);                                  // Kirby ultrawide display-size hook (kar_wide.c), before hostfn_seal
 void dkb_camera_init(void);                                // camera patch callbacks, before hostfn_seal
 void frame_step_init(void);                                // after rt_patches_init: the real-time step's first value

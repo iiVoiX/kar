@@ -33,7 +33,7 @@
 
 #define WEAK __attribute__((weak))
 
-typedef struct { VkImage image; VkFormat format; int w, h, has_crop, crop[4]; uint64_t frame, at, queued, value; } PresentJob;
+typedef struct { VkImage image; VkFormat format; int w, h, has_crop, crop[4], mv_slot; uint64_t frame, at, queued, value; } PresentJob;
 
 static PlatMutex pl = PLAT_MUTEX_INIT;
 static PlatCond pcv = PLAT_COND_INIT;   // job queued, job taken, job submitted
@@ -99,7 +99,7 @@ static void present_main(void *arg) {
             if (fg_prev && now - fg_prev < 100000000ull) fg_iv = fg_iv ? (fg_iv * 7 + (now - fg_prev)) / 8 : now - fg_prev;
             fg_prev = now;
             VkFormat ff = VK_FORMAT_UNDEFINED;
-            VkImage mid = vk_fg_interpolate(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, &ff);
+            VkImage mid = vk_fg_interpolate(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, j.mv_slot, &ff);
             if (mid) {
                 vk_present_blit(mid, VK_IMAGE_LAYOUT_GENERAL, ff, j.has_crop ? j.crop[2] : j.w,
                                 j.has_crop ? j.crop[3] : j.h, NULL);
@@ -180,7 +180,8 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
         return;
     }
     PresentJob j = {.image = img->image, .format = img->format, .w = (int)img->width, .h = (int)img->height, .frame = frame,
-                    .at = at_ns, .queued = queued, .value = value};
+                    .at = at_ns, .queued = queued, .value = value,
+                    .mv_slot = vk_fg_on() ? vk_fg_mv_latest() : 0};   // the replay of this frame recorded it already
     if (crop) {
         j.has_crop = 1;
         for (int i = 0; i < 4; i++) j.crop[i] = crop[i];

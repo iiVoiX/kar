@@ -136,7 +136,14 @@ void vk_fsr_release(void);   // before the device goes away
 // Frame generation (vk_fg.cpp, KAR_FG=1): the picture halfway between the previous call's crop of a game image and
 // this one's, in GENERAL layout (its format in *out_fmt), or VK_NULL_HANDLE (off, first picture, after a reset).
 int vk_fg_on(void);
-VkImage vk_fg_interpolate(VkImage src, VkFormat fmt, int w, int h, const int crop[4], VkFormat *out_fmt);
+// Camera motion vectors of one frame (vk_fg_mv.c): rg16f in pixels (previous - current) and an r32f depth copy, w x h,
+// both GENERAL; the camera's vertical field of view (radians) and near/far (reversed depth).
+typedef struct { VkImage mv, depth; uint32_t w, h; float fov, nearv, farv; uint64_t frame; } VkFgMv;
+int vk_fg_mv_record(VkCommandBuffer cb, uint32_t w, uint32_t h);   // replay, after the scene: 1 when recorded
+int vk_fg_mv_latest(void);                // slot number of the newest recording (0: none)
+int vk_fg_mv_get(int slot, VkFgMv *out);
+// mv_slot: vk_fg_mv_latest() when the game presented this picture (0: no motion vectors, zero ones are used)
+VkImage vk_fg_interpolate(VkImage src, VkFormat fmt, int w, int h, const int crop[4], int mv_slot, VkFormat *out_fmt);
 void vk_fg_release(void);   // before the device goes away
 // Colour adjustment on the present (vk_color.c): with TOTK_COLOR_* away from their defaults, records a pass that writes
 // src's crop rectangle {x, y, w, h}, adjusted, into an RGBA16F image of that size in GENERAL and returns it (the caller

@@ -28,6 +28,12 @@
 #include "vk.h"
 #include "vk_exec.h"
 
+// The newest depth target a pass used (vk_exec_pass_begin), for vk_exec_depth_newest.
+static VkImage dn_image;
+static VkFormat dn_format;
+static uint32_t dn_w, dn_h;
+static uint64_t dn_frame;
+
 #define WEAK __attribute__((weak))
 #define CALL_DEPTH 8
 
@@ -397,6 +403,11 @@ static void resolve_rt(VkExec *ex) {
     ex->pass_depth = d->image && (d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? d->format : VK_FORMAT_UNDEFINED;
     ex->pass_stencil = d->image && (d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? d->format : VK_FORMAT_UNDEFINED;
     ex->pipe.depth_fmt = d->image ? d->nvn_format : 0;
+    if (d->image && d->img && (d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && d->samples == 1 && d->level == 0 &&
+        d->layers == 1 && !d->is3d) {   // frame generation (vk_fg_mv.c): the newest single-sample 2D depth target
+        dn_image = d->img->image, dn_format = d->img->format, dn_w = d->img->width, dn_h = d->img->height;
+        dn_frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    }
     if (d->image) {
         if (d->width < w) w = d->width;
         if (d->height < h) h = d->height;
@@ -614,6 +625,14 @@ void vk_exec_pass_begin(VkExec *ex) {
     vk_exec_frame.passes++;
     ex->recorded++;
     ex->in_pass = 1;
+}
+
+// The newest depth target a pass used (replay thread), for frame generation's motion vectors (vk_fg_mv.c): the
+// scene's depth is the one of the upscale source's size in the frame of the upscale.
+VkImage vk_exec_depth_newest(uint32_t w, uint32_t h, VkFormat *format) {
+    if (!dn_image || dn_w != w || dn_h != h || dn_frame != __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED)) return VK_NULL_HANDLE;
+    *format = dn_format;
+    return dn_image;
 }
 
 // The newest single-sample colour render target per format (vk_exec_rt_newest), noted when its pass ends: the

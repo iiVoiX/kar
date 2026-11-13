@@ -435,3 +435,9 @@ site karwide main 4c3e1a0 910443fd 910443fd @call:360   # f_7004c3e180 (creates 
 site karwide main 538397c bd031a67 bd031a67 @call:370   # f_70053832b8 stores the camera aspect (+0x318) the projection reads: Hor+
 site karwide main 5384740 bd431800 bd431800 @call:3a0   # f_7005384740 (projection) loads the camera aspect into s0: every camera (leaf; ret is a C return)
 site karwide main 5b642c4 b940036a b940036a @call:3b0   # f_7005b62b40: interface layer size (w8 x w9, default 1920x1080) before comparing with the current target
+site karwide main 5383bc0 bd420a6a bd420a6a @call:3d0   # f_70053839b0: aspect (+0x208) loaded into s10 for the perspective projection (+0x150), first path
+site karwide main 5383c80 bd420a6a bd420a6a @call:3d0   # same, second perspective path
+
+# Frame generation camera data (runtime/kar_fg_cam.c, RELEASE_PLAN.md 16.7 B2)
+set karfg KAR_FG 0
+site karfg main 5384b34 b9020c28 b9020c28 @call:3c0   # f_7005384740: last store of the camera block before ret (x0 camera, x1 block)

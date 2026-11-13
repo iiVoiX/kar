@@ -19,6 +19,7 @@
 #define SLOT_ASPECT 0x370
 #define SLOT_PROJECT 0x3a0
 #define SLOT_UI 0x3b0
+#define SLOT_PERSP 0x3d0
 
 static int want_w, want_h;
 static uint32_t ui_w;   // width the interface layer was given (ui_hook): its rectangles stay 16:9 and centred
@@ -136,6 +137,22 @@ static void project_hook(Cpu *c) {
     c->v[0] = bits;   // s0, the rest of the vector register zero as after the scalar load
 }
 
+// f_70053839b0 (builds a camera's perspective projection at +0x150) right after it loaded the aspect from +0x208 into
+// s10, at both of its perspective paths (x19 the camera). The race camera's projection takes its aspect from here, not
+// from the +0x318 copy aspect_hook widens (that one only reaches the constant block's aspect field): with 16:9 here the
+// scene was rendered 16:9 and stretched across the wide output. A 16:9 camera gets the wanted aspect (Hor+).
+static void persp_hook(Cpu *c) {
+    if (!want_w || !want_h || nocam()) return;
+    // Only the loaded value: the camera keeps 16:9 in memory, since the game derives its field of view from that field
+    // too (writing it back widened the vertical angle from 68 to 90 degrees).
+    const float *a = (const float *)(uintptr_t)(c->x[19] + 0x208);
+    if (!(*a > 1.777f && *a < 1.7785f)) return;
+    float wide = (float)want_w / (float)want_h;
+    uint32_t bits;
+    memcpy(&bits, &wide, 4);
+    c->v[10] = bits;   // s10 as the load would have left it
+}
+
 // f_7005b62b40 at 0x7005b642c4: w8 x w9 is the size of the interface layer (HUD, menus, the line-up figures), 1920x1080
 // unless the game asks for another, about to be compared with the current target. The default gets the wanted aspect;
 // vk_exec_draw.c keeps the layer's 16:9 rectangles centred in it, so the final composite shows the interface unstretched.
@@ -164,6 +181,7 @@ void kar_wide_init(void) {
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_ASPECT, aspect_hook);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_PROJECT, project_hook);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_UI, ui_hook);
+    rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_PERSP, persp_hook);
 }
 
 // KAR_FIND_F32=<hex>@<frame> (diagnostic, ultrawide camera): once at that frame, every 4-byte-aligned u32 of the

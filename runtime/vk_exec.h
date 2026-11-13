@@ -133,6 +133,8 @@ void vk_exec_rt_note_storage(const VkTexImage *img);   // a storage image bound 
 void vk_exec_rt_forget(VkImage image);    // the image was retired (vk_defer_image): never a fallback source again
 VkImage vk_exec_rt_newest(VkFormat format, uint32_t max_w, uint32_t dst_w, uint32_t dst_h, uint64_t min_stamp,
                           uint32_t *w, uint32_t *h);
+// The newest depth target of size w x h a pass of the current frame used, else VK_NULL_HANDLE (vk_fg_mv.c).
+VkImage vk_exec_depth_newest(uint32_t w, uint32_t h, VkFormat *format);
 // Ends the open pass (no-op without one) and marks its targets GPU-written. Call before copies and dispatches.
 void vk_exec_pass_end(VkExec *ex);
 // Full memory barrier (all commands, all memory); ends the open pass first. Copies and dispatches order themselves with
