@@ -73,6 +73,7 @@ static struct {
     VkDevice device;
     VkPipelineCache cache;
     uint32_t max_push;
+    uint32_t max_dyn_ubo;              // maxDescriptorSetUniformBuffersDynamic (dynamic uniform buffers, 16.5)
     uint32_t max_stage_samplers;       // maxPerStageDescriptorSamplers: a push set stays within it (push_fits)
     int indep;                         // stage-independent layouts (vk_caps.gpl): vertex set 0, fragment set 1
     int push_stage;                    // GFX_STAGE_* whose set is pushed with independent layouts
@@ -118,6 +119,7 @@ typedef struct Layout {
     VkPipelineLayout half[2];          // GPL libraries: {set 0, null}, {null, set 1} (made on first use)
     VkDescriptorUpdateTemplate tpl[2]; // per set (make_tpl); VK_NULL_HANDLE: written with write structs
     int bl;                            // set 2 is the global bindless set: a binding is a material array (16.2)
+    uint8_t dyn[128];                  // per binding of b: a uniform buffer made UNIFORM_BUFFER_DYNAMIC (dyn_ubo, 16.5)
     VkDescriptorSetLayoutBinding b[];
 } Layout;
 
@@ -227,6 +229,7 @@ static int ensure_init(void) {
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &pd};
     vkGetPhysicalDeviceProperties2(c->phys, &p2);
     P.max_push = pd.maxPushDescriptors;
+    P.max_dyn_ubo = p2.properties.limits.maxDescriptorSetUniformBuffersDynamic;
     P.max_stage_samplers = p2.properties.limits.maxPerStageDescriptorSamplers;
     P.indep = vk_caps.gpl;
     P.gpl = vk_caps.gpl;
@@ -1898,6 +1901,39 @@ static VkDescriptorUpdateTemplate make_tpl(const VkDescriptorSetLayoutBinding *b
     return t;
 }
 
+// KAR_DYN_UBO=1 (16.5): the uniform buffers of a set that is allocated (not pushed) become dynamic uniform buffers, so
+// the replay's set cache keys them without their offset and passes the offsets when it binds the set (vk_exec_draw.c):
+// the constant buffers of most draws move from draw to draw while everything else stays. Within
+// maxDescriptorSetUniformBuffersDynamic over the pipeline layout; sets are taken from the last (fragment) to the first.
+// Fills l->dyn and returns a copy of b with the types changed in out.
+static int dyn_ubo_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_DYN_UBO") && *getenv("KAR_DYN_UBO") == '1';
+    return on;
+}
+static void dyn_ubo(Layout *l, const uint32_t *lo, const uint32_t *hi, const int *push, int nsets,
+                    VkDescriptorSetLayoutBinding *out) {
+    memcpy(out, l->b, l->n * sizeof *out);
+    memset(l->dyn, 0, sizeof l->dyn);
+    if (!dyn_ubo_on() || l->n > sizeof l->dyn) return;
+    uint32_t left = P.max_dyn_ubo;
+    for (int s = nsets - 1; s >= 0; s--) {
+        if (push[s]) continue;
+        uint32_t need = 0;
+        for (uint32_t i = lo[s]; i < hi[s]; i++)
+            if (l->b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) need += l->b[i].descriptorCount;
+        static int told;
+        if (told++ < 12)
+            rt_log("vk_pipeline: dyn_ubo set %d of %d: %u uniform buffers, %u dynamic left (limit %u), push %d", s, nsets,
+                   need, left, P.max_dyn_ubo, push[s]);
+        if (!need || need > left) continue;
+        left -= need;
+        for (uint32_t i = lo[s]; i < hi[s]; i++)
+            if (l->b[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+                out[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, l->dyn[i] = 1;
+    }
+}
+
 // Finds or creates the layout of a binding list (sorted here); NULL on failure. Caller holds P.lock.
 // Sorts a binding list by binding and hashes it into *h; the descriptor total, or -1 when a binding repeats.
 static int64_t bindings_sort(Bindings *B, uint64_t *h) {
@@ -1994,9 +2030,15 @@ static Layout *layout_get(Bindings *B) {
     l->hash = h, l->n = B->n;
     memcpy(l->b, B->b, B->n * sizeof *B->b);
     l->push = push_fits(l->b, l->n, total) && !bindless_for(B, B->n);   // no push set beside the bindless set 2
+    VkDescriptorSetLayoutBinding db[MAX_BINDINGS];
+    {
+        uint32_t lo[1] = {0}, hi[1] = {l->n};
+        int ps[1] = {l->push};
+        dyn_ubo(l, lo, hi, ps, 1, db);
+    }
     VkDescriptorSetLayoutCreateInfo si = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                           .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
-                                          .bindingCount = l->n, .pBindings = l->b};
+                                          .bindingCount = l->n, .pBindings = db};
     if (vkCreateDescriptorSetLayout(P.device, &si, NULL, &l->set) != VK_SUCCESS) {
         free(l);
         return NULL;
@@ -2011,7 +2053,7 @@ static Layout *layout_get(Bindings *B) {
         free(l);
         return NULL;
     }
-    l->tpl[0] = make_tpl(l->b, l->n, l->set, l->push, l->layout, 0);
+    l->tpl[0] = make_tpl(db, l->n, l->set, l->push, l->layout, 0);
     l->next = *head;
     *head = l;
     P.stats.layouts++;
@@ -2044,12 +2086,18 @@ static Layout *layout_pair(Bindings *B, Bindings *F) {
     memcpy(l->b, B->b, n * sizeof *B->b);
     l->push = P.push_stage == GFX_STAGE_VS && push_fits(l->b, n0, tv) && !bindless_for(B, n);
     l->push1 = P.push_stage == GFX_STAGE_FS && F->n && push_fits(l->b + n0, n - n0, tf) && !bindless_for(B, n);
+    VkDescriptorSetLayoutBinding db[MAX_BINDINGS];
+    {
+        uint32_t lo[2] = {0, n0}, hi[2] = {n0, n};
+        int ps[2] = {l->push, l->push1};
+        dyn_ubo(l, lo, hi, ps, 2, db);
+    }
     VkDescriptorSetLayoutCreateInfo s0 = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                           .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
-                                          .bindingCount = n0, .pBindings = l->b};
+                                          .bindingCount = n0, .pBindings = db};
     VkDescriptorSetLayoutCreateInfo s1 = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                           .flags = l->push1 ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
-                                          .bindingCount = n - n0, .pBindings = l->b + n0};
+                                          .bindingCount = n - n0, .pBindings = db + n0};
     if (vkCreateDescriptorSetLayout(P.device, &s0, NULL, &l->set) != VK_SUCCESS) {
         free(l);
         return NULL;
@@ -2070,8 +2118,8 @@ static Layout *layout_pair(Bindings *B, Bindings *F) {
         free(l);
         return NULL;
     }
-    l->tpl[0] = make_tpl(l->b, n0, l->set, l->push, l->layout, 0);
-    l->tpl[1] = make_tpl(l->b + n0, n - n0, l->set1, l->push1, l->layout, 1);
+    l->tpl[0] = make_tpl(db, n0, l->set, l->push, l->layout, 0);
+    l->tpl[1] = make_tpl(db + n0, n - n0, l->set1, l->push1, l->layout, 1);
     l->next = *head;
     *head = l;
     P.stats.layouts++;
@@ -2138,6 +2186,8 @@ static Pipe *pipe_add(const void *key, size_t size, uint64_t h, VkPipeline pipel
     if (l && B) {
         p->bindings = malloc(B->n * sizeof *p->bindings);
         if (p->bindings) memcpy(p->bindings, B->pb, B->n * sizeof *p->bindings);
+        for (uint32_t i = 0; p->bindings && i < B->n && i < sizeof l->dyn; i++)   // dynamic uniform buffers (16.5)
+            if (l->dyn[i]) p->bindings[i].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     }
     p->info = (VkPipeInfo){pipeline, l ? l->layout : VK_NULL_HANDLE, l ? l->set : VK_NULL_HANDLE, l ? l->push : 0, bp,
                            p->bindings ? B->n : 0, p->bindings, vs_inputs};

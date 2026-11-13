@@ -163,6 +163,7 @@ static struct {
              uint32_t roots[NVN2_ROOT_TABLES][NVN2_ROOT_WORDS]; } c0_in[4];   // what vk_c0_fill read for c0[k]
     VkPipelineLayout ds_layout;          // graphics layout the sets below were last pushed or bound with
     VkDescriptorSet ds_bound[2];         // allocated set bound per set number (0: none or pushed since)
+    uint32_t dyn_bound[2][32], ndyn_bound[2];   // the dynamic uniform buffer offsets it was bound with (16.5)
     VkDescriptorSet ds_last[2];          // last allocated and written set per set number, contents in DS
     VkDescriptorSetLayout ds_last_layout[2];
     int ds_pushed[2];                    // set number holds the push of DS.psig under ds_layout
@@ -180,7 +181,7 @@ static struct { uint32_t n[2], pn[2]; uint8_t sig[2][DS_SIG_BYTES], psig[2][DS_S
 static struct {
     int on;
     uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, ac_miss, same_prog, same_all, bind_skip, arr_desc, pool_desc, arr_own_samp;
-    uint64_t miss, dyn_hit;   // set cache misses, and of them the ones a cache without uniform buffer offsets would hit
+    uint64_t miss, dyn_hit, dyn_offs;   // set cache misses, and of them the ones a cache without uniform buffer offsets would hit
 } BS = {-1};
 
 // The inputs of the last graphics bind_resources (bind_sig) and what its build counted for the traffic census, which a
@@ -2328,6 +2329,7 @@ static VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
         }
         static const VkDescriptorPoolSize sizes[] = {
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 4096},   // KAR_DYN_UBO (vk_pipeline.c dyn_ubo)
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16384}, {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 256},
             {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 256},
@@ -2396,8 +2398,8 @@ static void bind_stats(const VkPipeInfo *info) {
                BS.push / d, BS.push_skip / d, BS.set_new / d, BS.set_reuse / d, BS.ac_miss / d, BS.same_prog / d,
                BS.same_all / d, BS.bind_skip / d);
         rt_log("vk_exec: per draw: descriptors from material arrays %.2f (sampler in the handle %.2f), from pool arrays %.2f; "
-               "set cache misses %.3f, of them found without uniform buffer offsets %.3f",
-               BS.arr_desc / d, BS.arr_own_samp / d, BS.pool_desc / d, BS.miss / d, BS.dyn_hit / d);
+               "set cache misses %.3f, of them found without uniform buffer offsets %.3f; dynamic offsets %.2f",
+               BS.arr_desc / d, BS.arr_own_samp / d, BS.pool_desc / d, BS.miss / d, BS.dyn_hit / d, BS.dyn_offs / d);
     }
 }
 
@@ -2737,6 +2739,7 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
         if (i1 > lo[s] && !info->tpl[s]) need_w = 1;
     }
     uint32_t nd = 0;
+    uint32_t dyn[2][32], ndyn[2] = {0, 0};   // dynamic uniform buffer offsets per set, in binding order (16.5)
     for (uint32_t i = 0; i < info->n_bindings; i++) {
         const VkPipeBinding *b = &info->bindings[i];
         const GfxShaderRes *r = b->res;
@@ -2874,6 +2877,13 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
         } else {
             rt_fatal("vk: binding %u has an unknown kind %d", (unsigned)b->binding, (int)b->kind);
         }
+        if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {   // 16.5: the offset goes to the bind, the set keys without it
+            uint32_t sx = n_sets == 1 ? 0 : b->set;
+            for (uint32_t k = 0; k < cnt && ndyn[sx] < 32; k++)
+                dyn[sx][ndyn[sx]++] = (uint32_t)o[k].buffer.offset, o[k].buffer.offset = 0;
+            RS.volatile_ = 1;   // the packed descriptors no longer tell two draws apart: no build skip
+            if (gfx) BS.dyn_offs += cnt;
+        }
         if (need_w) {
             w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                           .dstBinding = b->binding, .descriptorCount = cnt, .descriptorType = b->type};
@@ -2943,9 +2953,25 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
                 if (n) DS.pn[s] = n, memcpy(DS.psig[s], ds, n);
             }
         } else if (!gfx || s > 1) {
-            VkDescriptorSet set = alloc_set(ex, s ? info->set_layout1 : info->set_layout);
-            write_set(info, s, set, ds, w, i0, i1);
-            vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, s, 1, &set, 0, NULL);
+            VkDescriptorSetLayout sl = s ? info->set_layout1 : info->set_layout;
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            DsCacheEnt *ce = NULL;
+            uint64_t h1 = 0, h2 = 0;
+            if (ndyn[s] && dsc_on()) {   // with dynamic uniform buffers the set repeats: through the cache (16.5)
+                CbRes *cr = cb_res(ex);
+                if (!cr->dsc) cr->dsc = calloc(DSC_N, sizeof *cr->dsc);
+                if (cr->dsc) {
+                    ds_hash(ds, dbytes, &h1, &h2);
+                    ce = &cr->dsc[(h1 ^ (uint64_t)(uintptr_t)sl * 0x9E3779B97F4A7C15ull) & (DSC_N - 1)];
+                    if (ce->set && ce->h1 == h1 && ce->h2 == h2 && ce->sl == sl && ce->n == dbytes) set = ce->set;
+                }
+            }
+            if (!set) {
+                set = alloc_set(ex, sl);
+                write_set(info, s, set, ds, w, i0, i1);
+                if (ce) *ce = (DsCacheEnt){h1, h2, sl, dbytes, set};
+            }
+            vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, s, 1, &set, ndyn[s], dyn[s]);
         } else {
             VkDescriptorSetLayout sl = s ? info->set_layout1 : info->set_layout;
             VkDescriptorSet set = B.ds_last[s];
@@ -2994,9 +3020,12 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             } else {
                 BS.set_reuse++;
             }
-            if (B.ds_bound[s] != set) {
-                vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, s, 1, &set, 0, NULL);
+            if (B.ds_bound[s] != set || B.ndyn_bound[s] != ndyn[s] ||
+                (ndyn[s] && memcmp(B.dyn_bound[s], dyn[s], ndyn[s] * sizeof **dyn))) {
+                vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, s, 1, &set, ndyn[s], dyn[s]);
                 B.ds_bound[s] = set, B.ds_pushed[s] = 0;
+                B.ndyn_bound[s] = ndyn[s];
+                if (ndyn[s]) memcpy(B.dyn_bound[s], dyn[s], ndyn[s] * sizeof **dyn);
                 RS.cmds++;
             }
         }
