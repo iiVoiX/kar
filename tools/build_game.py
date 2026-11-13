@@ -99,7 +99,8 @@ if DARWIN and (HOMEBREW_LLVM / 'clang').is_file():
 
 # Flags for generated code as LAS Recomp builds it (Makefile GENFLAGS, Windows), plus -march for the FP/SIMD lowering.
 # On AArch64 the lowering uses GCC vector extensions and fma, both baseline there, so no -mcpu is needed.
-GEN_FLAGS = ['-O1', '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-label', '-fvisibility=hidden']
+# RECOMP_GEN_OPT (e.g. -O2): another optimisation level for the generated code, for A/B builds with --out.
+GEN_FLAGS = [os.environ.get('RECOMP_GEN_OPT', '-O1'), '-fno-strict-aliasing', '-Wno-return-type', '-Wno-unused-label', '-fvisibility=hidden']
 RT_FLAGS = ['-O2', '-g', '-Wall', '-fno-strict-aliasing']
 if platform.machine().lower() in ('x86_64', 'amd64'):
     GEN_FLAGS.append('-march=x86-64-v3')

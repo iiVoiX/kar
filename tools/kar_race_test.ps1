@@ -16,7 +16,8 @@ param(
     [string]$Env = '',
     [long]$Affinity = 0,   # CPU mask for kar.exe (0: all cores), e.g. 1 = only the first core
     [int]$AffinityDelay = 0,   # seconds after the start before the mask is applied
-    [int]$MaxMinutes = 20   # a run is closed after this long at the latest (soak tests: 60+)
+    [int]$MaxMinutes = 20,   # a run is closed after this long at the latest (soak tests: 60+)
+    [string]$Exe = ''   # another kar.exe (e.g. an A/B build with --out); default build\kar458752\kar.exe
 )
 # PowerShell 5.1 leaves $PSScriptRoot empty in parameter defaults, so the paths are worked out here.
 $vars = @{}
@@ -25,7 +26,7 @@ $root = (Resolve-Path (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Pat
 if (-not $Profile) { $Profile = Join-Path $root 'build\profile-kar-test' }
 if (-not $Out) { $Out = Join-Path $env:TEMP 'kar_race_test' }
 if (-not (Test-Path $Profile)) { Write-Output "profile $Profile not found: not starting"; exit 2 }
-$exe = Join-Path $root 'build\kar458752\kar.exe'
+$exe = if ($Exe) { $Exe } else { Join-Path $root 'build\kar458752\kar.exe' }
 if (Get-Process | Where-Object { $_.ProcessName -match 'WardogsClient|^kar$' }) {
     Write-Output 'another game or kar.exe is running: not starting'
     exit 2
