@@ -93,26 +93,23 @@ static void present_main(void *arg) {
         // Frame generation (vk_fg.cpp): the interpolated picture goes out as soon as this picture arrived, the real
         // one half the mean interval between the game's pictures later (fg_due), so the two alternate evenly. The game
         // gives no display time here (j.at is 0 without back-edge pacing), hence the own interval estimate.
-        uint64_t fg_due = 0;
+        // vk_fg_interpolate copies the game's picture first (the crop shown), so with an interpolated picture the game is
+        // released (busy 0) as soon as that copy is submitted, and both pictures are shown from frame generation's own
+        // images: the game's submissions no longer wait for the interpolation, its blit and flip (that wait, several ms
+        // a frame, held up the game thread and with it the audio).
+        uint64_t fg_due = 0, q0 = kern_now_ns(), q1, q2;
+        VkImage mid = VK_NULL_HANDLE;
+        VkFormat ff = VK_FORMAT_UNDEFINED;
         if (vk_fg_on()) {
             uint64_t now = kern_now_ns();
             if (fg_prev && now - fg_prev < 100000000ull) fg_iv = fg_iv ? (fg_iv * 7 + (now - fg_prev)) / 8 : now - fg_prev;
             fg_prev = now;
-            VkFormat ff = VK_FORMAT_UNDEFINED;
-            VkImage mid = vk_fg_interpolate(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, j.mv_slot, &ff);
-            if (mid) {
-                vk_present_blit(mid, VK_IMAGE_LAYOUT_GENERAL, ff, j.has_crop ? j.crop[2] : j.w,
-                                j.has_crop ? j.crop[3] : j.h, NULL);
-                vk_present_flip();
-                fg_shown++;
-                if (fg_iv) fg_due = kern_now_ns() + fg_iv / 2;
-            }
+            mid = vk_fg_interpolate(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, j.mv_slot, &ff);
         }
-        uint64_t q0 = kern_now_ns();
-        vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
-        uint64_t q1 = kern_now_ns();
-        uint64_t f = vk_sync_submit(NULL, 0, 0); // no guest reports; this value only covers the blit
-        uint64_t q2 = kern_now_ns();
+        if (!mid) vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
+        q1 = kern_now_ns();
+        uint64_t f = vk_sync_submit(NULL, 0, 0); // no guest reports; this value only covers the blit (or the copy)
+        q2 = kern_now_ns();
         if (j.value && f != j.value)
             rt_fatal("vk: the present of frame %llu signalled %llu, queued as %llu", (unsigned long long)j.frame,
                      (unsigned long long)f, (unsigned long long)j.value);
@@ -120,9 +117,28 @@ static void present_main(void *arg) {
         busy = 0;
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
+        if (mid) {
+            int cw = j.has_crop ? j.crop[2] : j.w, ch = j.has_crop ? j.crop[3] : j.h;
+            vk_present_blit(mid, VK_IMAGE_LAYOUT_GENERAL, ff, cw, ch, NULL);
+            vk_present_flip();
+            fg_shown++;
+            if (fg_iv) fg_due = kern_now_ns() + fg_iv / 2;
+            VkFormat cf = VK_FORMAT_UNDEFINED;
+            VkImage real = vk_fg_current(&cf);
+            vk_present_blit(real, VK_IMAGE_LAYOUT_GENERAL, cf, cw, ch, NULL);
+        }
         uint64_t t0 = kern_now_ns();
         if (present_hold()) wait_until(j.at);
-        if (fg_due) wait_until(fg_due);
+        {   // KAR_FG_PACE=0 (diagnostic): the real picture right after the interpolated one, no hold; 2: hold by sleeping
+            // only (no yield loop at the end)
+            static int pace = -1;
+            if (pace < 0) pace = getenv("KAR_FG_PACE") ? atoi(getenv("KAR_FG_PACE")) : 1;
+            if (fg_due && pace == 1) wait_until(fg_due);
+            else if (fg_due && pace == 2) {
+                uint64_t now = kern_now_ns();
+                if (fg_due > now) plat_wait_ns(fg_due - now);
+            }
+        }
         uint64_t t1 = kern_now_ns();
         vk_present_flip();
         if (vk_fg_on()) {   // every 5 s: the pictures shown (real and interpolated) and the real ones, per second

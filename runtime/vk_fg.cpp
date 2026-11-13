@@ -581,6 +581,11 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
     return G.out.image;
 }
 
+extern "C" VkImage vk_fg_current(VkFormat *fmt) {
+    *fmt = G.fmt;
+    return G.cur.image;
+}
+
 extern "C" void vk_fg_release(void) {
     VkCtx *c = vk_ctx();
     if (!c) return;
@@ -601,4 +606,8 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
     return VK_NULL_HANDLE;
 }
 extern "C" void vk_fg_release(void) {}
+extern "C" VkImage vk_fg_current(VkFormat *fmt) {
+    *fmt = VK_FORMAT_UNDEFINED;
+    return VK_NULL_HANDLE;
+}
 #endif

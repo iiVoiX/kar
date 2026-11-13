@@ -155,6 +155,9 @@ int vk_fg_mv_get(int slot, VkFgMv *out);
 // mv_slot: vk_fg_mv_latest() when the game presented this picture (0: no motion vectors, zero ones are used)
 VkImage vk_fg_interpolate(VkImage src, VkFormat fmt, int w, int h, const int crop[4], int mv_slot, VkFormat *out_fmt);
 void vk_fg_release(void);   // before the device goes away
+// frame generation's copy of the newest real picture (the crop shown, GENERAL), after a vk_fg_interpolate that
+// returned an interpolated one
+VkImage vk_fg_current(VkFormat *fmt);
 // Colour adjustment on the present (vk_color.c): with TOTK_COLOR_* away from their defaults, records a pass that writes
 // src's crop rectangle {x, y, w, h}, adjusted, into an RGBA16F image of that size in GENERAL and returns it (the caller
 // scales that one instead, crop {0, 0, w, h}); VK_NULL_HANDLE = nothing recorded. src is in GENERAL, fmt its format.
