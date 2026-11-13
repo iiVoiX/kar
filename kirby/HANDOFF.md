@@ -741,3 +741,6 @@ same fps. Plan: default prebuild off for kar* (or keep fewer), then lazy heap co
   Test with: build/profile-kar-fresh (delete save/, save-backup/, cache/), kirby/scripts/fresh_race.txt,
   TOTK_FPS_LIMIT=60, race from ~3600. toRace.txt no longer reaches a race. Ultrawide figure/machine select broken
   (user picture): 3D figures clipped in their frames.
+- NEXT (FG B1b): interpolated picture ~= plain blend (KAR_FG_DUMP). Run with KAR_FG_DEBUG=1 + KAR_FG_DUMP=4600
+  (fresh_race, limit 60, WardogsClient closed) and read the SDK debug view: optical flow empty or scene change every
+  frame? Then fix that or write own OF -> motion vector compute pass.
