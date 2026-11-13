@@ -113,7 +113,16 @@ void perf_count(int kind) {
 // histogram increment, the compare against the worst list, a memset of the wait array. No allocation.
 #define FT_BINS 1024              // 0.25 ms bins up to 256 ms; slower frames land in the last bin
 #define FT_WORST 5
-#define FT_PERIOD_NS 60000000000ull
+// TOTK_FT_PERIOD=<s>: another summary period (e.g. 5 to cut a race out of a scripted run); default 60 s.
+static uint64_t ft_period_ns(void) {
+    static uint64_t p;
+    if (!p) {
+        const char *e = getenv("TOTK_FT_PERIOD");
+        int s = e ? atoi(e) : 0;
+        p = (s > 0 && s <= 3600 ? (uint64_t)s : 60) * 1000000000ull;
+    }
+    return p;
+}
 typedef struct { uint64_t frame, ns, wait[PERF_N], replay; } FtWorst;
 static struct {
     uint64_t t0, frames, sum, over25, over50, over100;
@@ -178,8 +187,8 @@ static uint64_t ft_frame(uint64_t frame, uint64_t now, uint64_t d) {
         memcpy(ft.worst[i].wait, frame_ns, sizeof frame_ns);
         ft.worst[i].replay = (uint64_t)rep;
     }
-    if (now - summary_t0 >= FT_PERIOD_NS) {
-        ft_report(now, "60 s");
+    if (now - summary_t0 >= ft_period_ns()) {
+        ft_report(now, "period");
         summary_t0 = now;
     }
     return (uint64_t)rep;
