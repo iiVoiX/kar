@@ -289,6 +289,16 @@ WEAK int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint
     return 0;
 }
 
+// KAR_SYNC_PROF=1 (16.4): per timeline value, when it was issued, when the completion thread saw the GPU reach it and
+// when it was published as done (after its callbacks and vk_mem_collect); averaged every 300 values.
+static uint64_t sp_issue[256], sp_gpu[256], sp_start[256];
+static int sp_on = -1;
+static int sync_prof(void) {
+    if (sp_on < 0) sp_on = getenv("KAR_SYNC_PROF") && *getenv("KAR_SYNC_PROF") == '1';
+    return sp_on;
+}
+void vk_sync_prof_issued(uint64_t v) { if (sync_prof()) sp_issue[v & 255] = plat_now_ns(); }
+
 static void completion_main(void *arg) {
     VkCtx *c = arg;
     plat_mutex_lock(&st_lock);
@@ -308,6 +318,10 @@ static void completion_main(void *arg) {
                 rt_fatal("vk: vkWaitSemaphores failed (%d; device lost?)", (int)r);
             }
             vkGetSemaphoreCounterValue(c->device, c->timeline, &reached);
+            if (sync_prof()) {
+                uint64_t now = plat_now_ns();
+                for (uint64_t v = done + 1; v <= reached && v <= done + 256; v++) sp_gpu[v & 255] = now;
+            }
             plat_mutex_lock(&st_lock);
             if (reached > issued) reached = issued;
         }
@@ -322,6 +336,21 @@ static void completion_main(void *arg) {
             plat_mutex_unlock(&st_lock);
             vk_mem_collect();
             plat_mutex_lock(&st_lock);
+            if (sync_prof()) {
+                static uint64_t n, gpu_ns, pub_ns, cb_max, rec_ns;
+                uint64_t now = plat_now_ns();
+                for (uint64_t v = done + 1; v <= reached && v <= done + 256; v++) {
+                    if (sp_issue[v & 255] && sp_gpu[v & 255] >= sp_issue[v & 255]) {
+                        gpu_ns += sp_gpu[v & 255] - sp_issue[v & 255], pub_ns += now - sp_gpu[v & 255];
+                        if (sp_start[v & 255] && sp_start[v & 255] <= sp_issue[v & 255]) rec_ns += sp_issue[v & 255] - sp_start[v & 255];
+                        if (now - sp_gpu[v & 255] > cb_max) cb_max = now - sp_gpu[v & 255];
+                        if (++n % 300 == 0)
+                            rt_log("sync prof: 300 values: recording %.2f ms, issued to GPU reached %.2f ms, GPU reached to "
+                                   "published %.2f ms (max %.2f)", rec_ns / 3e8, gpu_ns / 3e8, pub_ns / 3e8, cb_max / 1e6),
+                                gpu_ns = pub_ns = cb_max = rec_ns = 0;
+                    }
+                }
+            }
             __atomic_store_n(&done, reached, __ATOMIC_RELEASE);
             plat_cond_broadcast(&cv_done);
         }
@@ -477,6 +506,7 @@ uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t su
     plat_mutex_lock(&sub_lock);
     vk_mem_dirty_submit();   // TOTK_TRACE=perf: what a mirror would upload before this submit
     uint64_t fence = __atomic_load_n(&issued, __ATOMIC_ACQUIRE) + 1;
+    if (sync_prof()) sp_start[fence & 255] = plat_now_ns();
     cur_fence = fence;
     // A texture alias can retire an image or view used earlier in this recording. Collection must wait for this
     // submission, including every split part, before the first command can reference those objects.
@@ -516,6 +546,7 @@ uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t su
         rt_fatal("vk: vkQueueSubmit2 of value %llu failed (%d)", (unsigned long long)fence, (int)r);
     }
     s->fence = recorded ? fence : 0;
+    vk_sync_prof_issued(fence);
     plat_mutex_lock(&st_lock);
     __atomic_store_n(&issued, fence, __ATOMIC_RELEASE);
     plat_cond_broadcast(&cv_work);

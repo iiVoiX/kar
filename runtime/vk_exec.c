@@ -918,10 +918,16 @@ static void maybe_split(VkExec *ex) {
         rt_log("vk: replay command buffer split every %d draws between passes, parts of at least %d us%s", split_n,
                us > 0 ? us : 0, split_n ? "" : " (off)");
     }
-    if (!split_n || ex->in_pass || split_draws < split_n) return;
+    // KAR_SPLIT_PASS=1 (16.6b): also inside a render pass, which is ended here and begun again by the next draw (its
+    // attachments load what the part stored). A frame's scene pass is long; split only between passes, the GPU got it
+    // at the end of the replay and the frame waited for all of its GPU time.
+    static int in_pass_ok = -1;
+    if (in_pass_ok < 0) in_pass_ok = getenv("KAR_SPLIT_PASS") && *getenv("KAR_SPLIT_PASS") == '1';
+    if (!split_n || (ex->in_pass && !in_pass_ok) || split_draws < split_n) return;
     if (split_ns && kern_now_ns() - part_t0 < split_ns) return;   // split_draws stays: the next draw asks again
     split_draws = 0;
     if (ex->recorded == part_start) return;
+    if (ex->in_pass) vk_exec_pass_end(ex);
     ex->cb = vk_sync_split();
     part_start = ex->recorded;
     part_t0 = kern_now_ns();
@@ -985,7 +991,7 @@ static uint64_t rp_ns[OP_COUNT_ + 2];   // + mirror/usnap begin, mirror/usnap en
 static uint32_t rp_n[OP_COUNT_ + 2];
 extern uint64_t vk_rp_sub[4], vk_rp_sh[5], gfx_rp[10], gfx_pf_why[3];   // vk_exec_draw.c: op_dispatch split into shader, pipeline, binding, the rest
 static void walk(VkExec *ex, const op_hdr *h, int depth) {
-    if (rp_on < 0) rp_on = getenv("KAR_REPLAY_PROF") && *getenv("KAR_REPLAY_PROF") == '1';
+    if (rp_on < 0) { rp_on = getenv("KAR_REPLAY_PROF") && *getenv("KAR_REPLAY_PROF") == '1'; extern int vk_rp_kind_on; vk_rp_kind_on = rp_on; }
     for (;;) {
         uint64_t rp_t0 = rp_on ? plat_now_ns() : 0;
         unsigned rp_op = h->op < OP_COUNT_ ? h->op : 0;
@@ -1097,6 +1103,8 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     if (rp_on > 0) memset(rp_ns, 0, sizeof rp_ns), memset(rp_n, 0, sizeof rp_n), memset(vk_rp_sub, 0, sizeof vk_rp_sub), memset(vk_rp_sh, 0, sizeof vk_rp_sh), memset(gfx_rp, 0, sizeof gfx_rp), memset(gfx_pf_why, 0, sizeof gfx_pf_why);
     if (memory) vk_mem_mirror_begin(), vk_usnap_begin(handles, n, fence);
     if (rp_on > 0) rp_ns[OP_COUNT_] = plat_now_ns() - rp_start;
+    extern void vk_dts_mark(VkExec *ex, int tag);
+    vk_dts_mark(ex, 10);
     if (work) work(ex, context);
     else {
         for (int i = 0; i < n; i++) {
@@ -1105,10 +1113,12 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
         }
     }
     vk_exec_pass_end(ex);
+    vk_dts_mark(ex, 11);
     x_here = 0;
     if (ex->recorded) vk_exec_barrier(ex);   // later submissions see this one's writes
     uint64_t rp_e0 = rp_on > 0 ? plat_now_ns() : 0;
     if (memory) ex->recorded += vk_mem_mirror_end(ex->cb, fence), vk_usnap_end(fence);   // VRAM mirror bytes the GPU wrote go back to guest memory
+    vk_dts_mark(ex, 12);
     if (rp_on > 0) {
         rp_ns[OP_COUNT_ + 1] = plat_now_ns() - rp_e0;
         uint64_t total = plat_now_ns() - rp_start;
@@ -1138,6 +1148,18 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
                               best < OP_COUNT_ ? win_opn[best] / nf : 1.0);
                 win_op[best] = 0;
             }
+            extern uint64_t vk_rp_kind[7], vk_rp_kind_n[7];
+            rt_log("replay prof: descriptor build per frame (ms, bindings): support %.2f (%.0f), UBO %.2f (%.0f), SSBO %.2f "
+                   "(%.0f), TEX %.2f (%.0f), IMG %.2f (%.0f), bindless arrays %.2f (%.0f), other arrays %.2f (%.0f)",
+                   vk_rp_kind[0] / 1e6 / nf, vk_rp_kind_n[0] / nf,
+                   vk_rp_kind[1] / 1e6 / nf, vk_rp_kind_n[1] / nf, vk_rp_kind[2] / 1e6 / nf, vk_rp_kind_n[2] / nf,
+                   vk_rp_kind[3] / 1e6 / nf, vk_rp_kind_n[3] / nf, vk_rp_kind[4] / 1e6 / nf, vk_rp_kind_n[4] / nf,
+                   vk_rp_kind[5] / 1e6 / nf, vk_rp_kind_n[5] / nf, vk_rp_kind[6] / 1e6 / nf, vk_rp_kind_n[6] / nf);
+            memset(vk_rp_kind, 0, sizeof vk_rp_kind), memset(vk_rp_kind_n, 0, sizeof vk_rp_kind_n);
+            extern uint64_t vk_rp_bl[4];
+            rt_log("replay prof: bindless residency per frame: block read %.2f ms (%.0f handles), hash %.2f ms, memo hits %.0f",
+                   vk_rp_bl[0] / 1e6 / nf, vk_rp_bl[3] / nf, vk_rp_bl[1] / 1e6 / nf, vk_rp_bl[2] / nf);
+            memset(vk_rp_bl, 0, sizeof vk_rp_bl);
             static int64_t dg0;
             int64_t dg = __atomic_load_n(&vk_destroy_gen, __ATOMIC_RELAXED);
             uint64_t ph, pm, pe;

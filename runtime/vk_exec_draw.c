@@ -2651,7 +2651,11 @@ static int getenv_diag_c8(void) {   // KAR_DIAG_C8 logs every element: keep the 
     return on;
 }
 
-uint64_t vk_rp_bind_ns;   // KAR_REPLAY_PROF: time in bind_resources (vk_exec.c window line)
+uint64_t vk_rp_bind_ns;
+int vk_rp_kind_on;                          // KAR_REPLAY_PROF: vk_exec.c turns it on
+uint64_t vk_rp_bl[4];                       // bindless_resident: ubo_block ns, hash ns, memo hits, handles read
+uint64_t vk_rp_kind[7], vk_rp_kind_n[7];    // descriptor build ns and bindings per kind (support, UBO, SSBO, TEX, IMG,
+                                            // bindless array, other material array)   // KAR_REPLAY_PROF: time in bind_resources (vk_exec.c window line)
 static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info);
 
 // KAR_DS_PERSIST=1 (16.5, with KAR_DYN_UBO=1): descriptor sets of allocated (not pushed) sets kept across submissions,
@@ -2743,7 +2747,24 @@ static VkSampler bindless_resident(VkExec *ex, int st, const GfxShaderRes *r) {
     uint64_t sh = r->bl_samp ? ex->samp[st][r->samp_slot] & ~0xfffffull : 0;
     VkSampler first = VK_NULL_HANDLE;
     if (!n || kind > 2 || !arr_sched_allows(r->cbuf_slot)) return first;
+    uint64_t bt0 = vk_rp_kind_on ? plat_now_ns() : 0;
     ubo_block(ex, st, r->cbuf_slot, 0, n, aw);
+    uint64_t bt1 = vk_rp_kind_on ? plat_now_ns() : 0;
+    if (vk_rp_kind_on) vk_rp_bl[0] += bt1 - bt0, vk_rp_bl[3] += n;
+    // 16.6a: the same handle block already went through this loop in this submission (the epoch): nothing to resolve
+    // again. Keyed by a hash of the block with what else decides the loop (kind, sampler bits, resource type).
+    static struct { uint64_t key; uint32_t ep; VkSampler first; } memo[1024];
+    static int memo_on = -1;
+    if (memo_on < 0) memo_on = !(getenv("KAR_BL_MEMO") && *getenv("KAR_BL_MEMO") == '0');
+    uint64_t key = 0x9E3779B97F4A7C15ull ^ ((uint64_t)n << 40) ^ ((uint64_t)kind << 56) ^ sh ^ ((uint64_t)r->type << 20) ^
+                   ((uint64_t)r->bl_samp << 62);
+    for (uint32_t k = 0; k < n; k++) key = (key ^ (aw[k] & 0xffffffffull)) * 0xff51afd7ed558ccdull, key ^= key >> 31;
+    typeof(memo[0]) *me = &memo[(key ^ (key >> 20)) & 1023];
+    if (vk_rp_kind_on) vk_rp_bl[1] += plat_now_ns() - bt1;
+    if (memo_on && me->key == key && me->ep == ep) {
+        if (vk_rp_kind_on) vk_rp_bl[2]++;
+        return me->first;
+    }
     int put = 0;
     vk_texture_lock();
     for (uint32_t k = 0; k < n; k++) {
@@ -2770,6 +2791,7 @@ static VkSampler bindless_resident(VkExec *ex, int st, const GfxShaderRes *r) {
     }
     vk_texture_unlock();
     if (put) vk_bindless_flush();
+    me->key = key, me->ep = ep, me->first = first;
     return first;
 }
 
@@ -2826,6 +2848,7 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
     }
     uint32_t nd = 0;
     uint32_t dyn[2][32], ndyn[2] = {0, 0};   // dynamic uniform buffer offsets per set, in binding order (16.5)
+    uint64_t kt0 = vk_rp_kind_on ? plat_now_ns() : 0;
     for (uint32_t i = 0; i < info->n_bindings; i++) {
         const VkPipeBinding *b = &info->bindings[i];
         const GfxShaderRes *r = b->res;
@@ -2872,9 +2895,17 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             } else if (r->bindless) {   // read through the global set: one unused element
                 kind = 1;
                 VkSampler bs = bindless_resident(ex, st, r);
-                vk_texture_lock();
-                tex_info(ex, r, 0, 0, 0, &o[0].image);
-                vk_texture_unlock();
+                // The unused element: the dummy texture of the resource type, the same every time (16.6a; the dummy
+                // images and samplers live until shutdown), so looked up once per type.
+                static struct { uint16_t type; uint8_t valid; VkDescriptorImageInfo ii; } dummy[64];
+                typeof(dummy[0]) *dm = &dummy[(r->type ^ (r->type >> 6)) & 63];
+                if (!dm->valid || dm->type != r->type) {
+                    vk_texture_lock();
+                    tex_info(ex, r, 0, 0, 0, &dm->ii);
+                    vk_texture_unlock();
+                    dm->type = r->type, dm->valid = 1;
+                }
+                o[0].image = dm->ii;
                 if (r->bl_samp && bs) o[0].image.sampler = bs;   // a SAMPLER binding: only the sampler counts
                 o[0].w[2] = (uint32_t)o[0].image.imageLayout;
             } else {
@@ -2978,6 +3009,13 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             else w[i].pTexelBufferView = &bv[nd];
         }
         nd += cnt;
+        if (vk_rp_kind_on) {   // KAR_REPLAY_PROF: build time per binding kind (support, UBO, SSBO, TEX, IMG)
+            uint64_t kt1 = plat_now_ns();
+            int k = b->kind == VK_PIPE_SUPPORT ? 0 : b->kind == GFX_RES_UBO ? 1 : b->kind == GFX_RES_SSBO ? 2 :
+                    b->kind == GFX_RES_TEX ? (r && r->bindless ? 5 : r && r->arr_ubo ? 6 : 3) : 4;
+            vk_rp_kind[k] += kt1 - kt0, vk_rp_kind_n[k]++;
+            kt0 = kt1;
+        }
     }
     // Set 1's first descriptor is noted when the loop reaches its first binding. A set 1 without bindings (a fragment
     // stage with no resources) starts at the end instead, so set 0's byte count (d0[1] - d0[0]) covers its descriptors.
@@ -3789,14 +3827,21 @@ static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
         dts_cb = ex->cb;
         dts_n++;
     }
-    if (dts_state == 2 && fr >= dts_frame + 4) {
+    if (dts_state == 2 && fr >= dts_frame + 30) {
         dts_state = 3;
-        static uint64_t ts[DTS_N];
-        if (vkGetQueryPoolResults(c->device, dts_pool, 0, (uint32_t)dts_n, sizeof ts, ts, 8,
-                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS) {
-            rt_log("draw ts: results not available");
+        static uint64_t ts[DTS_N], tsa[2 * DTS_N];
+        // No wait: a mark may sit in a command buffer that was never submitted (an empty submission); such a query
+        // stays unavailable and is dropped.
+        VkResult qr = vkGetQueryPoolResults(c->device, dts_pool, 0, (uint32_t)dts_n, sizeof tsa, tsa, 16,
+                                            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (qr != VK_SUCCESS && qr != VK_NOT_READY) {
+            rt_log("draw ts: results not available (%d)", (int)qr);
             return;
         }
+        int m = 0;
+        for (int i = 0; i < dts_n; i++)
+            if (tsa[2 * i + 1]) ts[m] = tsa[2 * i], dts_info[m] = dts_info[i], m++;
+        dts_n = m;
         double per = c->props.limits.timestampPeriod / 1e6, total = 0;   // ms per tick
         typedef struct { uint64_t a, b; int kind; double ms; int n; uint64_t work; } Agg;
         static Agg agg[DTS_N];
@@ -3809,6 +3854,18 @@ static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
                 first_ms += ms, nfirst++;
                 if (ms > first_max) first_max = ms;
             }
+        {   // the timeline: every mark and command-buffer start, ms after the first timestamp
+            char t[2048];
+            int o = 0, nd = 0;
+            for (int i = 0; i < dts_n && o < (int)sizeof t - 64; i++) {
+                if (dts_info[i].kind < 10 && !dts_info[i].first) { nd++; continue; }
+                o += snprintf(t + o, sizeof t - (size_t)o, " [%d draws] %s%.2f", nd,
+                              dts_info[i].kind == 10 ? "S" : dts_info[i].kind == 11 ? "C" : dts_info[i].kind == 12 ? "E" : "cb",
+                              ts[i] >= ts[0] ? (double)(ts[i] - ts[0]) * c->props.limits.timestampPeriod / 1e6 : -1.0);
+                nd = dts_info[i].kind < 10;
+            }
+            rt_log("draw ts: timeline (S submission start, C commands done, E write-back done, cb new command buffer):%s", t);
+        }
         rt_log("draw ts: frame %lld: %d command buffers; their first draws came %.2f ms after the previous draw in all "
                "(max %.2f ms; GPU idle, submission gaps, barriers and copies at their start); first to last %.2f ms",
                dts_frame, nfirst + 1, first_ms, first_max,
@@ -3834,6 +3891,17 @@ static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
             agg[best] = agg[--na];
         }
     }
+}
+
+// KAR_DRAW_TS: a mark in the frame's timeline (vk_exec.c record_impl): 10 submission start (after the mirror
+// prologue's syncs), 11 commands done, 12 after the mirror write-back. Bottom of pipe, like the draws.
+void vk_dts_mark(VkExec *ex, int tag) {
+    if (dts_state != 1 || dts_n >= DTS_N || !ex->cb) return;
+    vkCmdWriteTimestamp(ex->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, dts_pool, (uint32_t)dts_n);
+    dts_info[dts_n].a = dts_info[dts_n].b = dts_info[dts_n].work = 0, dts_info[dts_n].kind = tag;
+    dts_info[dts_n].first = ex->cb != dts_cb;
+    dts_cb = ex->cb;
+    dts_n++;
 }
 
 static void note_work(const VkExec *ex, int kind, uint64_t work) {
