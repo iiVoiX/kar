@@ -1343,6 +1343,25 @@ bad:
 // with NonUniform decorations, so the array is no longer used and its binding keeps one element. Arrays whose
 // sampler comes from a separate-sampler slot, other image kinds and modules of another shape stay as they are.
 // Returns the number of arrays moved.
+// KAR_BL_WHY=1: counts, per material array of every shader, why bindless_patch left it in place (diagnostic).
+static void bl_why(const GfxShader *s, int bail, const uint32_t *img_dim) {
+    static int on = -1, why[8], nsh;
+    static const char *name[8] = {"moved", "sampler-slot", "separate", "no-cbuf", "image-kind", "cbuf-shape", "module", "?"};
+    if (on < 0) on = getenv("KAR_BL_WHY") && *getenv("KAR_BL_WHY") == '1';
+    if (!on) return;
+    for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
+        const GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+        if (!r->arr_ubo) continue;
+        int c = r->bindless ? 0 : r->samp_slot >= 0 ? 1 : r->separate ? 2 : r->cbuf_slot <= 0 ? 3 : bail ? bail : 7;
+        if (c == 7 && img_dim) c = img_dim[r->binding & 63] ? 5 : 4;
+        why[c]++;
+    }
+    if (++nsh % 200 == 0)
+        rt_log("gfx_shader: bindless why (%d shaders): %s %d, %s %d, %s %d, %s %d, %s %d, %s %d, %s %d, %s %d", nsh,
+               name[0], why[0], name[1], why[1], name[2], why[2], name[3], why[3], name[4], why[4], name[5], why[5],
+               name[6], why[6], name[7], why[7]);
+}
+
 static int bindless_patch(GfxShader *s) {
     enum { OP_EXTENSION_ = 10, OP_CAPABILITY_ = 17, OP_TYPE_INT_ = 21, OP_TYPE_FLOAT_ = 22, OP_TYPE_VECTOR_ = 23,
            OP_TYPE_IMAGE_ = 25, OP_TYPE_SAMPLER_ = 26, OP_TYPE_SAMPLED_IMAGE_ = 27, OP_TYPE_ARRAY_ = 28,
@@ -1356,9 +1375,9 @@ static int bindless_patch(GfxShader *s) {
     int want = 0;
     for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
         const GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
-        want |= r->arr_ubo && r->samp_slot < 0 && !r->separate && r->cbuf_slot > 0;
+        want |= r->arr_ubo && (r->samp_slot < 0 || (!r->samp_tbl && r->samp_slot < 128)) && !r->separate && r->cbuf_slot > 0;
     }
-    if (!want) return 0;
+    if (!want) { bl_why(s, 0, NULL); return 0; }
     const uint32_t *w = s->spirv;
     uint64_t n = s->words;
     uint32_t bound = w[3];
@@ -1368,12 +1387,13 @@ static int bindless_patch(GfxShader *s) {
              *chain_var = calloc(bound, 4), *chain_idx = calloc(bound, 4), *load_base = calloc(bound, 4),
              *kind_of = calloc(bound, 4), *cbvar_of = calloc(bound, 4), *gvar = calloc(bound, 4), *gptr = calloc(bound, 4),
              *rtype = calloc(bound, 4);
-    uint8_t *img_ok = calloc(bound, 1);
+    uint8_t *img_ok = calloc(bound, 1), *samp_of = calloc(bound, 1), *load_samp = calloc(bound, 1);
     uint32_t (*img)[3] = calloc(bound, sizeof *img);   // dim, depth, arrayed
     if (!binding || !ptr_to || !ptr_sc || !arr_elem || !simg_img || !vtype || !struct_m0 || !vec_of || !chain_var ||
-        !chain_idx || !load_base || !kind_of || !cbvar_of || !gvar || !gptr || !img_ok || !img || !rtype)
+        !chain_idx || !load_base || !kind_of || !cbvar_of || !gvar || !gptr || !img_ok || !img || !rtype || !samp_of || !load_samp)
         rt_fatal("gfx_shader: out of memory patching a shader");
-    int moved = 0, nloads = 0;
+    int moved = 0, nloads = 0, bail = 6;
+    uint32_t img_dim[64] = {0};   // per binding (KAR_BL_WHY): 1 when the image kind qualified
     uint32_t t_uint = 0, t_int = 0, t_float = 0, t_sampler = 0, nb = bound, nimg_types = 0, img_types[8];
     uint64_t first_func = 0, first_decor = 0, last_cap = 0;
     for (uint64_t i = 5; i < n;) {   // pass 1: types, decorations, variables
@@ -1411,9 +1431,11 @@ static int bindless_patch(GfxShader *s) {
         if (!it || it >= bound || !img_ok[it]) continue;
         uint32_t kind = img[it][0] == 1 ? (img[it][2] ? 2 : 1) : img[it][0] == 3 && !img[it][2] ? 3 : 0;   // 2D, 2D array, cube
         if (!kind) continue;
+        img_dim[(binding[v] - 1) & 63] = 1;
         for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
             GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
-            if (!r->arr_ubo || r->samp_slot >= 0 || r->separate || r->binding != binding[v] - 1 || r->cbuf_slot <= 0) continue;
+            if (!r->arr_ubo || r->separate || r->binding != binding[v] - 1 || r->cbuf_slot <= 0) continue;
+            if (r->samp_slot >= 0 && (r->samp_tbl || r->samp_slot >= 128)) continue;
             uint32_t cb = 0;   // the variable of constant buffer cbuf_slot
             for (int u = 0; u < s->nres[GFX_RES_UBO] && !cb; u++)
                 if (s->res[GFX_RES_UBO][u].slot == r->cbuf_slot)
@@ -1430,7 +1452,7 @@ static int bindless_patch(GfxShader *s) {
                 if (nimg_types == 8) break;
                 img_types[nimg_types++] = it, gvar[it] = nb, nb += 3, gptr[it] = nb++;   // array, its pointer, variable; element pointer
             }
-            kind_of[v] = kind, cbvar_of[v] = cb;
+            kind_of[v] = kind, cbvar_of[v] = cb, samp_of[v] = r->samp_slot >= 0;
             break;
         }
     }
@@ -1439,16 +1461,17 @@ static int bindless_patch(GfxShader *s) {
         if (op == OP_ACCESS_CHAIN && len == 5 && w[i + 3] < bound && kind_of[w[i + 3]] && w[i + 2] < bound)
             chain_var[w[i + 2]] = w[i + 3], chain_idx[w[i + 2]] = w[i + 4];
         else if (op == OP_LOAD_ && len >= 4 && w[i + 3] < bound && chain_var[w[i + 3]] && w[i + 2] < bound)
-            load_base[w[i + 2]] = nb, nb += SEQ, nloads++;
+            load_base[w[i + 2]] = nb, nb += SEQ, nloads++, load_samp[w[i + 2]] = samp_of[chain_var[w[i + 3]]];
         i += len;
     }
-    if (!nloads) goto out;
+    bail = 0;
+    if (!nloads) { bail = 6; goto out; }
     // Every chain into a moved array must feed a load rewritten here (any other use would keep the array in use).
     for (uint64_t i = first_func; i < n;) {
         uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
         if (op != OP_ACCESS_CHAIN)
             for (uint32_t a = 1; a < len; a++)
-                if (w[i + a] < bound && chain_var[w[i + a]] && !(op == OP_LOAD_ && a == 3)) goto out;
+                if (w[i + a] < bound && chain_var[w[i + a]] && !(op == OP_LOAD_ && a == 3)) { bail = 6; goto out; }
         i += len;
     }
     uint32_t *o = malloc((n + 96 + 24 * (uint64_t)nimg_types + (uint64_t)nloads * 80) * sizeof *o);
@@ -1467,7 +1490,9 @@ static int bindless_patch(GfxShader *s) {
             o[m++] = 4u << 16 | OP_DECOR, o[m++] = g_samp, o[m++] = DEC_BINDING, o[m++] = 3;
             for (uint32_t x = 0; x < bound; x++)
                 if (load_base[x]) {
-                    for (uint32_t d = 6; d <= 11; d++) o[m++] = 3u << 16 | OP_DECOR, o[m++] = load_base[x] + d, o[m++] = DEC_NONUNIFORM;
+                    for (uint32_t d = 6; d <= 11; d++)   // a sampler from the binding: no sid, chain or global load
+                        if (!load_samp[x] || d == 6 || d == 8 || d == 9)
+                            o[m++] = 3u << 16 | OP_DECOR, o[m++] = load_base[x] + d, o[m++] = DEC_NONUNIFORM;
                     o[m++] = 3u << 16 | OP_DECOR, o[m++] = x, o[m++] = DEC_NONUNIFORM;
                 }
         }
@@ -1484,6 +1509,8 @@ static int bindless_patch(GfxShader *s) {
             o[m++] = 4u << 16 | OP_TYPE_POINTER_, o[m++] = pa_samp, o[m++] = SC_UNIFORM_CONSTANT, o[m++] = a_samp;
             o[m++] = 4u << 16 | OP_TYPE_POINTER_, o[m++] = p_samp, o[m++] = SC_UNIFORM_CONSTANT, o[m++] = t_samp;
             o[m++] = 4u << 16 | OP_VAR, o[m++] = pa_samp, o[m++] = g_samp, o[m++] = SC_UNIFORM_CONSTANT;
+            for (uint32_t x = 0; x < bound; x++)   // an array with its sampler in a bound slot: now that one sampler
+                if (kind_of[x] && samp_of[x]) o[m++] = 4u << 16 | OP_VAR, o[m++] = p_samp, o[m++] = x, o[m++] = SC_UNIFORM_CONSTANT;
             for (uint32_t q = 0; q < nimg_types; q++) {
                 uint32_t it = img_types[q], a = gvar[it], pa = a + 1, v = a + 2;
                 o[m++] = 4u << 16 | OP_TYPE_ARRAY_, o[m++] = a, o[m++] = it, o[m++] = c_nimg;
@@ -1493,6 +1520,7 @@ static int bindless_patch(GfxShader *s) {
             }
         }
         if (op == OP_ACCESS_CHAIN && len == 5 && w[i + 2] < bound && chain_var[w[i + 2]]) { i += len; continue; }
+        if (op == OP_VAR && len >= 4 && w[i + 2] < bound && kind_of[w[i + 2]] && samp_of[w[i + 2]]) { i += len; continue; }
         if (op == OP_LOAD_ && len >= 4 && w[i + 2] < bound && load_base[w[i + 2]]) {
             uint32_t res = w[i + 2], st = w[i + 1], p = w[i + 3], v = chain_var[p], idx = chain_idx[p], b = load_base[res];
             uint32_t it = simg_img[arr_elem[ptr_to[vtype[v]]]], cb = cbvar_of[v];
@@ -1506,11 +1534,14 @@ static int bindless_patch(GfxShader *s) {
             o[m++] = 4u << 16 | OP_LOAD_, o[m++] = t_float, o[m++] = hf, o[m++] = pf;
             o[m++] = 4u << 16 | OP_BITCAST, o[m++] = t_uint, o[m++] = h, o[m++] = hf;
             o[m++] = 5u << 16 | OP_AND, o[m++] = t_uint, o[m++] = tid, o[m++] = h, o[m++] = c_mask;
-            o[m++] = 5u << 16 | OP_SHR, o[m++] = t_uint, o[m++] = sid, o[m++] = h, o[m++] = c_20;
+            if (!samp_of[v]) o[m++] = 5u << 16 | OP_SHR, o[m++] = t_uint, o[m++] = sid, o[m++] = h, o[m++] = c_20;
             o[m++] = 5u << 16 | OP_ACCESS_CHAIN, o[m++] = gptr[it], o[m++] = pi, o[m++] = gvar[it] + 2, o[m++] = tid;
             o[m++] = 4u << 16 | OP_LOAD_, o[m++] = it, o[m++] = im, o[m++] = pi;
-            o[m++] = 5u << 16 | OP_ACCESS_CHAIN, o[m++] = p_samp, o[m++] = ps, o[m++] = g_samp, o[m++] = sid;
-            o[m++] = 4u << 16 | OP_LOAD_, o[m++] = t_samp, o[m++] = sm, o[m++] = ps;
+            if (samp_of[v]) o[m++] = 4u << 16 | OP_LOAD_, o[m++] = t_samp, o[m++] = sm, o[m++] = v;
+            else {
+                o[m++] = 5u << 16 | OP_ACCESS_CHAIN, o[m++] = p_samp, o[m++] = ps, o[m++] = g_samp, o[m++] = sid;
+                o[m++] = 4u << 16 | OP_LOAD_, o[m++] = t_samp, o[m++] = sm, o[m++] = ps;
+            }
             o[m++] = 5u << 16 | OP_SAMPLED_IMAGE_, o[m++] = st, o[m++] = res, o[m++] = im, o[m++] = sm;
             i += len;
             continue;
@@ -1534,7 +1565,7 @@ static int bindless_patch(GfxShader *s) {
             for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
                 GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
                 if (r->arr_ubo && r->binding == binding[v] - 1) {
-                    r->bindless = (uint8_t)kind_of[v], r->bl_n = r->count ? r->count : 32, r->count = 1, moved++;
+                    r->bindless = (uint8_t)kind_of[v], r->bl_samp = samp_of[v], r->bl_n = r->count ? r->count : 32, r->count = 1, moved++;
                     break;
                 }
             }
@@ -1543,9 +1574,10 @@ static int bindless_patch(GfxShader *s) {
     static int told;
     if (told++ < 3) rt_log("gfx_shader: bindless: %d material arrays moved to the global set (%d loads)", moved, nloads);
 out:
+    bl_why(s, bail, img_dim);
     free(binding), free(ptr_to), free(ptr_sc), free(arr_elem), free(simg_img), free(vtype), free(struct_m0), free(vec_of);
     free(chain_var), free(chain_idx), free(load_base), free(kind_of), free(cbvar_of), free(gvar), free(gptr), free(img_ok);
-    free(img), free(rtype);
+    free(img), free(rtype), free(samp_of), free(load_samp);
     return moved;
 }
 

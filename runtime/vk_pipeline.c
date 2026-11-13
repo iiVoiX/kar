@@ -1727,6 +1727,7 @@ static VkDescriptorType descriptor_type(int kind, const GfxShaderRes *r) {
     case GFX_RES_TEX:
         if (buffer) return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
         if (r->pool_arr && !(r->type & 0xff)) return VK_DESCRIPTOR_TYPE_SAMPLER;   // a Direct sampler-pool array
+        if (r->bl_samp) return VK_DESCRIPTOR_TYPE_SAMPLER;   // bindless array: its sampler from the bound slot
         if (r->separate) LOG_ONCE("vk_pipeline: a separate texture handle: bound as SAMPLED_IMAGE");
         return r->separate ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     default: return buffer ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;

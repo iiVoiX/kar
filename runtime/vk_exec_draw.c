@@ -2660,8 +2660,11 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
 // Bindless material arrays (gfx_shader.c bindless_patch, 16.2): the shader reads element k's texture and sampler from
 // the global set by the handle at byte 8k of its constant buffer. Each handle the array holds is resolved through
 // tex_info once per submission (vk_texture_epoch: its lazy upload, storage check and barrier, as before), and the
-// global set is written only when the view, layout or sampler differs from what it holds.
-static void bindless_resident(VkExec *ex, int st, const GfxShaderRes *r) {
+// global set is written only when the view, layout or sampler differs from what it holds. An array whose sampler sits
+// in a bound slot (GfxShaderRes.bl_samp) reads that one sampler from its own binding: its handles are completed with
+// the slot's sampler bits as before (the sampler can depend on the texture: point sampling of depth), and the sampler
+// of the first element with a handle is returned for that binding.
+static VkSampler bindless_resident(VkExec *ex, int st, const GfxShaderRes *r) {
     enum { NIMG = 65792, NSAMP = 4096 };
     static uint64_t aw[1024];
     static uint32_t img_ep[3][NIMG], samp_ep[NSAMP];
@@ -2669,13 +2672,21 @@ static void bindless_resident(VkExec *ex, int st, const GfxShaderRes *r) {
     static VkImageLayout img_l[3][NIMG];
     static VkSampler samp_v[NSAMP];
     uint32_t n = r->bl_n <= 1024 ? r->bl_n : 1024, ep = vk_texture_epoch() + 1, kind = r->bindless - 1u;
-    if (!n || kind > 2 || !arr_sched_allows(r->cbuf_slot)) return;
+    uint64_t sh = r->bl_samp ? ex->samp[st][r->samp_slot] & ~0xfffffull : 0;
+    VkSampler first = VK_NULL_HANDLE;
+    if (!n || kind > 2 || !arr_sched_allows(r->cbuf_slot)) return first;
     ubo_block(ex, st, r->cbuf_slot, 0, n, aw);
     int put = 0;
     vk_texture_lock();
     for (uint32_t k = 0; k < n; k++) {
         uint64_t h = aw[k] & 0xffffffffull;
+        if (h && sh) h = (h & 0xfffff) | sh;
         uint32_t tid = (uint32_t)(h & 0xfffff), sid = (uint32_t)(h >> 20);
+        if (r->bl_samp && h && !first) {   // the binding's sampler: always resolved (memoised by tex_info)
+            VkDescriptorImageInfo fi;
+            tex_info(ex, r, h, 0, 0, &fi);
+            first = fi.sampler;
+        }
         if (!h || (img_ep[kind][tid] == ep && samp_ep[sid] == ep)) continue;
         VkDescriptorImageInfo ii;
         tex_info(ex, r, h, 0, 0, &ii);
@@ -2691,6 +2702,7 @@ static void bindless_resident(VkExec *ex, int st, const GfxShaderRes *r) {
     }
     vk_texture_unlock();
     if (put) vk_bindless_flush();
+    return first;
 }
 
 static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
@@ -2768,10 +2780,11 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
                 vk_texture_unlock();
             } else if (r->bindless) {   // read through the global set: one unused element
                 kind = 1;
-                bindless_resident(ex, st, r);
+                VkSampler bs = bindless_resident(ex, st, r);
                 vk_texture_lock();
                 tex_info(ex, r, 0, 0, 0, &o[0].image);
                 vk_texture_unlock();
+                if (r->bl_samp && bs) o[0].image.sampler = bs;   // a SAMPLER binding: only the sampler counts
                 o[0].w[2] = (uint32_t)o[0].image.imageLayout;
             } else {
                 kind = 1;
