@@ -96,7 +96,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 |---|---|---|---|
 | 3.1 | „About Replays“-Hinweis nach dem Rennen durchklicken | SPIEL | ⬜ |
 | 3.2 | Alle Modi durchspielen: City Trial, Top Ride, Road Trip, Optionen, Speichern/Laden | SPIEL | ⬜ **Lauf 2026-11-13 (c32/c32b, Standard mit 16.x, Limit 60):** City Trial, Top Ride, Road Trip je 2× **ohne Absturz** (City ~52–59 fps, Top ~48–59). Erster City-Lauf nach den Shader-Änderungen sah wie ein Hänger aus (Einzelbilder bis 18 s): Compute-Shader wurden neu übersetzt (~1 s je Shader), mit warmem Cache normal (cityp). Prüfpunkte: City-Trial-Bilder bei 4200 sehr dunkel (Lava-Gegend / fast schwarz mit HUD) – Vergleich nötig; Top-Ride-Kartenmüll (1/10) weiter offen. |
-| 3.3 | Fehlende Systemdienste (FATAL „service not implemented“) je nach Fund ergänzen | OHNE (nach Fund) | ⬜ |
+| 3.3 | Fehlende Systemdienste (FATAL „service not implemented“) je nach Fund ergänzen | OHNE (nach Fund) | ⬜ **Lauf 2026-11-13 (c32b, alle Modi):** keine „service not implemented“-Meldungen. Dafür „Ampere lowering failed“: opcode 0x34e (LEPC) ~60×/Lauf, immer an +0 mit `LEPC R0` = Anfang eines Geometrie-Programms, das außerhalb des Geometrie-Pfads übersetzt wird (Eglantine 78743f3 lehnt LEPC dort ebenso ab); 0xf60 (TEX mit Handle im Uniform-Register, Sonderform) 6×/Lauf, 0x89a 1×/Lauf. In den Bildern kein fehlender Effekt erkennbar → beobachten. |
 | 3.4 | Langzeittest 60 Minuten: Abstürze, Speicherwachstum, Ruckler | SPIEL | ⬜ |
 | 3.5 | Echter Controller: Belegung, Vibration, Pause, Hot-Plug | SPIEL (du) | ⬜ |
 | 3.6 | Neues Testskript für den frischen deutschen Spielstand | OHNE + SPIEL | ⬜ |
