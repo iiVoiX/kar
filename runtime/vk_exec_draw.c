@@ -180,6 +180,7 @@ static struct { uint32_t n[2], pn[2]; uint8_t sig[2][DS_SIG_BYTES], psig[2][DS_S
 static struct {
     int on;
     uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, ac_miss, same_prog, same_all, bind_skip, arr_desc, pool_desc, arr_own_samp;
+    uint64_t miss, dyn_hit;   // set cache misses, and of them the ones a cache without uniform buffer offsets would hit
 } BS = {-1};
 
 // The inputs of the last graphics bind_resources (bind_sig) and what its build counted for the traffic census, which a
@@ -2394,8 +2395,9 @@ static void bind_stats(const VkPipeInfo *info) {
                "same program and state as the draw before %.3f, also same buffers %.3f; descriptor builds skipped %.3f",
                BS.push / d, BS.push_skip / d, BS.set_new / d, BS.set_reuse / d, BS.ac_miss / d, BS.same_prog / d,
                BS.same_all / d, BS.bind_skip / d);
-        rt_log("vk_exec: per draw: descriptors from material arrays %.2f (sampler in the handle %.2f), from pool arrays %.2f",
-               BS.arr_desc / d, BS.arr_own_samp / d, BS.pool_desc / d);
+        rt_log("vk_exec: per draw: descriptors from material arrays %.2f (sampler in the handle %.2f), from pool arrays %.2f; "
+               "set cache misses %.3f, of them found without uniform buffer offsets %.3f",
+               BS.arr_desc / d, BS.arr_own_samp / d, BS.pool_desc / d, BS.miss / d, BS.dyn_hit / d);
     }
 }
 
@@ -2965,6 +2967,25 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
                     set = alloc_set(ex, sl);
                     write_set(info, s, set, ds, w, i0, i1);
                     if (ce) *ce = (DsCacheEnt){h1, h2, sl, dbytes, set};
+                    // TOTK_BIND_STATS (16.4): would the set have been found with every uniform buffer's offset left
+                    // out (dynamic uniform buffers)? A shadow cache of those hashes per set layout.
+                    if (bind_stats_on()) {
+                        static VkDescSlot tmp[MAX_DESC];
+                        static uint64_t shadow[1 << 14];
+                        memcpy(tmp, ds, dbytes);
+                        for (uint32_t i = i0, j = 0; i < i1; i++) {
+                            uint32_t cnt = info->bindings[i].count ? info->bindings[i].count : 1;
+                            if (info->bindings[i].type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+                                for (uint32_t k = 0; k < cnt; k++) tmp[j + k].buffer.offset = 0;
+                            j += cnt;
+                        }
+                        uint64_t z1, z2;
+                        ds_hash(tmp, dbytes, &z1, &z2);
+                        uint64_t key = z1 ^ (uint64_t)(uintptr_t)sl * 0x9E3779B97F4A7C15ull, *e = &shadow[key & ((1 << 14) - 1)];
+                        if (*e == (key | 1)) BS.dyn_hit++;
+                        else *e = key | 1;
+                        BS.miss++;
+                    }
                 }
                 B.ds_last[s] = set, B.ds_last_layout[s] = sl, DS.n[s] = dbytes;
                 memcpy(DS.sig[s], ds, dbytes);
@@ -3613,8 +3634,90 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
 
 // TOTK_TRACE=perf: the draw or dispatch just recorded, with the NVN 2 names of its stages, for the slow-part line
 // (vk_sync.c vk_sync_note). kind: 0 draw, 1 indirect draw, 2 dispatch, 3 indirect dispatch.
+// KAR_DRAW_TS=<frame> (diagnostic, 16.4): a bottom-of-pipe timestamp after every draw and dispatch of that frame; a
+// few frames later the GPU time between consecutive ones is summed per (kind, stages) and the top entries logged. The
+// first draw of each command buffer is left out (its interval holds the gap between submissions).
+enum { DTS_N = 8192 };
+static VkQueryPool dts_pool;
+static int dts_state, dts_n;
+static long long dts_frame = -2;
+static VkCommandBuffer dts_cb;
+static struct { uint64_t a, b, work; int kind, first; } dts_info[DTS_N];
+static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
+    if (dts_frame == -2) dts_frame = getenv("KAR_DRAW_TS") ? atoll(getenv("KAR_DRAW_TS")) : -1;
+    if (dts_frame < 0) return;
+    VkCtx *c = vk_ctx();
+    long long fr = (long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (dts_state == 0 && fr == dts_frame) {
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP,
+                                    .queryCount = DTS_N};
+        if (vkCreateQueryPool(c->device, &qi, NULL, &dts_pool) != VK_SUCCESS) { dts_frame = -1; return; }
+        vkResetQueryPool(c->device, dts_pool, 0, DTS_N);
+        dts_state = 1, dts_n = 0;
+    }
+    if (dts_state == 1 && fr > dts_frame) dts_state = 2;
+    if (dts_state == 1 && dts_n < DTS_N) {
+        const uint8_t *ctl, *code;
+        uint32_t len;
+        int cs = kind >= 2;
+        uint64_t a = ex->prog && find_stage(ex->prog, cs ? NVN_STAGE_CS : NVN_STAGE_VS, &ctl, &code, &len) ? nvn2_origin(code) : 0;
+        uint64_t b = ex->prog && !cs && find_stage(ex->prog, NVN_STAGE_FS, &ctl, &code, &len) ? nvn2_origin(code) : 0;
+        vkCmdWriteTimestamp(ex->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, dts_pool, (uint32_t)dts_n);
+        dts_info[dts_n].a = a, dts_info[dts_n].b = b, dts_info[dts_n].work = work, dts_info[dts_n].kind = kind;
+        dts_info[dts_n].first = ex->cb != dts_cb;
+        dts_cb = ex->cb;
+        dts_n++;
+    }
+    if (dts_state == 2 && fr >= dts_frame + 4) {
+        dts_state = 3;
+        static uint64_t ts[DTS_N];
+        if (vkGetQueryPoolResults(c->device, dts_pool, 0, (uint32_t)dts_n, sizeof ts, ts, 8,
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS) {
+            rt_log("draw ts: results not available");
+            return;
+        }
+        double per = c->props.limits.timestampPeriod / 1e6, total = 0;   // ms per tick
+        typedef struct { uint64_t a, b; int kind; double ms; int n; uint64_t work; } Agg;
+        static Agg agg[DTS_N];
+        int na = 0;
+        double first_ms = 0, first_max = 0;
+        int nfirst = 0;
+        for (int i = 1; i < dts_n; i++)   // the intervals left out: from the previous command buffer's last draw
+            if (dts_info[i].first && ts[i] >= ts[i - 1]) {
+                double ms = (double)(ts[i] - ts[i - 1]) * c->props.limits.timestampPeriod / 1e6;
+                first_ms += ms, nfirst++;
+                if (ms > first_max) first_max = ms;
+            }
+        rt_log("draw ts: frame %lld: %d command buffers; their first draws came %.2f ms after the previous draw in all "
+               "(max %.2f ms; GPU idle, submission gaps, barriers and copies at their start); first to last %.2f ms",
+               dts_frame, nfirst + 1, first_ms, first_max,
+               dts_n > 1 && ts[dts_n - 1] > ts[0] ? (double)(ts[dts_n - 1] - ts[0]) * c->props.limits.timestampPeriod / 1e6 : 0.0);
+        for (int i = 1; i < dts_n; i++) {
+            if (dts_info[i].first || ts[i] < ts[i - 1]) continue;
+            double ms = (double)(ts[i] - ts[i - 1]) * per;
+            total += ms;
+            int k = 0;
+            while (k < na && !(agg[k].a == dts_info[i].a && agg[k].b == dts_info[i].b && agg[k].kind == dts_info[i].kind)) k++;
+            if (k == na) agg[na++] = (Agg){dts_info[i].a, dts_info[i].b, dts_info[i].kind, 0, 0, 0};
+            agg[k].ms += ms, agg[k].n++;
+            if (dts_info[i].work > agg[k].work) agg[k].work = dts_info[i].work;
+        }
+        rt_log("draw ts: frame %lld: %d draws/dispatches, %.2f ms between them (first of each command buffer left out)",
+               dts_frame, dts_n, total);
+        for (int t = 0; t < 20 && na; t++) {
+            int best = 0;
+            for (int k = 1; k < na; k++) if (agg[k].ms > agg[best].ms) best = k;
+            rt_log("draw ts:   %.3f ms (%.0f%%) %s x%d %016llx/%016llx largest work %llu", agg[best].ms,
+                   total > 0 ? 100 * agg[best].ms / total : 0.0, agg[best].kind >= 2 ? "dispatch" : "draw", agg[best].n,
+                   (unsigned long long)agg[best].a, (unsigned long long)agg[best].b, (unsigned long long)agg[best].work);
+            agg[best] = agg[--na];
+        }
+    }
+}
+
 static void note_work(const VkExec *ex, int kind, uint64_t work) {
     if (kind < 2 && vk_dump_armed && vk_dump_split_draw(ex)) vk_exec_pass_end((VkExec *)ex);   // TOTK_DUMP_DRAWS
+    draw_ts(ex, kind, work);
     if (!vk_sync_noting() || !ex->prog) return;
     const uint8_t *ctl, *code;
     uint32_t len;

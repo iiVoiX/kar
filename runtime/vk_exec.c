@@ -1118,11 +1118,33 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
         extern uint64_t vk_rp_bind_ns;
         uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
         win_ns += total;
+        static uint64_t win_op[OP_COUNT_ + 2], win_opn[OP_COUNT_];
+        for (int k = 0; k < OP_COUNT_ + 2; k++) win_op[k] += rp_ns[k];
+        for (int k = 0; k < OP_COUNT_; k++) win_opn[k] += rp_n[k];
+        static uint64_t win_sub[4];
+        for (int k = 0; k < 4; k++) win_sub[k] += vk_rp_sub[k];
         if (!win_f0) win_f0 = f, win_bind0 = vk_rp_bind_ns;
         if (f >= win_f0 + 600) {
-            rt_log("replay prof: frames %llu-%llu: replay %.2f ms per frame, bind_resources %.2f ms",
-                   (unsigned long long)win_f0, (unsigned long long)f, win_ns / 1e6 / (double)(f - win_f0),
-                   (vk_rp_bind_ns - win_bind0) / 1e6 / (double)(f - win_f0));
+            double nf = (double)(f - win_f0);
+            char t[512];
+            int o = 0;
+            for (int j = 0; j < 8; j++) {   // the most expensive op kinds of the window, ms per frame (count per frame)
+                int best = -1;
+                for (int k = 0; k < OP_COUNT_ + 2; k++)
+                    if (win_op[k] && (best < 0 || win_op[k] > win_op[best])) best = k;
+                if (best < 0) break;
+                const char *nm = best == OP_COUNT_ ? "mem-begin" : best == OP_COUNT_ + 1 ? "mem-end" : nvn_op_name((unsigned)best);
+                o += snprintf(t + o, sizeof t - (size_t)o, " %s %.2f (%.0f)", nm, win_op[best] / 1e6 / nf,
+                              best < OP_COUNT_ ? win_opn[best] / nf : 1.0);
+                win_op[best] = 0;
+            }
+            rt_log("replay prof: frames %llu-%llu: replay %.2f ms per frame, bind_resources %.2f ms; by op (ms, count):%s; "
+                   "dispatch: shader %.2f pipeline %.2f bind %.2f rest %.2f ms",
+                   (unsigned long long)win_f0, (unsigned long long)f, win_ns / 1e6 / nf,
+                   (vk_rp_bind_ns - win_bind0) / 1e6 / nf, t, win_sub[0] / 1e6 / nf, win_sub[1] / 1e6 / nf,
+                   win_sub[2] / 1e6 / nf, win_sub[3] / 1e6 / nf);
+            memset(win_sub, 0, sizeof win_sub);
+            memset(win_op, 0, sizeof win_op), memset(win_opn, 0, sizeof win_opn);
             win_ns = 0, win_f0 = f, win_bind0 = vk_rp_bind_ns;
         }
         if (total > 100000000ull) {

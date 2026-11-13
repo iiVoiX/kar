@@ -1603,6 +1603,18 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
         rec++;
         for (int j = 0; j < k; j++) *bytes += mregions[j].size;
         for (int j = 0; j < k; j++) mloop_mark(r, mregions[j].srcOffset, mregions[j].srcOffset + mregions[j].size, to_mirror);
+        if (mloop_on > 0) {   // one frame's ranges (KAR_MIRROR_LOOP_AT=<frame>), largest first is left to the reader
+            static long long at = -2;
+            static int lines;
+            if (at == -2) at = getenv("KAR_MIRROR_LOOP_AT") ? atoll(getenv("KAR_MIRROR_LOOP_AT")) : -1;
+            uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+            if (at >= 0 && fr >= (uint64_t)at && fr < (uint64_t)at + 30)
+                for (int j = 0; j < k && lines < 30000; j++, lines++)
+                    rt_log("mem: mirror range frame %llu %s pool %#llx+%#llx (%s): offset %#llx size %#llx",
+                           (unsigned long long)fr, to_mirror ? "up" : "back", (unsigned long long)r->import_lo,
+                           (unsigned long long)(r->import_hi - r->import_lo), "", (unsigned long long)mregions[j].srcOffset,
+                           (unsigned long long)mregions[j].size);
+        }
         *copies += (uint64_t)k;
     }
     return rec;
