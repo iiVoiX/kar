@@ -384,6 +384,11 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
 
     FfxFrameInterpolationDispatchDescription fd = {};
     fd.commandList = cl;
+    {   // KAR_FG_DEBUG=1 (diagnostic): the SDK's debug view (motion fields, optical flow, scene change) as output
+        static int dbg = -1;
+        if (dbg < 0) dbg = getenv("KAR_FG_DEBUG") && *getenv("KAR_FG_DEBUG") == '1';
+        if (dbg) fd.flags |= FFX_FRAMEINTERPOLATION_DISPATCH_DRAW_DEBUG_VIEW;
+    }
     fd.displaySize = fd.renderSize = {(uint32_t)cw, (uint32_t)ch};
     fd.currentBackBuffer = cur;
     fd.output = out;
