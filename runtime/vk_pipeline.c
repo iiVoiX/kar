@@ -2014,7 +2014,7 @@ static VkDescriptorSetLayout bindless_for(const Bindings *B, uint32_t n) {
     VkDescriptorSetLayout s = vk_bindless_layout();
     if (!s) return VK_NULL_HANDLE;
     for (uint32_t i = 0; i < n; i++)
-        if (B->pb[i].res && B->pb[i].res->arr_ubo) return s;
+        if (B->pb[i].res && (B->pb[i].res->arr_ubo || B->pb[i].res->pool_bl)) return s;
     return VK_NULL_HANDLE;
 }
 

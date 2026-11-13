@@ -1030,7 +1030,8 @@ static int pool_patch(GfxShader *s) {
     enum { OP_NAME_ = 5, OP_EXT_INST = 12, OP_CONST = 43, OP_VAR = 59, OP_ACCESS_CHAIN = 65, OP_BITCAST = 124,
            OP_BITWISE_AND = 199, OP_DECOR = 71, DEC_BINDING = 33, GLSL_UMIN = 38 };
     int any = 0, c2_binding = -1;
-    for (int i = 0; i < s->nres[GFX_RES_TEX]; i++) any |= s->res[GFX_RES_TEX][i].pool_arr;
+    for (int i = 0; i < s->nres[GFX_RES_TEX]; i++)
+        any |= s->res[GFX_RES_TEX][i].pool_arr && !s->res[GFX_RES_TEX][i].pool_bl;   // pool_bl: done by pool_bindless_patch
     if (!any) return 1;
     for (int i = 0; i < s->nres[GFX_RES_UBO]; i++)
         if (s->res[GFX_RES_UBO][i].slot == 2) c2_binding = s->res[GFX_RES_UBO][i].binding;
@@ -1333,6 +1334,170 @@ bad:
     free(is_arr_var), free(is_const), free(rewrite), free(val), free(ctype), free(arr_len), free(pointee), free(vtype);
     free(cast), free(newptr), free(binding);
     return 0;
+}
+
+// Direct pool arrays through the global bindless set (KAR_BINDLESS, RELEASE_PLAN 2.6): the translator indexes a pool
+// array with UMin(id, 31) and pool_patch hashes the id into 32 elements, so two textures of one draw whose ids hash
+// alike share an element and one of them reads the other (the main menu's speech bubble and the title's prompt: the
+// text's second texture read the glyph atlas, alpha 0, every fragment discarded). Here each access chain into a pool
+// array of 2D, 2D array or cube float images or of samplers indexes the global set's array by the whole id instead
+// (vk_bindless.c: images at bindings 0-2 by texture id, samplers at binding 3 by sampler id), and the UMin becomes a
+// copy of the id. GfxShaderRes.pool_bl tells the layout to add set 2 and the replay to make the ids resident.
+static int pool_bindless_patch(GfxShader *s) {
+    enum { OP_EXTENSION_ = 10, OP_CAPABILITY_ = 17, OP_TYPE_INT_ = 21, OP_TYPE_FLOAT_ = 22, OP_TYPE_IMAGE_ = 25,
+           OP_TYPE_SAMPLER_ = 26, OP_TYPE_ARRAY_ = 28, OP_TYPE_POINTER_ = 32, OP_CONST = 43, OP_FUNCTION_ = 54,
+           OP_VAR = 59, OP_LOAD_ = 61, OP_ACCESS_CHAIN = 65, OP_DECOR = 71, OP_COPY_OBJECT_ = 83, OP_BITCAST = 124,
+           OP_EXT_INST = 12, DEC_BINDING = 33, DEC_SET = 34, DEC_NONUNIFORM = 5300, CAP_NONUNIFORM = 5301,
+           CAP_SAMPLED_NU = 5307, SC_UNIFORM_CONSTANT = 0, GLSL_UMIN = 38 };
+    static int on = -1;
+    if (on < 0) on = !(getenv("KAR_BINDLESS") && *getenv("KAR_BINDLESS") == '0') &&
+                     getenv("KAR_POOL_BL") && *getenv("KAR_POOL_BL") == '1';   // opt-in until tested in the game
+    if (!on) return 0;
+    int any = 0;
+    for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) any |= s->res[GFX_RES_TEX][k].pool_arr;
+    if (!any) return 0;
+    const uint32_t *w = s->spirv;
+    uint64_t n = s->words;
+    uint32_t bound = w[3];
+    if (n < 5 || bound > (1u << 22)) return 0;
+    uint32_t *binding = calloc(bound, 4), *vtype = calloc(bound, 4), *ptr_to = calloc(bound, 4), *ptr_sc = calloc(bound, 4),
+             *arr_elem = calloc(bound, 4), *cast = calloc(bound, 4), *umin_x = calloc(bound, 4), *gvar_of = calloc(bound, 4),
+             *chain_of = calloc(bound, 4);
+    uint8_t *kind_of = calloc(bound, 1), *img_kind = calloc(bound, 1), *is_31 = calloc(bound, 1), *nu = calloc(bound, 1),
+            *is_umin = calloc(bound, 1);
+    if (!binding || !vtype || !ptr_to || !ptr_sc || !arr_elem || !cast || !umin_x || !gvar_of || !chain_of || !kind_of ||
+        !img_kind || !is_31 || !nu || !is_umin)
+        rt_fatal("gfx_shader: out of memory patching a shader");
+    int moved = 0, have_nu = 0, have_snu = 0;
+    uint32_t t_uint = 0, t_sampler = 0, t_float = 0, nb = bound;
+    uint64_t first_func = 0, first_decor = 0, last_cap = 0;
+    for (uint64_t i = 5; i < n;) {   // pass 1: types, decorations, variables, constants, casts, UMin(x, 31)
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (!len || i + len > n) goto out;
+        if (op == OP_CAPABILITY_) { last_cap = i + len; have_nu |= w[i + 1] == CAP_NONUNIFORM; have_snu |= w[i + 1] == CAP_SAMPLED_NU; }
+        if (op == OP_DECOR && !first_decor) first_decor = i;
+        if (op == OP_FUNCTION_ && !first_func) first_func = i;
+        if (op == OP_DECOR && len == 4 && w[i + 2] == DEC_BINDING && w[i + 1] < bound) binding[w[i + 1]] = w[i + 3] + 1;
+        else if (op == OP_TYPE_INT_ && len == 4 && w[i + 2] == 32 && !w[i + 3]) t_uint = w[i + 1];
+        else if (op == OP_TYPE_FLOAT_ && len == 3 && w[i + 2] == 32) t_float = w[i + 1];
+        else if (op == OP_TYPE_SAMPLER_ && len == 2 && w[i + 1] < bound) t_sampler = w[i + 1], img_kind[w[i + 1]] = 4;
+        else if (op == OP_TYPE_IMAGE_ && len >= 9 && w[i + 1] < bound && w[i + 2] == t_float && w[i + 6] == 0 &&
+                 w[i + 7] == 1)   // float, single sample, sampled: 2D 1, 2D array 2, cube 3
+            img_kind[w[i + 1]] = w[i + 3] == 1 ? (w[i + 5] ? 2 : 1) : w[i + 3] == 3 && !w[i + 5] ? 3 : 0;
+        else if (op == OP_TYPE_ARRAY_ && len == 4 && w[i + 1] < bound) arr_elem[w[i + 1]] = w[i + 2];
+        else if (op == OP_TYPE_POINTER_ && len == 4 && w[i + 1] < bound) ptr_sc[w[i + 1]] = w[i + 2], ptr_to[w[i + 1]] = w[i + 3];
+        else if (op == OP_VAR && len >= 4 && w[i + 2] < bound) vtype[w[i + 2]] = w[i + 1];
+        else if (op == OP_CONST && len == 4 && w[i + 2] < bound && w[i + 3] == 31) is_31[w[i + 2]] = 1;
+        else if (op == OP_BITCAST && len == 4 && w[i + 2] < bound) cast[w[i + 2]] = w[i + 3];
+        else if (op == OP_EXT_INST && len == 7 && w[i + 4] == GLSL_UMIN && w[i + 2] < bound && w[i + 6] < bound &&
+                 is_31[w[i + 6]])
+            umin_x[w[i + 2]] = w[i + 5], is_umin[w[i + 2]] = 1;
+        i += len;
+    }
+    if (!t_uint || !first_func || !first_decor || !last_cap) goto out;
+    // The pool array variables: binding of a pool_arr resource, an array of a supported image type or of samplers.
+    uint32_t c_nimg = nb++, c_nsamp = nb++, gv[5] = {0}, ga[5] = {0}, gp[5] = {0}, gelem[5] = {0};
+    for (uint32_t v = 0; v < bound; v++) {
+        if (!binding[v] || !vtype[v] || vtype[v] >= bound || ptr_sc[vtype[v]] != SC_UNIFORM_CONSTANT) continue;
+        uint32_t at = ptr_to[vtype[v]], el = at && at < bound ? arr_elem[at] : 0;
+        if (!el || el >= bound || !img_kind[el]) continue;
+        for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
+            const GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+            if (!r->pool_arr || r->binding != binding[v] - 1) continue;
+            uint32_t kd = img_kind[el];   // 1..3 images, 4 samplers
+            if (gelem[kd] && gelem[kd] != el) break;   // two element types of one kind: left as it is
+            if (!gv[kd]) gelem[kd] = el, ga[kd] = nb++, gp[kd] = nb++, gv[kd] = nb++;
+            kind_of[v] = (uint8_t)kd, gvar_of[v] = gv[kd];
+            break;
+        }
+    }
+    for (uint64_t i = first_func; i < n;) {   // pass 2: access chains into those arrays indexed by a cast UMin
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == OP_ACCESS_CHAIN && len == 5 && w[i + 3] < bound && kind_of[w[i + 3]] && w[i + 4] < bound &&
+            w[i + 2] < bound) {
+            uint32_t idx = w[i + 4], u = cast[idx] < bound && is_umin[cast[idx]] ? cast[idx] : is_umin[idx] ? idx : 0;
+            if (!u) kind_of[w[i + 3]] = 0;   // another index form: this array stays a pool array
+            else chain_of[w[i + 2]] = w[i + 3], umin_x[w[i + 2]] = u, nu[w[i + 2]] = 1;   // umin_x: the chain's UMin
+        } else if (op == OP_LOAD_ && len >= 4 && w[i + 3] < bound && chain_of[w[i + 3]] && w[i + 2] < bound) {
+            nu[w[i + 2]] = 1;
+        }
+        i += len;
+    }
+    int nchain = 0;
+    // Only the UMins of chains into arrays that move become copies; is_umin keeps that mark from here on.
+    uint8_t *conv = calloc(bound, 1);
+    if (!conv) rt_fatal("gfx_shader: out of memory patching a shader");
+    for (uint32_t x = 0; x < bound; x++)
+        if (chain_of[x] && kind_of[chain_of[x]]) nchain++, conv[umin_x[x]] = 1;
+    memcpy(is_umin, conv, bound);
+    free(conv);
+    if (!nchain) goto out;
+    uint32_t *o = malloc((n + 128 + 4 * (uint64_t)bound / 64 + 8 * (uint64_t)nchain + 16) * sizeof *o);
+    if (!o) rt_fatal("gfx_shader: out of memory patching a shader");
+    uint64_t m = 0;
+    for (int k = 0; k < 5; k++) o[m++] = w[k];
+    for (uint64_t i = 5; i < n;) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (i == first_decor) {
+            for (int kd = 1; kd <= 4; kd++)
+                if (gv[kd] && gelem[kd]) {
+                    o[m++] = 4u << 16 | OP_DECOR, o[m++] = gv[kd], o[m++] = DEC_SET, o[m++] = 2;
+                    o[m++] = 4u << 16 | OP_DECOR, o[m++] = gv[kd], o[m++] = DEC_BINDING, o[m++] = kd == 4 ? 3 : kd - 1;
+                }
+            for (uint32_t x = 0; x < bound; x++)
+                if (nu[x] && (!chain_of[x] || kind_of[chain_of[x]]))
+                    o[m++] = 3u << 16 | OP_DECOR, o[m++] = x, o[m++] = DEC_NONUNIFORM;
+        }
+        if (i == first_func) {
+            o[m++] = 4u << 16 | OP_CONST, o[m++] = t_uint, o[m++] = c_nimg, o[m++] = 65792;
+            o[m++] = 4u << 16 | OP_CONST, o[m++] = t_uint, o[m++] = c_nsamp, o[m++] = 4096;
+            for (int kd = 1; kd <= 4; kd++)
+                if (gv[kd]) {
+                    o[m++] = 4u << 16 | OP_TYPE_ARRAY_, o[m++] = ga[kd], o[m++] = gelem[kd], o[m++] = kd == 4 ? c_nsamp : c_nimg;
+                    o[m++] = 4u << 16 | OP_TYPE_POINTER_, o[m++] = gp[kd], o[m++] = SC_UNIFORM_CONSTANT, o[m++] = ga[kd];
+                    o[m++] = 4u << 16 | OP_VAR, o[m++] = gp[kd], o[m++] = gv[kd], o[m++] = SC_UNIFORM_CONSTANT;
+                }
+        }
+        if (op == OP_EXT_INST && len == 7 && w[i + 2] < bound && is_umin[w[i + 2]]) {   // UMin(x, 31) -> x
+            o[m++] = 4u << 16 | OP_COPY_OBJECT_, o[m++] = w[i + 1], o[m++] = w[i + 2], o[m++] = w[i + 5];
+            i += len;
+            continue;
+        }
+        if (op == OP_ACCESS_CHAIN && len == 5 && w[i + 2] < bound && chain_of[w[i + 2]] && kind_of[chain_of[w[i + 2]]]) {
+            memcpy(o + m, w + i, len * sizeof *w);
+            o[m + 3] = gvar_of[chain_of[w[i + 2]]];
+            m += len, i += len, moved++;
+            continue;
+        }
+        memcpy(o + m, w + i, len * sizeof *w), m += len;
+        if (i + len == last_cap) {
+            if (!have_nu) o[m++] = 2u << 16 | OP_CAPABILITY_, o[m++] = CAP_NONUNIFORM;
+            if (!have_snu) o[m++] = 2u << 16 | OP_CAPABILITY_, o[m++] = CAP_SAMPLED_NU;
+            if (w[1] < 0x00010500 && !have_nu) {
+                static const char ext[] = "SPV_EXT_descriptor_indexing";
+                uint32_t words = (uint32_t)(sizeof ext + 3) / 4;
+                o[m++] = (1u + words) << 16 | OP_EXTENSION_;
+                memset(o + m, 0, words * 4), memcpy(o + m, ext, sizeof ext), m += words;
+            }
+        }
+        i += len;
+    }
+    o[3] = nb;
+    for (uint32_t v = 0; v < bound; v++)   // the pool arrays moved: the replay makes their ids resident
+        if (kind_of[v])
+            for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
+                GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+                if (r->pool_arr && r->binding == binding[v] - 1) r->pool_bl = kind_of[v];
+            }
+    free(s->spirv);
+    s->spirv = o, s->words = m;
+    static int told;
+    if (told++ < 3) rt_log("gfx_shader: Direct pool arrays read through the bindless set (%d access chains)", moved);
+out:
+    free(binding), free(vtype), free(ptr_to), free(ptr_sc), free(arr_elem), free(cast), free(umin_x), free(gvar_of);
+    free(chain_of), free(kind_of), free(img_kind), free(is_31), free(nu), free(is_umin);
+    (void)t_sampler;
+    return moved;
 }
 
 // Bindless material arrays (RELEASE_PLAN 16.2, KAR_BINDLESS=1). A material array whose sampler sits in the handle
@@ -1919,6 +2084,7 @@ static int reflect(GfxShader *s, int flags) {
             return 0;
         }
     reflect_spirv(s);
+    pool_bindless_patch(s);   // before pool_patch: reads the UMin(id, 31) the translator left
     if (!pool_patch(s)) rt_log("gfx_shader: a Direct pool array shader did not have the expected shape; left as is");
     if (!arr_patch(s)) rt_log("gfx_shader: a material array shader did not have the expected shape; left at 32");
     arr_dims(s);

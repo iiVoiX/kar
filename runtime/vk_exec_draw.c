@@ -2100,7 +2100,10 @@ static void pool_fill(VkExec *ex, int st, const GfxShaderRes *r, uint32_t cnt, V
         return;
     }
     static int clash_told;
+    uint32_t all[160];   // every candidate id, for a pool array read through the bindless set (pool_bl)
+    int nall = 0;
 #define POOL_PUT(id) do { uint32_t id_ = (uint32_t)(id), k_ = (id_ ^ (id_ >> 5)) & 31; \
+        if (nall < 160) all[nall++] = id_; \
         if (id1[k_] && id1[k_] != id_ + 1 && clash_told++ < 8) \
             rt_log("vk_exec: Direct pool array: ids %u and %u share element %u", id1[k_] - 1, id_, k_); \
         id1[k_] = id_ + 1; } while (0)
@@ -2116,6 +2119,34 @@ static void pool_fill(VkExec *ex, int st, const GfxShaderRes *r, uint32_t cnt, V
         for (int s = 0; s < 32; s++)
             if (r->pool_samp >> s & 1 && ex->samp[st][s]) POOL_PUT(ex->samp[st][s] >> 20 & 0xfff);
 #undef POOL_PUT
+    if (r->pool_bl) {   // gfx_shader.c pool_bindless_patch: the shader reads the global set at the whole id
+        static uint32_t img_ep[3][65792], samp_ep[4096];
+        static VkImageView img_v[3][65792];
+        static VkImageLayout img_l[3][65792];
+        static VkSampler samp_v[4096];
+        uint32_t ep = vk_texture_epoch() + 1;
+        int put = 0;
+        for (int i = 0; i < nall; i++) {
+            uint32_t id = all[i];
+            if (sampler) {
+                if (id >= 4096 || samp_ep[id] == ep) continue;
+                samp_ep[id] = ep;
+                VkSampler sm = vk_sampler_by_id_locked(&ex->samp_pool, (int)id);
+                if (sm && sm != samp_v[id]) vk_bindless_put_sampler(id, sm), samp_v[id] = sm, put = 1;
+            } else {
+                uint32_t kd = r->pool_bl - 1u;
+                if (kd > 2 || id >= 65792 || img_ep[kd][id] == ep) continue;
+                img_ep[kd][id] = ep;
+                VkDescriptorImageInfo ii;
+                tex_info(ex, r, id, 0, 1, &ii);
+                if (ii.imageView && (ii.imageView != img_v[kd][id] || ii.imageLayout != img_l[kd][id])) {
+                    vk_bindless_put_image((int)kd, id, ii.imageView, ii.imageLayout);
+                    img_v[kd][id] = ii.imageView, img_l[kd][id] = ii.imageLayout, put = 1;
+                }
+            }
+        }
+        if (put) vk_bindless_flush();
+    }
     for (uint32_t k = 0; k < cnt && k < 32; k++) {
         if (sampler) {
             VkSampler sm = id1[k] ? vk_sampler_by_id_locked(&ex->samp_pool, (int)(id1[k] - 1)) : VK_NULL_HANDLE;
