@@ -44,9 +44,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('crit')
     ap.add_argument('--top', type=int, default=30)
+    ap.add_argument('--host-sites', action='store_true', help='split host time by the host call site')
     a = ap.parse_args()
     threads, ev = load(a.crit)
-    seg = defaultdict(lambda: ([], [], []))   # per thread: starts, states, wakers at the start
+    seg = defaultdict(lambda: ([], [], [], []))   # per thread: starts, states, wakers at the start, wait objects
     wakes = defaultdict(lambda: ([], []))     # per thread: signal times, wakers
     frames = []
     for e in ev:
@@ -56,6 +57,7 @@ def main():
             s[0].append(int(e['ts']))
             s[1].append(int(e['st']))
             s[2].append(int(e['b']))
+            s[3].append(int(e['obj']))
         elif k == CRIT_WAKE:
             w = wakes[int(e['a'])]
             w[0].append(int(e['ts']))
@@ -69,14 +71,17 @@ def main():
         acc = Counter()
         while t > t0 and steps < 100000:
             steps += 1
-            starts, states, _ = seg[x]
+            starts, states, _, objs = seg[x]
             i = bisect.bisect_left(starts, t) - 1
             if i < 0:
                 acc[(x, 'unknown')] += t - t0
                 break
             st, lo = states[i], max(starts[i], t0)
             if st in (S_RUN, S_CORE, S_HOST, S_SLEEP) or st >= len(STATES):
-                acc[(x, STATES[st] if st < len(STATES) else f's{st}')] += t - lo
+                name = STATES[st] if st < len(STATES) else f's{st}'
+                if st == S_HOST and a.host_sites:   # the host call's site (exe+offset, as kernel.c notes it)
+                    name += f' {objs[i]:#x}'
+                acc[(x, name)] += t - lo
                 t = lo
                 continue
             if st == 0:

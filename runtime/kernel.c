@@ -1077,9 +1077,9 @@ int kern_core_away(void) {
     if (!t || t->cur_core < 0) return 0;
     lock();
     core_put(t);
-    acct(t, S_HOST);
-    if (rt_trace & RT_TRACE_SCHED)   // the caller as an exe RVA (totk.map)
+    if (rt_trace & RT_TRACE_SCHED)   // the caller as an exe RVA (totk.map); before acct, which records it (TOTK_CRIT)
         t->wobj = (uintptr_t)__builtin_return_address(0) - plat_exe_base();
+    acct(t, S_HOST);
     unlock();
     return 1;
 }

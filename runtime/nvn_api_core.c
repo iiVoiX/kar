@@ -498,9 +498,24 @@ NVN_API(nvnSyncWait) {
     const GfxBackend *b = gfx_backend();
     if (b->fence_done() >= s->fence) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED); return; }
     int ok;
+    uint64_t w0 = kern_now_ns();
     {
         NVN_BLOCKING();
         ok = b->fence_wait(s->fence, timeout);
+    }
+    {   // KAR_SYNC_PROF=1 (diagnostic, 16.4): blocking waits, their ms and how far the waited value lies behind the
+        // latest issued submission (0: the game waits for the work it just submitted, so CPU and GPU do not overlap)
+        static int on = -1;
+        static uint64_t n, ns, behind, zero;
+        if (on < 0) on = getenv("KAR_SYNC_PROF") && *getenv("KAR_SYNC_PROF") == '1';
+        if (on) {
+            extern uint64_t vk_sync_issued(void);
+            uint64_t iss = vk_sync_issued(), d = iss > s->fence ? iss - s->fence : 0;
+            ns += kern_now_ns() - w0, behind += d, zero += d == 0;
+            if (++n % 300 == 0)
+                rt_log("sync prof: 300 blocking waits, %.2f ms each, waited value %.1f submissions behind the latest "
+                       "(%llu of them the latest)", ns / 3e8, behind / 300.0, (unsigned long long)zero), ns = behind = zero = 0;
+        }
     }
     if (ok) b->cpu_synced(s->fence);
     ret_x(c, ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);

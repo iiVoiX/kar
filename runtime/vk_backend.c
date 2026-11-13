@@ -40,6 +40,15 @@ static PlatCond pcv = PLAT_COND_INIT;   // job queued, job taken, job submitted
 static PresentJob job;
 static int pending, busy, present_thread;
 
+// KAR_PRESENT_PROF=1 (diagnostic, 16.4): every 300 presents the mean ms the game waited for the present thread to take
+// the previous image, and the present thread's blit, submit, hold and flip.
+static int pp_on = -1;
+static uint64_t pp_n, pp_wait, pp_blit, pp_sub, pp_hold, pp_flip;
+static int pp_enabled(void) {
+    if (pp_on < 0) pp_on = getenv("KAR_PRESENT_PROF") && *getenv("KAR_PRESENT_PROF") == '1';
+    return pp_on;
+}
+
 // Sleeps on a high-resolution timer to 1 ms before at, then yields until at: the timer alone wakes up to ~0.5 ms late.
 static void wait_until(uint64_t at) {
     uint64_t now = kern_now_ns();
@@ -77,8 +86,11 @@ static void present_main(void *arg) {
         plat_cond_broadcast(&pcv);
         plat_mutex_unlock(&pl);
         if (flight_on) vk_thumbs_frame(j.frame);
+        uint64_t q0 = kern_now_ns();
         vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
+        uint64_t q1 = kern_now_ns();
         uint64_t f = vk_sync_submit(NULL, 0, 0); // no guest reports; this value only covers the blit
+        uint64_t q2 = kern_now_ns();
         if (j.value && f != j.value)
             rt_fatal("vk: the present of frame %llu signalled %llu, queued as %llu", (unsigned long long)j.frame,
                      (unsigned long long)f, (unsigned long long)j.value);
@@ -90,6 +102,10 @@ static void present_main(void *arg) {
         if (present_hold()) wait_until(j.at);
         uint64_t t1 = kern_now_ns();
         vk_present_flip();
+        if (pp_enabled()) {
+            uint64_t t2 = kern_now_ns();
+            pp_blit += q1 - q0, pp_sub += q2 - q1, pp_hold += t1 - t0, pp_flip += t2 - t1;
+        }
         // TOTK_TRACE=present: one line per present: the host present's interval, the interval of the game's present
         // calls (when the host present went out before back-edge pacing), the wait and how far past its target it went
         if (rt_trace & RT_TRACE_PRESENT)
@@ -149,7 +165,16 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
         if (!plat_thread_spawn(present_main, NULL, "vk present", 0)) rt_fatal("vk: cannot start the present thread");
         present_thread = 1;
     }
+    uint64_t w0 = kern_now_ns();
     while (pending) plat_cond_wait(&pcv, &pl);   // one present in waiting at most
+    if (pp_enabled()) {
+        pp_wait += kern_now_ns() - w0;
+        if (++pp_n % 300 == 0) {
+            rt_log("present prof: per frame wait for the present thread %.2f ms | present thread blit %.2f submit %.2f "
+                   "hold %.2f flip %.2f ms", pp_wait / 3e8, pp_blit / 3e8, pp_sub / 3e8, pp_hold / 3e8, pp_flip / 3e8);
+            pp_wait = pp_blit = pp_sub = pp_hold = pp_flip = 0;
+        }
+    }
     job = j;
     pending = 1;
     plat_cond_broadcast(&pcv);

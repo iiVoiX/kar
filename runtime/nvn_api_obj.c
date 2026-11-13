@@ -883,7 +883,9 @@ NVN_API(nvnWindowAcquireTexture) {
 NVN_API(nvnQueuePresentTexture) {
     win_t *o = arg_p(c, 1);
     int idx = (int)arg_x(c, 2);
+    uint64_t m0 = kern_now_ns();
     movie_tick(c);   // ov_movie.c: hand over decoded movie frames that are due; needs the core, so before the wait
+    uint64_t m1 = kern_now_ns();
     NVN_BLOCKING();
     if (o->magic != NVN_WIN_MAGIC || idx < 0 || idx >= o->ntex || idx >= 4 || !o->tex[idx])
         rt_fatal("nvn: QueuePresentTexture of image %d on window %p", idx, (void *)o);
@@ -891,9 +893,33 @@ NVN_API(nvnQueuePresentTexture) {
     const tex_t *t = (const tex_t *)o->tex[idx];
     uint64_t period = present_period(o), now = kern_now_ns();
     uint64_t slot = now + pace(&o->pace, now, period);
+    uint64_t b0 = kern_now_ns();
     gfx_backend()->present(t, o->crop, slot);
+    {   // KAR_PRESENT_PROF=1: how long the back end's present call took (sync replay: the frame log and the hand-over)
+        static int on = -1;
+        static uint64_t n, ns;
+        if (on < 0) on = getenv("KAR_PRESENT_PROF") && *getenv("KAR_PRESENT_PROF") == '1';
+        if (on) {
+            ns += kern_now_ns() - b0;
+            if (++n % 300 == 0) rt_log("present prof: backend present call %.2f ms per frame", ns / 3e8), ns = 0;
+        }
+    }
     o->ticket[idx] = o->presents;
     o->avail[idx] = slot + period;
+    uint64_t m2 = kern_now_ns();
     frame_step_present(slot, o->interval);   // frame_rate.c: the real-time step follows the display times
+    uint64_t m3 = kern_now_ns();
     rt_frame_presented(t, o->presents);
+    {   // KAR_PRESENT_PROF=1: the parts of this call (the core hand-back after it is not included)
+        static int on = -1;
+        static uint64_t n, a, b, d, e;
+        if (on < 0) on = getenv("KAR_PRESENT_PROF") && *getenv("KAR_PRESENT_PROF") == '1';
+        if (on) {
+            uint64_t m4 = kern_now_ns();
+            a += m1 - m0, b += m2 - m1, d += m3 - m2, e += m4 - m3;
+            if (++n % 300 == 0)
+                rt_log("present prof: movie_tick %.2f, to present %.2f, frame_step %.2f, frame_presented %.2f ms", a / 3e8,
+                       b / 3e8, d / 3e8, e / 3e8), a = b = d = e = 0;
+        }
+    }
 }

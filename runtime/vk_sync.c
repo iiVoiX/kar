@@ -150,6 +150,9 @@ static void slow_part(const TsRead *t, double ms) {
         const char *e = cfg_get("TOTK_PERF_SLOW_GPU_MS");
         slow_ms = e && atof(e) > 0 ? atof(e) : 100;
     }
+    static long long from = -1;   // TOTK_PERF_SLOW_FROM=<frame>: only parts from that frame on (a race, not the boot)
+    if (from < 0) from = getenv("TOTK_PERF_SLOW_FROM") ? atoll(getenv("TOTK_PERF_SLOW_FROM")) : 0;
+    if (from && __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) < (uint64_t)from) return;
     if (!t->noted || ms < slow_ms || lines >= 200) return;
     lines++;
     const PartNote *n = &t->note;
