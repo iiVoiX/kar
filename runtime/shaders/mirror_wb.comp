@@ -1,0 +1,18 @@
+// Write-back of a VRAM mirror range into imported guest memory (vk_memory.c, KAR_WB_SHADOW): the shadow holds what
+// guest memory holds; only the 16-byte pieces the GPU changed in the mirror go over PCIe, into guest memory and the
+// shadow. Pieces the CPU changed alone stay as they are (mirror and shadow agree there).
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, set = 0, binding = 0) readonly buffer Mirror { uvec4 m[]; };
+layout(std430, set = 0, binding = 1) buffer Shadow { uvec4 s[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer Guest { uvec4 g[]; };
+layout(push_constant) uniform P { uint n; } pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * 65535u * 256u;
+    if (i >= pc.n) return;
+    uvec4 a = m[i];
+    if (any(notEqual(a, s[i]))) {
+        s[i] = a;
+        g[i] = a;
+    }
+}

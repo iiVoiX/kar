@@ -20,6 +20,7 @@
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
 #include "vk.h"
+#include "mirror_wb_spv.h"
 #include "platform/platform.h"
 
 static void mem_map_line(const char *line);
@@ -61,6 +62,9 @@ typedef struct PoolRec {
     uint32_t acc_sub;                  // replay: the last submission that synced the mirror (mirror_sync)
     uint32_t wb_sub;                   // replay: the last submission that wrote mirror bytes back to guest memory
     uint8_t *wbmap;                    // KAR_MIRROR_LOOP diagnostic: per 4 KiB page, written back and not uploaded since
+    VkBuffer wsbuf;                    // KAR_WB_SHADOW: device-local copy of what guest memory holds (16.7)
+    VmaAllocation wsalloc;
+    uint8_t wsready;                   // the shadow matches guest memory: write-backs compare against it
     uint32_t mgen;                     // gen_lock: every page write stamped up to this generation is in the mirror
                                        // (or in a copy queued before its next use)
     uint64_t fl_lo, fl_hi;             // flush_lock: nvnMemoryPoolFlushMappedRange bytes not copied yet (fl_hi 0: none)
@@ -320,6 +324,7 @@ static PoolRec *phys_find(const pool_t *key) {
 
 static void destroy_rec(VkCtx *c, PoolRec *r) {
     if (r->mbuf) vmaDestroyBuffer(c->vma, r->mbuf, r->malloc_);
+    if (r->wsbuf) vmaDestroyBuffer(c->vma, r->wsbuf, r->wsalloc);
     if (r->salloc) vmaDestroyBuffer(c->vma, r->buf, r->salloc), r->buf = VK_NULL_HANDLE;
     if (r->buf) vkDestroyBuffer(c->device, r->buf, NULL);
     if (r->mem) vkFreeMemory(c->device, r->mem, NULL);
@@ -1582,6 +1587,29 @@ static void mloop_mark(PoolRec *r, uint64_t lo, uint64_t hi, int up) {
     }
 }
 
+// KAR_WB_DIFF=1 (diagnostic, 16.6): for one submission in 60 frames, the guest bytes of every write-back range are
+// kept before the write-back and compared after its fence in 256-byte blocks: how much of what goes back changed.
+typedef struct { int n; uint64_t addr[512], size[512]; uint8_t *copy[512]; } WbDiff;
+static WbDiff *wbd_job;
+static uint64_t wbd_total, wbd_changed, wbd_blocks, wbd_cblocks, wbd_jobs;
+static void wbd_cb(void *arg) {
+    WbDiff *j = arg;
+    for (int i = 0; i < j->n; i++) {
+        const uint8_t *now = (const uint8_t *)(uintptr_t)j->addr[i];
+        for (uint64_t o = 0; o < j->size[i]; o += 256) {
+            uint64_t len = j->size[i] - o < 256 ? j->size[i] - o : 256;
+            wbd_blocks++, wbd_total += len;
+            if (memcmp(now + o, j->copy[i] + o, len)) wbd_cblocks++, wbd_changed += len;
+        }
+        free(j->copy[i]);
+    }
+    free(j);
+    if (++wbd_jobs % 10 == 0)
+        rt_log("mem: write-back diff over 10 submissions: %.1f MiB written back, %.1f MiB of it in 256-byte blocks that "
+               "changed (%.1f%%)", wbd_total / 1048576.0, wbd_changed / 1048576.0,
+               wbd_total ? 100.0 * wbd_changed / wbd_total : 0.0), wbd_total = wbd_changed = wbd_blocks = wbd_cblocks = 0;
+}
+
 static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint64_t *bytes, uint64_t *copies) {
     qsort(a, (size_t)n, sizeof *a, range_cmp);
     int rec = 0;
@@ -1606,6 +1634,14 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
         else vkCmdCopyBuffer(cb, r->mbuf, r->buf, (uint32_t)k, mregions);
         rec++;
         for (int j = 0; j < k; j++) *bytes += mregions[j].size;
+        if (!to_mirror && wbd_job)   // KAR_WB_DIFF: the guest bytes before this write-back
+            for (int j = 0; j < k && wbd_job->n < 512; j++) {
+                uint8_t *cp = malloc(mregions[j].size);
+                if (!cp) break;
+                memcpy(cp, (const void *)(uintptr_t)(r->import_lo + mregions[j].srcOffset), mregions[j].size);
+                wbd_job->addr[wbd_job->n] = r->import_lo + mregions[j].srcOffset, wbd_job->size[wbd_job->n] = mregions[j].size;
+                wbd_job->copy[wbd_job->n++] = cp;
+            }
         for (int j = 0; j < k; j++) mloop_mark(r, mregions[j].srcOffset, mregions[j].srcOffset + mregions[j].size, to_mirror);
         if (mloop_on > 0) {   // one frame's ranges (KAR_MIRROR_LOOP_AT=<frame>), largest first is left to the reader
             static long long at = -2;
@@ -1892,6 +1928,19 @@ void vk_mem_mirror_prologue(VkCommandBuffer cb) {
     copy_ranges(cb, pend, npend, 1, &mrep.upload_bytes, &mrep.upload_copies);
     mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    int sh = 0;   // KAR_WB_SHADOW: what was uploaded is now guest memory's content in the shadow too (mirror to shadow)
+    for (int i = 0; i < npend; i++) {
+        PoolRec *r = pend[i].r;
+        uint64_t lim = r->import_hi - r->import_lo, lo = pend[i].off, hi = pend[i].off + pend[i].size;
+        if (!r->wsready || lo >= lim) continue;
+        if (hi > lim) hi = lim;
+        VkBufferCopy c = {lo, lo, hi - lo};
+        vkCmdCopyBuffer(cb, r->mbuf, r->wsbuf, 1, &c);
+        sh = 1;
+    }
+    if (sh)
+        mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
     npend = 0;
     mrep.prologues++;
 }
@@ -2008,6 +2057,116 @@ static void wb_reset_cb(void *arg) {
     free(j);
 }
 
+// KAR_WB_SHADOW=1 (16.7): the write-back compares the mirror with a device-local shadow of guest memory and sends only
+// the 16-byte pieces that differ (shaders/mirror_wb.comp): in a race 97 % of the bytes a submission wrote back had not
+// changed (the storage bindings cover whole ranges), and the copy over PCIe took 3.8 ms of GPU time a frame. A pool's
+// first write-back goes the old way and then fills its shadow from the mirror; from then on the shadow equals guest
+// memory except for CPU writes not uploaded yet, where it equals the mirror, so the write-back leaves those bytes.
+static struct {
+    int tried, ok;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkPipeline pipe;
+    PFN_vkCmdPushDescriptorSetKHR push;
+    uint64_t align;
+} WS;
+
+static int wb_shadow_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_WB_SHADOW") && *getenv("KAR_WB_SHADOW") == '1';
+    if (!on || WS.tried) return on && WS.ok;
+    WS.tried = 1;
+    VkCtx *c = vk_ctx();
+    WS.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
+    WS.align = c->props.limits.minStorageBufferOffsetAlignment;
+    if (WS.align < 16) WS.align = 16;
+    VkDescriptorSetLayoutBinding b[3];
+    for (int i = 0; i < 3; i++)
+        b[i] = (VkDescriptorSetLayoutBinding){(uint32_t)i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+    VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                           .bindingCount = 3, .pBindings = b};
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof mirror_wb_spv,
+                                   .pCode = mirror_wb_spv};
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (!WS.push || vkCreateDescriptorSetLayout(c->device, &dci, NULL, &WS.dsl) != VK_SUCCESS) return 0;
+    VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &WS.dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    if (vkCreatePipelineLayout(c->device, &li, NULL, &WS.layout) != VK_SUCCESS ||
+        vkCreateShaderModule(c->device, &mi, NULL, &m) != VK_SUCCESS)
+        return 0;
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
+                                      .layout = WS.layout};
+    VkResult res = vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &WS.pipe);
+    vkDestroyShaderModule(c->device, m, NULL);
+    WS.ok = res == VK_SUCCESS;
+    rt_log("mem: write-back through a VRAM shadow (KAR_WB_SHADOW) %s", WS.ok ? "on" : "off: no pipeline");
+    return WS.ok;
+}
+
+// Records the write-back of the pools whose shadow is ready. The other pools' ranges are moved to the front of wbl and
+// their count returned (they go the old way); their shadows are created here and filled after those copies.
+static int wb_shadow_record(VkCommandBuffer cb, int *dispatches) {
+    VkCtx *c = vk_ctx();
+    qsort(wbl, (size_t)nwbl, sizeof *wbl, range_cmp);
+    int nold = 0, any = 0;
+    for (int i = 0; i < nwbl;) {
+        PoolRec *r = wbl[i].r;
+        int j = i;
+        while (j < nwbl && wbl[j].r == r) j++;
+        if (!r->wsready) {
+            if (!r->wsbuf) {
+                VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = r->import_hi - r->import_lo,
+                                         .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+                VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+                if (vmaCreateBuffer(c->vma, &bi, &ai, &r->wsbuf, &r->wsalloc, NULL) != VK_SUCCESS) r->wsbuf = VK_NULL_HANDLE;
+            }
+            for (int k = i; k < j; k++) wbl[nold++] = wbl[k];
+            i = j;
+            continue;
+        }
+        if (!any) {
+            mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, WS.pipe);
+            any = 1;
+        }
+        uint64_t lim = r->import_hi - r->import_lo;
+        for (int k = i; k < j;) {   // merged ranges, aligned outwards (storage offset alignment, 16 bytes)
+            uint64_t lo = wbl[k].off & ~(WS.align - 1), hi = wbl[k].off + wbl[k].size;
+            for (k++; k < j && (wbl[k].off & ~(WS.align - 1)) <= hi; k++)
+                if (wbl[k].off + wbl[k].size > hi) hi = wbl[k].off + wbl[k].size;
+            hi = (hi + 15) & ~15ull;
+            if (hi > lim) hi = lim & ~15ull;
+            if (lo >= hi) continue;
+            VkDescriptorBufferInfo bm = {r->mbuf, lo, hi - lo}, bs = {r->wsbuf, lo, hi - lo}, bg = {r->buf, lo, hi - lo};
+            const VkDescriptorBufferInfo *bi3[3] = {&bm, &bs, &bg};
+            VkWriteDescriptorSet w[3];
+            for (int q = 0; q < 3; q++)
+                w[q] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint32_t)q,
+                                              .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                              .pBufferInfo = bi3[q]};
+            rec_push(WS.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, WS.layout, 0, 3, w);
+            uint32_t n = (uint32_t)((hi - lo) / 16), groups = (n + 255) / 256;
+            vkCmdPushConstants(cb, WS.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &n);
+            vkCmdDispatch(cb, groups < 65535 ? groups : 65535, (groups + 65534) / 65535, 1);
+            mrep.wb_bytes += hi - lo, mrep.wb_copies++;
+            (*dispatches)++;
+        }
+        i = j;
+    }
+    if (any)
+        mbarrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    return nold;
+}
+
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     if (!vk_mirror_on) return 0;
     int rec = 0;
@@ -2027,16 +2186,47 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     static int wb_skip = -1;   // KAR_WB_SKIP=1 (diagnostic only, wrong results): no write-back, to see what it causes
     if (wb_skip < 0) wb_skip = getenv("KAR_WB_SKIP") && *getenv("KAR_WB_SKIP") == '1';
     if (wb_skip) nwbl = 0;
+    int nfill = 0;
+    PoolRec *fill[64];   // pools whose shadow is filled from the mirror after their old-way write-back
+    if (nwbl && wb_shadow_on()) {
+        int disp = 0;
+        for (int i = 0; i < nwbl; i++) wbl[i].r->wb_sub = msub;
+        nwbl = wb_shadow_record(cb, &disp);
+        rec += disp + 2;
+        for (int i = 0; i < nwbl && nfill < 64; i++) {
+            int have = 0;
+            for (int k = 0; k < nfill; k++) have |= fill[k] == wbl[i].r;
+            if (!have && wbl[i].r->wsbuf) fill[nfill++] = wbl[i].r;
+        }
+    }
     if (nwbl) {
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_READ_BIT);
         for (int i = 0; i < nwbl; i++) wbl[i].r->wb_sub = msub;
         mrep.wb_ranges += (uint64_t)nwbl;
+        static int wbd_on = -1;
+        static uint64_t wbd_last;
+        if (wbd_on < 0) wbd_on = getenv("KAR_WB_DIFF") && *getenv("KAR_WB_DIFF") == '1';
+        uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (wbd_on && fr >= wbd_last + 60) wbd_job = calloc(1, sizeof *wbd_job), wbd_last = fr;
         rec += copy_ranges(cb, wbl, nwbl, 0, &mrep.wb_bytes, &mrep.wb_copies) + 2;
+        if (wbd_job) vk_completion_add(fence, wbd_cb, wbd_job), wbd_job = NULL;
         mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                  VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         nwbl = 0;
+    }
+    if (nfill) {   // KAR_WB_SHADOW: shadows of pools that went the old way are filled from the mirror, ready next time
+        mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                 VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        for (int i = 0; i < nfill; i++) {
+            VkBufferCopy c = {0, 0, fill[i]->import_hi - fill[i]->import_lo};
+            vkCmdCopyBuffer(cb, fill[i]->mbuf, fill[i]->wsbuf, 1, &c);
+            fill[i]->wsready = 1;
+        }
+        mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        rec += nfill + 2;
     }
     if (mirror_verify) rec += verify_record(cb, fence);
     plat_mutex_lock(&mirror_stat_lock);
