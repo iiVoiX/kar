@@ -95,7 +95,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 | # | Punkt | Art | Status |
 |---|---|---|---|
 | 3.1 | „About Replays“-Hinweis nach dem Rennen durchklicken | SPIEL | ⬜ |
-| 3.2 | Alle Modi durchspielen: City Trial, Top Ride, Road Trip, Optionen, Speichern/Laden | SPIEL | ⬜ |
+| 3.2 | Alle Modi durchspielen: City Trial, Top Ride, Road Trip, Optionen, Speichern/Laden | SPIEL | ⬜ **Lauf 2026-11-13 (c32/c32b, Standard mit 16.x, Limit 60):** City Trial, Top Ride, Road Trip je 2× **ohne Absturz** (City ~52–59 fps, Top ~48–59). Erster City-Lauf nach den Shader-Änderungen sah wie ein Hänger aus (Einzelbilder bis 18 s): Compute-Shader wurden neu übersetzt (~1 s je Shader), mit warmem Cache normal (cityp). Prüfpunkte: City-Trial-Bilder bei 4200 sehr dunkel (Lava-Gegend / fast schwarz mit HUD) – Vergleich nötig; Top-Ride-Kartenmüll (1/10) weiter offen. |
 | 3.3 | Fehlende Systemdienste (FATAL „service not implemented“) je nach Fund ergänzen | OHNE (nach Fund) | ⬜ |
 | 3.4 | Langzeittest 60 Minuten: Abstürze, Speicherwachstum, Ruckler | SPIEL | ⬜ |
 | 3.5 | Echter Controller: Belegung, Vibration, Pause, Hot-Plug | SPIEL (du) | ⬜ |
