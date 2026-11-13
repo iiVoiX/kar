@@ -3246,6 +3246,10 @@ static int kar_wide_on(void) {
     if (on < 0) on = rt_game_is_kar() && kar_wide_active();
     return on;
 }
+int kar_ui_shift_mode(void);
+// The interface's 16:9 area is centred while drawing only with KAR_WIDE_UICENTER=1; by default it is drawn at the left
+// and moved to the middle before the composite (vk_exec.c ui_layer_shift).
+static int kar_ui_center(void) { return !kar_ui_shift_mode(); }
 static int kar_widen(float x, float y, float w, float h, uint32_t pw, uint32_t ph) {
     int on = kar_wide_on() && x == 0 && y == 0 && fabsf(h - (float)ph) <= 1 && w < (float)pw && fabsf(w * 9 - h * 16) <= 18;
     static uint64_t seen[32];
@@ -3259,13 +3263,29 @@ static int kar_widen(float x, float y, float w, float h, uint32_t pw, uint32_t p
     return on;
 }
 
+// KAR_VP_LOG=<frame> (diagnostic, ultrawide layouts): in that frame, each distinct (target size, viewport) once.
+static void vp_log(uint32_t pw, uint32_t ph, float x, float y, float w, float h) {
+    static long long at = -2;
+    static uint64_t seen[256];
+    static int n;
+    if (at == -2) at = getenv("KAR_VP_LOG") ? atoll(getenv("KAR_VP_LOG")) : -1;
+    if (at < 0 || (long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) != at || n >= 256) return;
+    uint64_t key = (uint64_t)pw * 1000003u ^ (uint64_t)ph * 7919u ^ (uint64_t)(x * 31) ^ (uint64_t)(y * 131) << 20 ^
+                   (uint64_t)(w * 17) << 32 ^ (uint64_t)(h * 13) << 44;
+    for (int i = 0; i < n; i++)
+        if (seen[i] == key) return;
+    seen[n++] = key;
+    rt_log("vp: target %ux%u viewport %g,%g %gx%g", pw, ph, x, y, w, h);
+}
+
 static void record_fixed(VkExec *ex) {
     VkCommandBuffer cb = ex->cb;
     if (ex->dirty & VK_EXEC_DIRTY_VIEWPORT) {
         float x = 0, y = 0, w = (float)ex->pass_w, h = (float)ex->pass_h;
         if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
+        vp_log(ex->pass_w, ex->pass_h, x, y, w, h);
         if (kar_widen(x, y, w, h, ex->pass_w, ex->pass_h)) {   // interface layer: centre; other targets: stretch
-            if (kar_wide_ui(ex->pass_w, ex->pass_h)) x = ((float)ex->pass_w - w) / 2;
+            if (kar_wide_ui(ex->pass_w, ex->pass_h)) x = kar_ui_center() ? ((float)ex->pass_w - w) / 2 : 0;
             else w = (float)ex->pass_w;
         }
         if (w < 1) w = 1;
@@ -3278,7 +3298,7 @@ static void record_fixed(VkExec *ex) {
         VkRect2D r = vk_exec_scissor(ex);
         if (kar_widen((float)r.offset.x, (float)r.offset.y, (float)r.extent.width, (float)r.extent.height, ex->pass_w,
                       ex->pass_h)) {
-            if (kar_wide_ui(ex->pass_w, ex->pass_h)) r.offset.x = (int32_t)(ex->pass_w - r.extent.width) / 2;
+            if (kar_wide_ui(ex->pass_w, ex->pass_h)) r.offset.x = kar_ui_center() ? (int32_t)(ex->pass_w - r.extent.width) / 2 : 0;
             else r.extent.width = ex->pass_w;
         }
         vkCmdSetScissorWithCount(cb, 1, &r);

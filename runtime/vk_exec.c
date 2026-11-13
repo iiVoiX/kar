@@ -579,9 +579,86 @@ static void barrier_to(VkExec *ex, const VkImage *want, const VkImageAspectFlags
 
 void vk_exec_barrier(VkExec *ex) { barrier_to(ex, NULL, NULL, 0); }
 
+// Kirby ultrawide interface (RELEASE_PLAN 17.3): the interface layer is wider than the 16:9 area the game lays out.
+// Its shaders read other screen-sized targets at their own fragment position (the selection screen's character and
+// machine cards show their 3D figures that way), so drawing the 16:9 area shifted to the middle made them read 328
+// pixels off. Instead the layer is drawn unshifted (vk_exec_draw.c kar_widen) and its content moves to the middle once,
+// right before the frame's first pass into the output-sized target (the game's composite reads the layer there):
+// layer -> spare image, then the spare's 16:9 area back into the middle of the layer; the strips at both sides keep
+// what the game cleared the layer to. KAR_WIDE_UICENTER=1 restores centring while drawing.
+int kar_ui_shift_mode(void) {
+    static int on = -1;
+    if (on < 0) on = rt_game_is_kar() && kar_wide_active() &&
+                     !(getenv("KAR_WIDE_UICENTER") && *getenv("KAR_WIDE_UICENTER") == '1');
+    return on;
+}
+
+static struct { VkImage layer; VkFormat fmt; uint32_t w, h; uint64_t frame; int shifted; VkImage spare; VmaAllocation mem; } UI;
+
+static void ui_layer_shift(VkExec *ex) {
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    for (uint32_t i = 0; i < 8 && i < (uint32_t)ex->pass_ncolor; i++) {
+        const VkExecTarget *t = &ex->color[i];
+        if (!t->image || !t->img) continue;
+        if (kar_wide_ui(t->width, t->height)) {   // the layer is drawn: note it for this frame
+            if (UI.layer != t->image || UI.frame != fr) UI.shifted = 0;
+            UI.layer = t->image, UI.fmt = t->img->format, UI.w = t->width, UI.h = t->height, UI.frame = fr;
+            return;
+        }
+        if (!kar_wide_output(t->width, t->height) || !UI.layer || UI.frame != fr || UI.shifted) continue;
+        VkCtx *c = vk_ctx();
+        if (!UI.spare) {
+            VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                                    .format = UI.fmt, .extent = {UI.w, UI.h, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                    .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                    .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+            VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+            if (vmaCreateImage(c->vma, &ci, &ai, &UI.spare, &UI.mem, NULL) != VK_SUCCESS) {
+                UI.spare = VK_NULL_HANDLE, UI.shifted = 1;
+                return;
+            }
+            VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                        .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                        .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = UI.spare,
+                                        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                                  .pImageMemoryBarriers = &ib};
+            vkCmdPipelineBarrier2(ex->cb, &d);
+            rt_log("kar wide: interface layer %ux%u drawn unshifted, moved to the middle before the composite", UI.w, UI.h);
+        }
+        uint32_t area = UI.h * 16 / 9, off = (UI.w - area) / 2;
+        VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+        VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+        VkImageCopy all = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .extent = {area, UI.h, 1}};
+        vkCmdPipelineBarrier2(ex->cb, &d);
+        all.extent.width = UI.w;   // the whole layer: the 16:9 area and the undrawn part right of it
+        vkCmdCopyImage(ex->cb, UI.layer, VK_IMAGE_LAYOUT_GENERAL, UI.spare, VK_IMAGE_LAYOUT_GENERAL, 1, &all);
+        vkCmdPipelineBarrier2(ex->cb, &d);
+        all.extent.width = area;
+        all.dstOffset.x = (int32_t)off;
+        vkCmdCopyImage(ex->cb, UI.spare, VK_IMAGE_LAYOUT_GENERAL, UI.layer, VK_IMAGE_LAYOUT_GENERAL, 1, &all);
+        if (UI.w - area >= off) {   // the left strip: what the game cleared the layer to, from the undrawn right part
+            VkImageCopy strip = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffset = {(int32_t)area, 0, 0},
+                                 .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .extent = {off, UI.h, 1}};
+            vkCmdCopyImage(ex->cb, UI.spare, VK_IMAGE_LAYOUT_GENERAL, UI.layer, VK_IMAGE_LAYOUT_GENERAL, 1, &strip);
+        }
+        vkCmdPipelineBarrier2(ex->cb, &d);
+        UI.shifted = 1;
+        return;
+    }
+}
+
 void vk_exec_pass_begin(VkExec *ex) {
     if (ex->in_pass) return;
     resolve_rt(ex);
+    if (kar_ui_shift_mode()) ui_layer_shift(ex);
     // Learned targets (VkTexImage.fb_learned) are attached in the feedback layout
     VkImage want[9];
     VkImageAspectFlags wasp[9];
