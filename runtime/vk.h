@@ -71,7 +71,15 @@ int vk_caps_gpl(const VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *f,
                 const VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT *p);
 void vk_caps_init(VkCtx *c);                          // after it: pretend limits, fallbacks, the boot report
 
-VkCtx *vk_ctx(void);                        // NULL until vk_init() succeeded
+VkCtx *vk_ctx(void);
+// ---- bindless textures (vk_bindless.c, RELEASE_PLAN 16.2): a global set mirroring the texture and sampler pools
+int vk_bindless_active(void);                                  // KAR_BINDLESS=1 on kar* with descriptor indexing
+VkDescriptorSetLayout vk_bindless_layout(void);                // VK_NULL_HANDLE when off
+VkDescriptorSet vk_bindless_set(void);
+void vk_bindless_put_image(int kind, uint32_t id, VkImageView view, VkImageLayout layout);   // kind 0 2D, 1 2D array, 2 cube
+void vk_bindless_put_sampler(uint32_t id, VkSampler s);
+void vk_bindless_flush(void);                                  // pending writes, before a submission that reads the set
+uint64_t vk_bindless_writes(void);                        // NULL until vk_init() succeeded
 int vk_init(void);                          // idempotent; 1 on success, 0 on failure (reason logged with rt_log)
 void vk_shutdown(void);
 int vk_selftest(void);                      // 0 on success

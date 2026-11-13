@@ -460,6 +460,7 @@ int vk_init(void) {
     }
     int ok = g_ready;
     plat_mutex_unlock(&g_lock);
+    if (ok) vk_bindless_active();   // vk_bindless.c: creates the global set when KAR_BINDLESS=1 (16.2)
     return ok;
 }
 
