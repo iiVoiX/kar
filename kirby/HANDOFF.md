@@ -733,3 +733,6 @@ same fps. Plan: default prebuild off for kar* (or keep fewer), then lazy heap co
 - The DLSS class (eval main+0x4c34664, vtable main+0x8b239e8) is built only by factory main+0x4c3d44c with kind 0;
   its 6 callers (main+0x5adae40..0x5adaf28) always pass kind 1 (class 0xe0, no DLSS calls). DLSS is unreachable in
   1.3.3 even with EnableDLSS=1. Frame generation goes way B (motion from depth + matrices, optical flow for objects).
+- Frame generation B1 (2026-11-13): `KAR_FG=1` → runtime/vk_fg.cpp (FFX optical flow + frame interpolation, motion
+  vectors 0, depth far), interpolated picture presented halfway between real ones (vk_backend.c present_main).
+  build_game.py links build/ffx-src/bin/ffx_sdk libs when present. Built; NOT yet run in the game.

@@ -288,6 +288,11 @@ def c_string(s):
     return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
+# FidelityFX SDK built by tools/build_ffx.py (Windows): runtime/vk_fg.cpp compiles against it and these libraries are
+# linked (frame generation, KAR_FG=1). Without it vk_fg.cpp builds its stubs.
+FFX_DIR = ROOT / 'build' / 'ffx-src'
+FFX_LIBS = ([FFX_DIR / 'bin' / 'ffx_sdk' / f'libffx_{n}_x64.a' for n in ('frameinterpolation', 'opticalflow', 'backend_vk')]
+            if WIN and (FFX_DIR / 'bin' / 'ffx_sdk' / 'libffx_backend_vk_x64.a').is_file() else [])
 RUNTIME = ROOT / 'runtime'   # --runtime: a copy of runtime/ lets a task build without touching the shared tree
 
 
@@ -391,6 +396,7 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
     imgui = cmd_path(RUNTIME / 'third_party' / 'imgui')
     rt_inc = f'{inc} -I {cmd_path(out)} -I {vma} -I {imgui}'   # romfs_config.h, vk_mem_alloc.h (+ deps headers), imgui.h
     libs = [f'-L {cmd_path(DEPS / "lib")}'] + (LLVM_LINK_LIBS if WIN else LINK_LIBS) if DEPS else LINK_LIBS
+    libs = [cmd_path(p) for p in FFX_LIBS] + libs   # frame generation (runtime/vk_fg.cpp), when the SDK is built
     # A compiler cache (sccache) may front clang: every lift rewrites the generated chunks with the same contents, so
     # the cached objects save the compile step on the next build.
     cache = f'{cmd_arg(os.environ["SCCACHE"])} ' if os.environ.get('SCCACHE') else ''
@@ -458,6 +464,8 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
             lines.append(f'build {ninja_path(o)}: cc_rt {ninja_path(src)}')
             if src.suffix == '.cpp':   # the Ampere lowering headers (runtime/third_party/eglantine) need C++20
                 lines.append(f'  rtflags = $rtflags -std=c++20 -I {cmd_path(RUNTIME / "third_party" / "eglantine")}')
+            if src.name == 'vk_fg.cpp' and FFX_LIBS:   # frame generation: the FidelityFX SDK headers when it is built
+                lines[-1] += f' -I {cmd_path(FFX_DIR / "include")} -Wno-everything'
         rt.append(o)
     objs['runtime'] = rt
     every = [o for v in objs.values() for o in v]

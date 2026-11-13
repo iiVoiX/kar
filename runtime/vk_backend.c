@@ -76,7 +76,7 @@ static int present_hold(void) {
 
 static void present_main(void *arg) {
     (void)arg;
-    uint64_t last = 0, last_queued = 0;
+    uint64_t last = 0, last_queued = 0, last_at = 0;   // last_at: the previous display time (frame generation)
     plat_mutex_lock(&pl);
     for (;;) {
         while (!pending) plat_cond_wait(&pcv, &pl);
@@ -89,6 +89,20 @@ static void present_main(void *arg) {
         static int plog = -1, pn;   // KAR_DEAD_LOG=1: the images the present thread blits, first ones
         if (plog < 0) plog = getenv("KAR_DEAD_LOG") != NULL;
         if (plog && pn++ < 40) rt_log("present: blit of image %#llx (frame %llu)", (unsigned long long)(uintptr_t)j.image, (unsigned long long)j.frame);
+        // Frame generation (vk_fg.cpp): the interpolated picture first, shown halfway between the previous real
+        // picture's display time and this one's, then the real picture as usual
+        if (vk_fg_on()) {
+            VkFormat ff = VK_FORMAT_UNDEFINED;
+            VkImage mid = vk_fg_interpolate(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, &ff);
+            if (mid) {
+                vk_present_blit(mid, VK_IMAGE_LAYOUT_GENERAL, ff, j.has_crop ? j.crop[2] : j.w,
+                                j.has_crop ? j.crop[3] : j.h, NULL);
+                if (present_hold() && last_at && j.at > last_at && j.at - last_at < 100000000ull)
+                    wait_until(j.at - (j.at - last_at) / 2);
+                vk_present_flip();
+            }
+            last_at = j.at;
+        }
         uint64_t q0 = kern_now_ns();
         vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
         uint64_t q1 = kern_now_ns();
