@@ -1201,16 +1201,19 @@ static void arr_dims(const GfxShader *s) {
                     uint32_t t = ptr_to[w[i + 1]], a = t < bound ? arr_of[t] : 0, si = a && a < bound ? simg_of[a] : 0;
                     if (!si || si >= bound) continue;
                     const uint32_t *m = img[si];
-                    uint32_t key = m[1] | m[2] << 4 | m[3] << 6 | m[4] << 7 | (m[0] < bound ? num[m[0]] : 0) << 8;
+                    uint32_t key = m[1] | m[2] << 4 | m[3] << 6 | m[4] << 7 | (m[0] < bound ? num[m[0]] : 0) << 8 |
+                                   (uint32_t)(res->samp_slot >= 0) << 12 | (uint32_t)res->separate << 13;
                     static uint32_t seen[64];
                     static int nseen;
                     int k = 0;
                     while (k < nseen && seen[k] != key) k++;
                     if (k == nseen && nseen < 64) {
                         seen[nseen++] = key;
-                        rt_log("arr dims: dim %u depth %u arrayed %u ms %u type %s (stage %d binding %d)", m[1], m[2],
+                        char kh[65];
+                        for (int q = 0; q < 32; q++) snprintf(kh + 2 * q, 3, "%02x", s->key[q]);
+                        rt_log("arr dims: dim %u depth %u arrayed %u ms %u type %s samp_slot %d separate %d (stage %d binding %d) %s", m[1], m[2],
                                m[3], m[4], (m[0] < bound && num[m[0]] == 1) ? "float" : (m[0] < bound && num[m[0]] == 2) ? "int" : "uint",
-                               s->stage, res->binding);
+                               res->samp_slot, res->separate, s->stage, res->binding, kh);
                     }
                 }
             }
@@ -1330,6 +1333,220 @@ bad:
     free(is_arr_var), free(is_const), free(rewrite), free(val), free(ctype), free(arr_len), free(pointee), free(vtype);
     free(cast), free(newptr), free(binding);
     return 0;
+}
+
+// Bindless material arrays (RELEASE_PLAN 16.2, KAR_BINDLESS=1). A material array whose sampler sits in the handle
+// (GfxShaderRes.samp_slot < 0) is read through the global set (vk_bindless.c, set 2) instead of the array: each
+// `%p = OpAccessChain %arr %i` + `%r = OpLoad %T %p` becomes
+//   h = bitcast<uint>(cbuf.data[i >> 1][(i & 1) * 2])   (element i's handle at byte 8i of its constant buffer)
+//   %r = OpSampledImage %T (globalImage[h & 0xfffff]) (globalSampler[h >> 20])
+// with NonUniform decorations, so the array is no longer used and its binding keeps one element. Arrays whose
+// sampler comes from a separate-sampler slot, other image kinds and modules of another shape stay as they are.
+// Returns the number of arrays moved.
+static int bindless_patch(GfxShader *s) {
+    enum { OP_EXTENSION_ = 10, OP_CAPABILITY_ = 17, OP_TYPE_INT_ = 21, OP_TYPE_FLOAT_ = 22, OP_TYPE_VECTOR_ = 23,
+           OP_TYPE_IMAGE_ = 25, OP_TYPE_SAMPLER_ = 26, OP_TYPE_SAMPLED_IMAGE_ = 27, OP_TYPE_ARRAY_ = 28,
+           OP_TYPE_STRUCT_ = 30, OP_TYPE_POINTER_ = 32, OP_CONST = 43, OP_FUNCTION_ = 54, OP_VAR = 59, OP_LOAD_ = 61,
+           OP_ACCESS_CHAIN = 65, OP_DECOR = 71, OP_SAMPLED_IMAGE_ = 86, OP_BITCAST = 124, OP_SHR = 194, OP_SHL = 196,
+           OP_AND = 199, OP_EXT_INST_ = 12, OP_IADD_ = 128, OP_COPY_OBJECT_ = 83, DEC_BINDING = 33, DEC_SET = 34, DEC_NONUNIFORM = 5300, CAP_NONUNIFORM = 5301,
+           CAP_SAMPLED_NU = 5307, SC_UNIFORM_CONSTANT = 0, SC_UNIFORM = 2, SEQ = 13 };
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_BINDLESS") && *getenv("KAR_BINDLESS") == '1';
+    if (!on) return 0;
+    int want = 0;
+    for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
+        const GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+        want |= r->arr_ubo && r->samp_slot < 0 && !r->separate && r->cbuf_slot > 0;
+    }
+    if (!want) return 0;
+    const uint32_t *w = s->spirv;
+    uint64_t n = s->words;
+    uint32_t bound = w[3];
+    if (n < 5 || bound > (1u << 22)) return 0;
+    uint32_t *binding = calloc(bound, 4), *ptr_to = calloc(bound, 4), *ptr_sc = calloc(bound, 4), *arr_elem = calloc(bound, 4),
+             *simg_img = calloc(bound, 4), *vtype = calloc(bound, 4), *struct_m0 = calloc(bound, 4), *vec_of = calloc(bound, 4),
+             *chain_var = calloc(bound, 4), *chain_idx = calloc(bound, 4), *load_base = calloc(bound, 4),
+             *kind_of = calloc(bound, 4), *cbvar_of = calloc(bound, 4), *gvar = calloc(bound, 4), *gptr = calloc(bound, 4),
+             *rtype = calloc(bound, 4);
+    uint8_t *img_ok = calloc(bound, 1);
+    uint32_t (*img)[3] = calloc(bound, sizeof *img);   // dim, depth, arrayed
+    if (!binding || !ptr_to || !ptr_sc || !arr_elem || !simg_img || !vtype || !struct_m0 || !vec_of || !chain_var ||
+        !chain_idx || !load_base || !kind_of || !cbvar_of || !gvar || !gptr || !img_ok || !img || !rtype)
+        rt_fatal("gfx_shader: out of memory patching a shader");
+    int moved = 0, nloads = 0;
+    uint32_t t_uint = 0, t_int = 0, t_float = 0, t_sampler = 0, nb = bound, nimg_types = 0, img_types[8];
+    uint64_t first_func = 0, first_decor = 0, last_cap = 0;
+    for (uint64_t i = 5; i < n;) {   // pass 1: types, decorations, variables
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (!len || i + len > n) goto out;
+        if (op == OP_CAPABILITY_) last_cap = i + len;
+        if (op == OP_DECOR && !first_decor) first_decor = i;
+        if (op == OP_FUNCTION_ && !first_func) first_func = i;
+        if (op == OP_DECOR && len == 4 && w[i + 2] == DEC_BINDING && w[i + 1] < bound) binding[w[i + 1]] = w[i + 3] + 1;
+        else if (op == OP_TYPE_INT_ && len == 4 && w[i + 2] == 32) { if (w[i + 3]) t_int = w[i + 1]; else t_uint = w[i + 1]; }
+        else if (op == OP_TYPE_FLOAT_ && len == 3 && w[i + 2] == 32) t_float = w[i + 1];
+        else if (op == OP_TYPE_SAMPLER_ && len == 2) t_sampler = w[i + 1];
+        else if (op == OP_TYPE_VECTOR_ && len == 4 && w[i + 1] < bound && w[i + 3] == 4) vec_of[w[i + 1]] = w[i + 2];
+        else if (op == OP_TYPE_IMAGE_ && len >= 9 && w[i + 1] < bound) {
+            img[w[i + 1]][0] = w[i + 3], img[w[i + 1]][1] = w[i + 4], img[w[i + 1]][2] = w[i + 5];
+            img_ok[w[i + 1]] = w[i + 2] == t_float && w[i + 6] == 0 && w[i + 7] == 1;   // float, single sample, sampled
+        } else if (op == OP_TYPE_SAMPLED_IMAGE_ && len == 3 && w[i + 1] < bound) simg_img[w[i + 1]] = w[i + 2];
+        else if (op == OP_TYPE_ARRAY_ && len == 4 && w[i + 1] < bound) arr_elem[w[i + 1]] = w[i + 2];
+        else if (op == OP_TYPE_STRUCT_ && len >= 3 && w[i + 1] < bound) struct_m0[w[i + 1]] = w[i + 2];
+        else if (op == OP_TYPE_POINTER_ && len == 4 && w[i + 1] < bound) ptr_sc[w[i + 1]] = w[i + 2], ptr_to[w[i + 1]] = w[i + 3];
+        else if (op == OP_VAR && len >= 4 && w[i + 2] < bound) vtype[w[i + 2]] = w[i + 1];
+        if ((op == OP_BITCAST || op == OP_EXT_INST_ || (op >= OP_SHR && op <= OP_AND) || op == OP_IADD_) && len >= 3 &&
+            w[i + 2] < bound)
+            rtype[w[i + 2]] = w[i + 1];   // result types of the instructions an index comes from
+        i += len;
+    }
+    if (!t_uint || !t_int || !t_float || !first_func || !first_decor || !last_cap) goto out;
+    // The arrays to move: binding of a qualifying resource, element a 2D / 2D array / cube float image, its constant
+    // buffer declared as a struct whose first member is an array of float vec4.
+    uint32_t c_nimg = nb++, c_nsamp = nb++, c_mask = nb++, c_20 = nb++, c_i0 = nb++, c_i1 = nb++, p_ufloat = nb++;
+    uint32_t t_samp = t_sampler ? t_sampler : nb++, a_samp = nb++, pa_samp = nb++, p_samp = nb++, g_samp = nb++;
+    for (uint32_t v = 0; v < bound; v++) {
+        if (!binding[v] || !vtype[v] || vtype[v] >= bound || ptr_sc[vtype[v]] != SC_UNIFORM_CONSTANT) continue;
+        uint32_t at = ptr_to[vtype[v]], st = at < bound ? arr_elem[at] : 0, it = st && st < bound ? simg_img[st] : 0;
+        if (!it || it >= bound || !img_ok[it]) continue;
+        uint32_t kind = img[it][0] == 1 ? (img[it][2] ? 2 : 1) : img[it][0] == 3 && !img[it][2] ? 3 : 0;   // 2D, 2D array, cube
+        if (!kind) continue;
+        for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
+            GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+            if (!r->arr_ubo || r->samp_slot >= 0 || r->separate || r->binding != binding[v] - 1 || r->cbuf_slot <= 0) continue;
+            uint32_t cb = 0;   // the variable of constant buffer cbuf_slot
+            for (int u = 0; u < s->nres[GFX_RES_UBO] && !cb; u++)
+                if (s->res[GFX_RES_UBO][u].slot == r->cbuf_slot)
+                    for (uint32_t x = 0; x < bound && !cb; x++)
+                        if (binding[x] == (uint32_t)s->res[GFX_RES_UBO][u].binding + 1 && vtype[x] && vtype[x] < bound &&
+                            ptr_sc[vtype[x]] == SC_UNIFORM)
+                            cb = x;
+            if (!cb) break;
+            uint32_t sty = ptr_to[vtype[cb]], m0 = sty < bound ? struct_m0[sty] : 0, ve = m0 && m0 < bound ? arr_elem[m0] : 0;
+            if (!ve || ve >= bound || vec_of[ve] != t_float) break;
+            int have = 0;
+            for (uint32_t q = 0; q < nimg_types; q++) have |= img_types[q] == it;
+            if (!have) {
+                if (nimg_types == 8) break;
+                img_types[nimg_types++] = it, gvar[it] = nb, nb += 3, gptr[it] = nb++;   // array, its pointer, variable; element pointer
+            }
+            kind_of[v] = kind, cbvar_of[v] = cb;
+            break;
+        }
+    }
+    for (uint64_t i = first_func; i < n;) {   // pass 2: access chains into moved arrays and their loads
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (op == OP_ACCESS_CHAIN && len == 5 && w[i + 3] < bound && kind_of[w[i + 3]] && w[i + 2] < bound)
+            chain_var[w[i + 2]] = w[i + 3], chain_idx[w[i + 2]] = w[i + 4];
+        else if (op == OP_LOAD_ && len >= 4 && w[i + 3] < bound && chain_var[w[i + 3]] && w[i + 2] < bound)
+            load_base[w[i + 2]] = nb, nb += SEQ, nloads++;
+        i += len;
+    }
+    if (!nloads) goto out;
+    // Every chain into a moved array must feed a load rewritten here (any other use would keep the array in use).
+    for (uint64_t i = first_func; i < n;) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (op != OP_ACCESS_CHAIN)
+            for (uint32_t a = 1; a < len; a++)
+                if (w[i + a] < bound && chain_var[w[i + a]] && !(op == OP_LOAD_ && a == 3)) goto out;
+        i += len;
+    }
+    uint32_t *o = malloc((n + 96 + 24 * (uint64_t)nimg_types + (uint64_t)nloads * 80) * sizeof *o);
+    if (!o) rt_fatal("gfx_shader: out of memory patching a shader");
+    uint64_t m = 0;
+    for (int k = 0; k < 5; k++) o[m++] = w[k];
+    for (uint64_t i = 5; i < n;) {
+        uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (i == first_decor) {   // the global variables' set and binding, NonUniform on every per-use value
+            for (uint32_t q = 0; q < nimg_types; q++) {
+                uint32_t it = img_types[q], v = gvar[it] + 2, kind = img[it][0] == 3 ? 2 : img[it][2] ? 1 : 0;
+                o[m++] = 4u << 16 | OP_DECOR, o[m++] = v, o[m++] = DEC_SET, o[m++] = 2;
+                o[m++] = 4u << 16 | OP_DECOR, o[m++] = v, o[m++] = DEC_BINDING, o[m++] = kind;
+            }
+            o[m++] = 4u << 16 | OP_DECOR, o[m++] = g_samp, o[m++] = DEC_SET, o[m++] = 2;
+            o[m++] = 4u << 16 | OP_DECOR, o[m++] = g_samp, o[m++] = DEC_BINDING, o[m++] = 3;
+            for (uint32_t x = 0; x < bound; x++)
+                if (load_base[x]) {
+                    for (uint32_t d = 6; d <= 11; d++) o[m++] = 3u << 16 | OP_DECOR, o[m++] = load_base[x] + d, o[m++] = DEC_NONUNIFORM;
+                    o[m++] = 3u << 16 | OP_DECOR, o[m++] = x, o[m++] = DEC_NONUNIFORM;
+                }
+        }
+        if (i == first_func) {   // types, constants and variables of the global set
+            o[m++] = 4u << 16 | OP_CONST, o[m++] = t_uint, o[m++] = c_nimg, o[m++] = 65792;
+            o[m++] = 4u << 16 | OP_CONST, o[m++] = t_uint, o[m++] = c_nsamp, o[m++] = 4096;
+            o[m++] = 4u << 16 | OP_CONST, o[m++] = t_uint, o[m++] = c_mask, o[m++] = 0xfffff;
+            o[m++] = 4u << 16 | OP_CONST, o[m++] = t_uint, o[m++] = c_20, o[m++] = 20;
+            o[m++] = 4u << 16 | OP_CONST, o[m++] = t_int, o[m++] = c_i0, o[m++] = 0;
+            o[m++] = 4u << 16 | OP_CONST, o[m++] = t_int, o[m++] = c_i1, o[m++] = 1;
+            o[m++] = 4u << 16 | OP_TYPE_POINTER_, o[m++] = p_ufloat, o[m++] = SC_UNIFORM, o[m++] = t_float;
+            if (!t_sampler) o[m++] = 2u << 16 | OP_TYPE_SAMPLER_, o[m++] = t_samp;
+            o[m++] = 4u << 16 | OP_TYPE_ARRAY_, o[m++] = a_samp, o[m++] = t_samp, o[m++] = c_nsamp;
+            o[m++] = 4u << 16 | OP_TYPE_POINTER_, o[m++] = pa_samp, o[m++] = SC_UNIFORM_CONSTANT, o[m++] = a_samp;
+            o[m++] = 4u << 16 | OP_TYPE_POINTER_, o[m++] = p_samp, o[m++] = SC_UNIFORM_CONSTANT, o[m++] = t_samp;
+            o[m++] = 4u << 16 | OP_VAR, o[m++] = pa_samp, o[m++] = g_samp, o[m++] = SC_UNIFORM_CONSTANT;
+            for (uint32_t q = 0; q < nimg_types; q++) {
+                uint32_t it = img_types[q], a = gvar[it], pa = a + 1, v = a + 2;
+                o[m++] = 4u << 16 | OP_TYPE_ARRAY_, o[m++] = a, o[m++] = it, o[m++] = c_nimg;
+                o[m++] = 4u << 16 | OP_TYPE_POINTER_, o[m++] = pa, o[m++] = SC_UNIFORM_CONSTANT, o[m++] = a;
+                o[m++] = 4u << 16 | OP_TYPE_POINTER_, o[m++] = gptr[it], o[m++] = SC_UNIFORM_CONSTANT, o[m++] = it;
+                o[m++] = 4u << 16 | OP_VAR, o[m++] = pa, o[m++] = v, o[m++] = SC_UNIFORM_CONSTANT;
+            }
+        }
+        if (op == OP_ACCESS_CHAIN && len == 5 && w[i + 2] < bound && chain_var[w[i + 2]]) { i += len; continue; }
+        if (op == OP_LOAD_ && len >= 4 && w[i + 2] < bound && load_base[w[i + 2]]) {
+            uint32_t res = w[i + 2], st = w[i + 1], p = w[i + 3], v = chain_var[p], idx = chain_idx[p], b = load_base[res];
+            uint32_t it = simg_img[arr_elem[ptr_to[vtype[v]]]], cb = cbvar_of[v];
+            uint32_t vi = b, bit = b + 1, ci = b + 2, pf = b + 3, hf = b + 4, h = b + 5, tid = b + 6, sid = b + 7, pi = b + 8,
+                     im = b + 9, ps = b + 10, sm = b + 11, iidx = b + 12;
+            o[m++] = 4u << 16 | (rtype[idx] == t_int ? OP_COPY_OBJECT_ : OP_BITCAST), o[m++] = t_int, o[m++] = iidx, o[m++] = idx;
+            o[m++] = 5u << 16 | OP_SHR, o[m++] = t_int, o[m++] = vi, o[m++] = iidx, o[m++] = c_i1;
+            o[m++] = 5u << 16 | OP_AND, o[m++] = t_int, o[m++] = bit, o[m++] = iidx, o[m++] = c_i1;
+            o[m++] = 5u << 16 | OP_SHL, o[m++] = t_int, o[m++] = ci, o[m++] = bit, o[m++] = c_i1;
+            o[m++] = 7u << 16 | OP_ACCESS_CHAIN, o[m++] = p_ufloat, o[m++] = pf, o[m++] = cb, o[m++] = c_i0, o[m++] = vi, o[m++] = ci;
+            o[m++] = 4u << 16 | OP_LOAD_, o[m++] = t_float, o[m++] = hf, o[m++] = pf;
+            o[m++] = 4u << 16 | OP_BITCAST, o[m++] = t_uint, o[m++] = h, o[m++] = hf;
+            o[m++] = 5u << 16 | OP_AND, o[m++] = t_uint, o[m++] = tid, o[m++] = h, o[m++] = c_mask;
+            o[m++] = 5u << 16 | OP_SHR, o[m++] = t_uint, o[m++] = sid, o[m++] = h, o[m++] = c_20;
+            o[m++] = 5u << 16 | OP_ACCESS_CHAIN, o[m++] = gptr[it], o[m++] = pi, o[m++] = gvar[it] + 2, o[m++] = tid;
+            o[m++] = 4u << 16 | OP_LOAD_, o[m++] = it, o[m++] = im, o[m++] = pi;
+            o[m++] = 5u << 16 | OP_ACCESS_CHAIN, o[m++] = p_samp, o[m++] = ps, o[m++] = g_samp, o[m++] = sid;
+            o[m++] = 4u << 16 | OP_LOAD_, o[m++] = t_samp, o[m++] = sm, o[m++] = ps;
+            o[m++] = 5u << 16 | OP_SAMPLED_IMAGE_, o[m++] = st, o[m++] = res, o[m++] = im, o[m++] = sm;
+            i += len;
+            continue;
+        }
+        memcpy(o + m, w + i, len * sizeof *w), m += len;
+        if (i + len == last_cap) {   // the capabilities, and the extension descriptor indexing needs before SPIR-V 1.5
+            o[m++] = 2u << 16 | OP_CAPABILITY_, o[m++] = CAP_NONUNIFORM;
+            o[m++] = 2u << 16 | OP_CAPABILITY_, o[m++] = CAP_SAMPLED_NU;
+            if (w[1] < 0x00010500) {
+                static const char ext[] = "SPV_EXT_descriptor_indexing";
+                uint32_t words = (uint32_t)(sizeof ext + 3) / 4;
+                o[m++] = (1u + words) << 16 | OP_EXTENSION_;
+                memset(o + m, 0, words * 4), memcpy(o + m, ext, sizeof ext), m += words;
+            }
+        }
+        i += len;
+    }
+    o[3] = nb;
+    for (uint32_t v = 0; v < bound; v++)   // the moved arrays' resources: one unused element, read through the set
+        if (kind_of[v])
+            for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
+                GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+                if (r->arr_ubo && r->binding == binding[v] - 1) {
+                    r->bindless = (uint8_t)kind_of[v], r->bl_n = r->count ? r->count : 32, r->count = 1, moved++;
+                    break;
+                }
+            }
+    free(s->spirv);
+    s->spirv = o, s->words = m;
+    static int told;
+    if (told++ < 3) rt_log("gfx_shader: bindless: %d material arrays moved to the global set (%d loads)", moved, nloads);
+out:
+    free(binding), free(ptr_to), free(ptr_sc), free(arr_elem), free(simg_img), free(vtype), free(struct_m0), free(vec_of);
+    free(chain_var), free(chain_idx), free(load_base), free(kind_of), free(cbvar_of), free(gvar), free(gptr), free(img_ok);
+    free(img), free(rtype);
+    return moved;
 }
 
 // SPIR-V opcodes and enumerants used below (SPIR-V 1.6 specification, section 3).
@@ -1577,6 +1794,7 @@ static int reflect(GfxShader *s, int flags) {
     if (!pool_patch(s)) rt_log("gfx_shader: a Direct pool array shader did not have the expected shape; left as is");
     if (!arr_patch(s)) rt_log("gfx_shader: a material array shader did not have the expected shape; left at 32");
     arr_dims(s);
+    bindless_patch(s);
     if (s->geometry_source_passthrough) {
         if (s->geometry_position != 3) return 0;
         uint32_t locations = 0;

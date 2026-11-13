@@ -179,7 +179,7 @@ static struct { uint32_t n[2], pn[2]; uint8_t sig[2][DS_SIG_BYTES], psig[2][DS_S
 // TOTK_BIND_STATS counters (bind_stats).
 static struct {
     int on;
-    uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, ac_miss, same_prog, same_all, bind_skip, arr_desc, pool_desc;
+    uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, ac_miss, same_prog, same_all, bind_skip, arr_desc, pool_desc, arr_own_samp;
 } BS = {-1};
 
 // The inputs of the last graphics bind_resources (bind_sig) and what its build counted for the traffic census, which a
@@ -2380,7 +2380,10 @@ static void bind_stats(const VkPipeInfo *info) {
         const VkPipeBinding *b = &info->bindings[i];
         int fs = info->n_sets > 1 ? b->set : !(b->stages & VK_SHADER_STAGE_VERTEX_BIT);
         BS.bind[fs]++, BS.desc[fs] += b->count ? b->count : 1;
-        if (b->res && b->res->arr_ubo) BS.arr_desc += b->count ? b->count : 1;   // material arrays (bindless 16.2)
+        if (b->res && b->res->arr_ubo) {   // material arrays (bindless 16.2); those whose sampler is in the handle
+            BS.arr_desc += b->count ? b->count : 1;
+            if (b->res->samp_slot < 0) BS.arr_own_samp += b->count ? b->count : 1;
+        }
         else if (b->res && b->res->pool_arr) BS.pool_desc += b->count ? b->count : 1;
     }
     if (++BS.draws % 20000 == 0) {
@@ -2391,8 +2394,8 @@ static void bind_stats(const VkPipeInfo *info) {
                "same program and state as the draw before %.3f, also same buffers %.3f; descriptor builds skipped %.3f",
                BS.push / d, BS.push_skip / d, BS.set_new / d, BS.set_reuse / d, BS.ac_miss / d, BS.same_prog / d,
                BS.same_all / d, BS.bind_skip / d);
-        rt_log("vk_exec: per draw: descriptors from material arrays %.2f, from pool arrays %.2f", BS.arr_desc / d,
-               BS.pool_desc / d);
+        rt_log("vk_exec: per draw: descriptors from material arrays %.2f (sampler in the handle %.2f), from pool arrays %.2f",
+               BS.arr_desc / d, BS.arr_own_samp / d, BS.pool_desc / d);
     }
 }
 
@@ -2495,10 +2498,11 @@ static uint64_t arr_sig_words(const VkExec *ex, int st, const GfxShaderRes *r, c
     h = (h ^ (u ? u->addr : 0)) * 0x100000001b3ull;
     h = (h ^ (u ? u->size : 0)) * 0x100000001b3ull;
     static uint64_t w[1024];
-    uint32_t n = r->count < 1024 ? r->count : 1024;
+    uint32_t cnt = r->bindless ? r->bl_n : r->count;   // a bindless array keeps one element but reads bl_n handles
+    uint32_t n = cnt < 1024 ? cnt : 1024;
     ubo_block(ex, st, r->cbuf_slot, 0, n, w);
     for (uint32_t k = 0; k < n; k++) h = (h ^ w[k]) * 0x100000001b3ull;
-    for (uint32_t k = n; k < r->count; k++) h = (h ^ ubo_word(ex, st, r->cbuf_slot, 8ull * k)) * 0x100000001b3ull;
+    for (uint32_t k = n; k < cnt; k++) h = (h ^ ubo_word(ex, st, r->cbuf_slot, 8ull * k)) * 0x100000001b3ull;
     return h;
 }
 
@@ -2653,6 +2657,42 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     bind_resources_impl(ex, info);
     vk_rp_bind_ns += plat_now_ns() - t0;
 }
+// Bindless material arrays (gfx_shader.c bindless_patch, 16.2): the shader reads element k's texture and sampler from
+// the global set by the handle at byte 8k of its constant buffer. Each handle the array holds is resolved through
+// tex_info once per submission (vk_texture_epoch: its lazy upload, storage check and barrier, as before), and the
+// global set is written only when the view, layout or sampler differs from what it holds.
+static void bindless_resident(VkExec *ex, int st, const GfxShaderRes *r) {
+    enum { NIMG = 65792, NSAMP = 4096 };
+    static uint64_t aw[1024];
+    static uint32_t img_ep[3][NIMG], samp_ep[NSAMP];
+    static VkImageView img_v[3][NIMG];
+    static VkImageLayout img_l[3][NIMG];
+    static VkSampler samp_v[NSAMP];
+    uint32_t n = r->bl_n <= 1024 ? r->bl_n : 1024, ep = vk_texture_epoch() + 1, kind = r->bindless - 1u;
+    if (!n || kind > 2 || !arr_sched_allows(r->cbuf_slot)) return;
+    ubo_block(ex, st, r->cbuf_slot, 0, n, aw);
+    int put = 0;
+    vk_texture_lock();
+    for (uint32_t k = 0; k < n; k++) {
+        uint64_t h = aw[k] & 0xffffffffull;
+        uint32_t tid = (uint32_t)(h & 0xfffff), sid = (uint32_t)(h >> 20);
+        if (!h || (img_ep[kind][tid] == ep && samp_ep[sid] == ep)) continue;
+        VkDescriptorImageInfo ii;
+        tex_info(ex, r, h, 0, 0, &ii);
+        img_ep[kind][tid] = ep, samp_ep[sid] = ep;
+        if (ii.imageView != img_v[kind][tid] || ii.imageLayout != img_l[kind][tid]) {
+            vk_bindless_put_image((int)kind, tid, ii.imageView, ii.imageLayout);
+            img_v[kind][tid] = ii.imageView, img_l[kind][tid] = ii.imageLayout, put = 1;
+        }
+        if (ii.sampler && ii.sampler != samp_v[sid]) {
+            vk_bindless_put_sampler(sid, ii.sampler);
+            samp_v[sid] = ii.sampler, put = 1;
+        }
+    }
+    vk_texture_unlock();
+    if (put) vk_bindless_flush();
+}
+
 static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
     static VkWriteDescriptorSet w[MAX_BINDINGS];
     static VkDescSlot d[MAX_DESC];
@@ -2726,6 +2766,13 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
                 vk_texture_lock();
                 pool_fill(ex, st, r, cnt, o);
                 vk_texture_unlock();
+            } else if (r->bindless) {   // read through the global set: one unused element
+                kind = 1;
+                bindless_resident(ex, st, r);
+                vk_texture_lock();
+                tex_info(ex, r, 0, 0, 0, &o[0].image);
+                vk_texture_unlock();
+                o[0].w[2] = (uint32_t)o[0].image.imageLayout;
             } else {
                 kind = 1;
                 // A material array: its handles in one read (ubo_block), and the descriptor of an empty element made
@@ -2838,6 +2885,21 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
         B.ds_pushed[0] = B.ds_pushed[1] = 0;
         set1_first = n_sets == 2 && vk_ctx()->validation;
     }
+    {   // bindless (vk_bindless.c, 16.2): the global set as set 2, again after a new command buffer or layout; bound
+        // before sets 0 and 1 are pushed or bound, so it does not disturb their push sets
+        static VkCommandBuffer bl_cb[2];
+        static VkPipelineLayout bl_layout[2];
+        int k = !gfx;
+        VkDescriptorSet bls = info->bindless ? vk_bindless_set() : VK_NULL_HANDLE;
+        if (bls && (bl_cb[k] != ex->cb || bl_layout[k] != info->layout)) {
+            extern VkDescriptorSet vk_pipeline_empty_set(void);
+            VkDescriptorSet two[2] = {vk_pipeline_empty_set(), bls};
+            if (!gfx && two[0]) vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 1, 2, two, 0, NULL);
+            else vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 2, 1, &bls, 0, NULL);
+            bl_cb[k] = ex->cb, bl_layout[k] = info->layout;
+            ex->recorded++;
+        }
+    }
     for (uint32_t k = 0; k < n_sets; k++) {
         uint32_t s = set1_first ? 1 - k : k, i0 = lo[s], i1 = hi[s];
         const VkDescSlot *ds = &d[d0[s]];
@@ -2903,17 +2965,6 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
                 B.ds_bound[s] = set, B.ds_pushed[s] = 0;
                 RS.cmds++;
             }
-        }
-    }
-    {   // bindless (vk_bindless.c, 16.2): the global set as set 2, again after a new command buffer or layout
-        static VkCommandBuffer bl_cb[2];
-        static VkPipelineLayout bl_layout[2];
-        int k = !gfx;
-        VkDescriptorSet bls = info->bindless ? vk_bindless_set() : VK_NULL_HANDLE;
-        if (bls && (bl_cb[k] != ex->cb || bl_layout[k] != info->layout)) {
-            vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 2, 1, &bls, 0, NULL);
-            bl_cb[k] = ex->cb, bl_layout[k] = info->layout;
-            ex->recorded++;
         }
     }
     if (skip) {

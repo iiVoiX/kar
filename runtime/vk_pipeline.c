@@ -699,7 +699,8 @@ static uint32_t *spirv_set(const uint32_t *w, uint64_t n, uint32_t set) {
     for (uint64_t i = 5; i < n;) {
         uint32_t op = o[i] & 0xffff, len = o[i] >> 16;
         if (!len || i + len > n) break;
-        if (op == SPV_OP_DECORATE && len >= 4 && o[i + 2] == SPV_DEC_DESCRIPTOR_SET) o[i + 3] = set;
+        // set 2 is the global bindless set (gfx_shader.c bindless_patch) in every stage; it stays
+        if (op == SPV_OP_DECORATE && len >= 4 && o[i + 2] == SPV_DEC_DESCRIPTOR_SET && o[i + 3] != 2) o[i + 3] = set;
         i += len;
     }
     return o;
@@ -1940,6 +1941,7 @@ static int push_fits(const VkDescriptorSetLayoutBinding *b, uint32_t n, int64_t 
 
 // Bindless (vk_bindless.c, RELEASE_PLAN 16.2): with KAR_BINDLESS=1 every pipeline layout gets the global set as set 2.
 // Compute layouts have one set of their own, so set 1 is an empty layout there.
+VkDescriptorSet vk_pipeline_empty_set(void);
 static VkDescriptorSetLayout empty_set_layout(void) {
     static VkDescriptorSetLayout e;
     if (!e) {
@@ -1947,6 +1949,26 @@ static VkDescriptorSetLayout empty_set_layout(void) {
         if (vkCreateDescriptorSetLayout(P.device, &ci, NULL, &e) != VK_SUCCESS) e = VK_NULL_HANDLE;
     }
     return e;
+}
+
+// The set bound at index 1 of a compute layout that has the bindless set (an empty layout, bound so sets 0 to 2 are
+// all compatible when the dispatch uses set 2).
+VkDescriptorSet vk_pipeline_empty_set(void) {
+    static VkDescriptorSet set;
+    static VkDescriptorPool pool;
+    if (!set && empty_set_layout()) {
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_SAMPLER, 1};
+        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1,
+                                         .poolSizeCount = 1, .pPoolSizes = &ps};
+        VkDescriptorSetLayout l = empty_set_layout();
+        VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 1,
+                                          .pSetLayouts = &l};
+        if (vkCreateDescriptorPool(P.device, &pi, NULL, &pool) == VK_SUCCESS) {
+            ai.descriptorPool = pool;
+            if (vkAllocateDescriptorSets(P.device, &ai, &set) != VK_SUCCESS) set = VK_NULL_HANDLE;
+        }
+    }
+    return set;
 }
 
 // Only layouts with a material array (GfxShaderRes.arr_ubo) get the bindless set: every other pipeline keeps its layout
@@ -1970,7 +1992,7 @@ static Layout *layout_get(Bindings *B) {
     if (!l) return NULL;
     l->hash = h, l->n = B->n;
     memcpy(l->b, B->b, B->n * sizeof *B->b);
-    l->push = push_fits(l->b, l->n, total);
+    l->push = push_fits(l->b, l->n, total) && !bindless_for(B, B->n);   // no push set beside the bindless set 2
     VkDescriptorSetLayoutCreateInfo si = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                           .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
                                           .bindingCount = l->n, .pBindings = l->b};
@@ -2019,8 +2041,8 @@ static Layout *layout_pair(Bindings *B, Bindings *F) {
     if (!l) return NULL;
     l->hash = h, l->n = n, l->n0 = n0;
     memcpy(l->b, B->b, n * sizeof *B->b);
-    l->push = P.push_stage == GFX_STAGE_VS && push_fits(l->b, n0, tv);
-    l->push1 = P.push_stage == GFX_STAGE_FS && F->n && push_fits(l->b + n0, n - n0, tf);
+    l->push = P.push_stage == GFX_STAGE_VS && push_fits(l->b, n0, tv) && !bindless_for(B, n);
+    l->push1 = P.push_stage == GFX_STAGE_FS && F->n && push_fits(l->b + n0, n - n0, tf) && !bindless_for(B, n);
     VkDescriptorSetLayoutCreateInfo s0 = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                           .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
                                           .bindingCount = n0, .pBindings = l->b};

@@ -136,6 +136,9 @@ typedef struct {
                                 // Read at bind time only with KAR_C0_TEX=1 (vk_exec_draw.c c0_tex_handle)
     uint8_t samp_tbl;           // arr_ubo TEX of NVN 2 compute: samp_slot is an entry of the packed bank's texture
                                 // table (a separate sampler handle bound there), not a c2 separate-sampler slot
+    uint8_t bindless;           // arr_ubo TEX read through the global bindless set (gfx_shader.c bindless_patch, 16.2):
+                                // image kind + 1 (1 2D, 2 2D array, 3 cube); the array binding keeps 1 unused element
+    uint16_t bl_n;              // bindless: the elements the shader may index (handles at bytes 8k of cbuf_slot)
 } GfxShaderRes;
 typedef struct { uint8_t type, comps, packed, scalar_bits; } GfxShaderIo;   // scalar_bits: actual numeric SPIR-V width, 0 unknown
 uint64_t gfx_shader_origin(const GfxShader *s);             // NVN 2 stage origin (nvn2_origin of its code) noted at get time, or 0
