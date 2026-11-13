@@ -179,7 +179,7 @@ static struct { uint32_t n[2], pn[2]; uint8_t sig[2][DS_SIG_BYTES], psig[2][DS_S
 // TOTK_BIND_STATS counters (bind_stats).
 static struct {
     int on;
-    uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, ac_miss, same_prog, same_all, bind_skip;
+    uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, ac_miss, same_prog, same_all, bind_skip, arr_desc, pool_desc;
 } BS = {-1};
 
 // The inputs of the last graphics bind_resources (bind_sig) and what its build counted for the traffic census, which a
@@ -2380,6 +2380,8 @@ static void bind_stats(const VkPipeInfo *info) {
         const VkPipeBinding *b = &info->bindings[i];
         int fs = info->n_sets > 1 ? b->set : !(b->stages & VK_SHADER_STAGE_VERTEX_BIT);
         BS.bind[fs]++, BS.desc[fs] += b->count ? b->count : 1;
+        if (b->res && b->res->arr_ubo) BS.arr_desc += b->count ? b->count : 1;   // material arrays (bindless 16.2)
+        else if (b->res && b->res->pool_arr) BS.pool_desc += b->count ? b->count : 1;
     }
     if (++BS.draws % 20000 == 0) {
         double d = (double)BS.draws;
@@ -2389,6 +2391,8 @@ static void bind_stats(const VkPipeInfo *info) {
                "same program and state as the draw before %.3f, also same buffers %.3f; descriptor builds skipped %.3f",
                BS.push / d, BS.push_skip / d, BS.set_new / d, BS.set_reuse / d, BS.ac_miss / d, BS.same_prog / d,
                BS.same_all / d, BS.bind_skip / d);
+        rt_log("vk_exec: per draw: descriptors from material arrays %.2f, from pool arrays %.2f", BS.arr_desc / d,
+               BS.pool_desc / d);
     }
 }
 
