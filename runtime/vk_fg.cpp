@@ -14,6 +14,7 @@
 extern "C" {
 #include <malloc.h>   // _aligned_malloc
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include "host.h"
 #include "vk.h"
@@ -153,6 +154,74 @@ FfxErrorCode caps_no_fp16(FfxInterface *i, FfxDeviceCapabilities *d) {
     FfxErrorCode e = caps_orig(i, d);
     d->fp16Supported = false;
     return e;
+}
+
+// KAR_FG_DUMP=<n> (diagnostic): from the n-th call on, six calls in a row write the copied real picture
+// (fg_<k>_real.png) and the interpolated one shown before it (fg_<k>_mid.png, halfway between real k-1 and k) into
+// KAR_FG_DUMP_DIR (default the working directory). Waits for the GPU each time: only for looking at the pictures.
+int m_fmt_ok(VkFormat f) { return f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_B8G8R8A8_UNORM; }
+
+void dump_image(VkCtx *c, Img *m, const char *path) {
+    uint32_t w = m->ci.extent.width, h = m->ci.extent.height;
+    VkBufferCreateInfo bi = {};
+    bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size = (VkDeviceSize)w * h * 4;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo ai = {};
+    ai.usage = VMA_MEMORY_USAGE_AUTO;
+    ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer buf;
+    VmaAllocation al;
+    VmaAllocationInfo info;
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &buf, &al, &info) != VK_SUCCESS) return;
+    vkWaitForFences(c->device, 1, &G.fence, VK_TRUE, 5000000000ull);
+    vkResetFences(c->device, 1, &G.fence);
+    vkResetCommandBuffer(G.cb, 0);
+    VkCommandBufferBeginInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, nullptr,
+                                    VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr};
+    vkBeginCommandBuffer(G.cb, &cbi);
+    barrier(G.cb, m->image, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferImageCopy bc = {};
+    bc.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    bc.imageExtent = {w, h, 1};
+    vkCmdCopyImageToBuffer(G.cb, m->image, VK_IMAGE_LAYOUT_GENERAL, buf, 1, &bc);
+    vkEndCommandBuffer(G.cb);
+    VkSubmitInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &G.cb;
+    vk_queue_lock();
+    vkQueueSubmit(c->gfx_queue, 1, &si, G.fence);
+    vk_queue_unlock();
+    vkWaitForFences(c->device, 1, &G.fence, VK_TRUE, 5000000000ull);
+    vmaInvalidateAllocation(c->vma, al, 0, VK_WHOLE_SIZE);
+    uint8_t *px = (uint8_t *)info.pMappedData;
+    if (m->ci.format == VK_FORMAT_B8G8R8A8_UNORM)
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            uint8_t t = px[4 * i];
+            px[4 * i] = px[4 * i + 2], px[4 * i + 2] = t;
+        }
+    for (size_t i = 0; i < (size_t)w * h; i++) px[4 * i + 3] = 255;
+    rt_write_png(path, px, w, h);
+    vmaDestroyBuffer(c->vma, buf, al);
+    rt_log("fg: wrote %s", path);
+}
+
+void dump_pair(VkCtx *c, int mid) {
+    static long long from = -2;
+    if (from == -2) from = getenv("KAR_FG_DUMP") ? atoll(getenv("KAR_FG_DUMP")) : -1;
+    if (from < 0 || G.calls < (uint64_t)from || G.calls >= (uint64_t)from + 6) return;
+    if (m_fmt_ok(G.fmt) == 0) return;
+    const char *dir = getenv("KAR_FG_DUMP_DIR");
+    char path[600];
+    snprintf(path, sizeof path, "%s/fg_%llu_real.png", dir && *dir ? dir : ".", (unsigned long long)G.calls);
+    dump_image(c, &G.cur, path);
+    if (mid) {
+        snprintf(path, sizeof path, "%s/fg_%llu_mid.png", dir && *dir ? dir : ".", (unsigned long long)G.calls);
+        dump_image(c, &G.out, path);
+    }
+    G.last_ns = kern_now_ns();   // the dump's wait is no pause of the game: no reset for it
 }
 
 void destroy_ctx(VkCtx *c) {
@@ -351,6 +420,7 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
         G.failed = 1;
         return VK_NULL_HANDLE;
     }
+    dump_pair(c, !reset && G.calls >= 2);
     if (reset || G.calls < 2) return VK_NULL_HANDLE;   // nothing before this picture to interpolate from
     static uint64_t made;
     if (++made % 1800 == 0) rt_log("fg: %llu interpolated pictures so far", (unsigned long long)made);
