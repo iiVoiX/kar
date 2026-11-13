@@ -503,7 +503,16 @@ uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t su
     if (!record) rt_fatal("vk: submission without a recorder");
     vk_sync_start();
     VkCtx *c = vk_ctx();
+    uint64_t lw0 = sync_prof() ? plat_now_ns() : 0;
     plat_mutex_lock(&sub_lock);
+    if (sync_prof()) {   // KAR_SYNC_PROF: time a submitting thread waited for another's replay to finish (16.8)
+        static uint64_t n, wait_ns, waited;
+        uint64_t d = plat_now_ns() - lw0;
+        wait_ns += d, waited += d > 20000;
+        if (++n % 600 == 0)
+            rt_log("sync prof: 600 submissions: waited for the submission lock %.2f ms each, %llu of them over 20 us",
+                   wait_ns / 6e8, (unsigned long long)waited), wait_ns = waited = 0;
+    }
     vk_mem_dirty_submit();   // TOTK_TRACE=perf: what a mirror would upload before this submit
     uint64_t fence = __atomic_load_n(&issued, __ATOMIC_ACQUIRE) + 1;
     if (sync_prof()) sp_start[fence & 255] = plat_now_ns();
