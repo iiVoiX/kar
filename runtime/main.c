@@ -369,9 +369,63 @@ static PlatScale tick_scale;
 
 uint32_t rt_tick_hz(void) { return rt_game_version ? 19200000u : 31250000u; }
 
-__attribute__((constructor)) static void tick_scale_init(void) { tick_scale = plat_scale(rt_tick_hz(), plat_counter_hz()); }
+// The game reads the counter very often (NX2navi measured Switch 2 titles reading it millions of times a second while
+// they wait for the GPU, RELEASE_PLAN 16.12a). QueryPerformanceCounter is a fast user-mode read where Windows trusts the
+// TSC, but on some AMD systems it goes through the kernel at about a microsecond a call. KAR_TSC=1 reads the TSC
+// directly when the CPU has an invariant one (CPUID 0x80000007 EDX bit 8): calibrated against QPC over 50 ms before
+// main and anchored to QPC's value then, so the ticks continue the QPC-based ones. KAR_TICKS_PROF=1 logs the cost of one
+// QPC call at start and the counter reads per second.
+static int tick_tsc, tick_prof;
+static PlatScale tsc_scale;
+static uint64_t tsc0, tick0;
+static volatile uint64_t tick_reads, tick_t0;
 
-uint64_t rt_ticks(void) { return plat_scaled(tick_scale, plat_counter()); }
+#if defined(__x86_64__)
+#include <cpuid.h>
+#include <x86intrin.h>
+static int tsc_invariant(void) {
+    unsigned a, b, c, d;
+    if (!__get_cpuid(0x80000000u, &a, &b, &c, &d) || a < 0x80000007u) return 0;
+    __get_cpuid(0x80000007u, &a, &b, &c, &d);
+    return (d >> 8) & 1;
+}
+#endif
+
+__attribute__((constructor)) static void tick_scale_init(void) {
+    tick_scale = plat_scale(rt_tick_hz(), plat_counter_hz());
+    tick_prof = getenv("KAR_TICKS_PROF") && *getenv("KAR_TICKS_PROF") == '1';
+#if defined(__x86_64__)
+    if (getenv("KAR_TSC") && *getenv("KAR_TSC") == '1' && tsc_invariant()) {
+        uint64_t q0 = plat_counter(), t0 = __rdtsc(), q1 = q0;
+        while ((q1 - q0) * 20 < plat_counter_hz()) q1 = plat_counter();   // 50 ms
+        uint64_t t1 = __rdtsc();
+        uint64_t tsc_hz = (uint64_t)((unsigned __int128)(t1 - t0) * plat_counter_hz() / (q1 - q0));
+        tsc_scale = plat_scale(rt_tick_hz(), tsc_hz);
+        tsc0 = t1, tick0 = plat_scaled(tick_scale, q1), tick_tsc = 1;
+    }
+#endif
+}
+
+uint64_t rt_ticks(void) {
+    if (tick_prof) {
+        uint64_t n = __atomic_add_fetch(&tick_reads, 1, __ATOMIC_RELAXED);
+        if (n == 1) {
+            uint64_t a = plat_now_ns();
+            for (int i = 0; i < 100000; i++) (void)plat_counter();
+            rt_log("ticks: one QueryPerformanceCounter call %.1f ns; counter from %s", (plat_now_ns() - a) / 1e5,
+                   tick_tsc ? "the TSC (KAR_TSC=1)" : "QueryPerformanceCounter");
+            tick_t0 = plat_now_ns();
+        } else if ((n & ((1u << 24) - 1)) == 0) {
+            uint64_t now = plat_now_ns();
+            rt_log("ticks: %.1f million counter reads per second", (double)(1u << 24) * 1e3 / (double)(now - tick_t0));
+            tick_t0 = now;
+        }
+    }
+#if defined(__x86_64__)
+    if (tick_tsc) return tick0 + plat_scaled(tsc_scale, __rdtsc() - tsc0);
+#endif
+    return plat_scaled(tick_scale, plat_counter());
+}
 uint64_t rt_ticks_to_ns(uint64_t t) { return (uint64_t)((unsigned __int128)t * 1000000000u / rt_tick_hz()); }
 uint64_t rt_ns_to_ticks(uint64_t ns) { return (uint64_t)((unsigned __int128)ns * rt_tick_hz() / 1000000000u); }
 
