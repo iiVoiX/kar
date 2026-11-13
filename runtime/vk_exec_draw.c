@@ -388,7 +388,7 @@ int vk_exec_reset_indirect(VkExec *ex, uint64_t list_addr, uint32_t descriptor_b
         VkBufferCopy copy = {source_offset, span.offset, sizeof record};
         vkCmdCopyBuffer(ex->cb, source, span.buffer, 1, &copy);
         ex->recorded++;
-        vk_mem_gpu_wrote(&span, sizeof record);
+        vk_mem_wb_kind = 5, vk_mem_gpu_wrote(&span, sizeof record);
         vk_usnap_drop(addr, sizeof record);
         vk_mem_count(span.cls, VK_MUSE_GPU_WRITE, sizeof record);
         note_written(ex, addr, sizeof record);
@@ -1045,7 +1045,7 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
     if (sp.offset % align == 0) {
         VK_MEM_USE(sp);
         *out = (VkDescriptorBufferInfo){sp.buffer, sp.offset, n};
-        if (written) vk_mem_gpu_wrote(&sp, n), vk_usnap_drop(addr, n);
+        if (written) vk_mem_wb_kind = 0, vk_mem_gpu_wrote(&sp, n), vk_usnap_drop(addr, n);
         count_use(sp.cls, use, n);
         VK_MEM_BOUND(sp);
         return 1;
@@ -4003,7 +4003,7 @@ static void op_update_ub(VkExec *ex, const p_update_ub *u) {
     VK_MEM_PICK(sp);
     VkBufferCopy cp = {o, sp.offset, u->size};
     vkCmdCopyBuffer(ex->cb, b, sp.buffer, 1, &cp);
-    vk_mem_gpu_wrote(&sp, u->size);
+    vk_mem_wb_kind = 1, vk_mem_gpu_wrote(&sp, u->size);
     vk_usnap_drop(u->dst, u->size);
     ex->recorded++;
     vk_mem_count(sp.cls, VK_MUSE_GPU_WRITE, u->size);

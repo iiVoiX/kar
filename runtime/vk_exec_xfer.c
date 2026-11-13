@@ -506,7 +506,7 @@ static void copy_buffer_image(VkExec *ex, const p_copy_b2t *p, int to_image) {
     if (to_image) {
         if (written) vk_texture_gpu_written(p->tex), vk_exec_note_drawn(s.img->image);
     } else {
-        vk_mem_gpu_wrote(&m, size), note_gpu_write(ex, p->src, size);
+        vk_mem_wb_kind = 4, vk_mem_gpu_wrote(&m, size), note_gpu_write(ex, p->src, size);
     }
 }
 
@@ -645,7 +645,7 @@ static void copy_b2b(VkExec *ex, const p_copy_b2b *p) {
         if (!started) vk_exec_pass_end(ex), vk_exec_barrier(ex), started = 1;
         VkBufferCopy bc = {s.offset, d.offset, n};
         vkCmdCopyBuffer(ex->cb, s.buffer, d.buffer, 1, &bc);
-        vk_mem_gpu_wrote(&d, n);
+        vk_mem_wb_kind = 2, vk_mem_gpu_wrote(&d, n);
         ex->recorded++;
         vk_mem_count(s.cls, VK_MUSE_COPY_SRC, n);
         vk_mem_count(d.cls, VK_MUSE_GPU_WRITE, n);
@@ -678,7 +678,7 @@ static void clear_buf(VkExec *ex, const p_clear_buf *p) {
         if (!started) vk_exec_pass_end(ex), vk_exec_barrier(ex), started = 1;
         VK_MEM_PICK(d);
         vkCmdFillBuffer(ex->cb, d.buffer, d.offset, n, p->value);
-        vk_mem_gpu_wrote(&d, n);
+        vk_mem_wb_kind = 3, vk_mem_gpu_wrote(&d, n);
         ex->recorded++;
         vk_mem_count(d.cls, VK_MUSE_GPU_WRITE, n);
         dst += n, left -= n;

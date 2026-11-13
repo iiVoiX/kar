@@ -60,6 +60,7 @@ typedef struct PoolRec {
     VmaAllocation malloc_;
     uint32_t acc_sub;                  // replay: the last submission that synced the mirror (mirror_sync)
     uint32_t wb_sub;                   // replay: the last submission that wrote mirror bytes back to guest memory
+    uint8_t *wbmap;                    // KAR_MIRROR_LOOP diagnostic: per 4 KiB page, written back and not uploaded since
     uint32_t mgen;                     // gen_lock: every page write stamped up to this generation is in the mirror
                                        // (or in a copy queued before its next use)
     uint64_t fl_lo, fl_hi;             // flush_lock: nvnMemoryPoolFlushMappedRange bytes not copied yet (fl_hi 0: none)
@@ -1562,6 +1563,21 @@ static int range_cmp(const void *x, const void *y) {
 
 // Records the ranges as one vkCmdCopyBuffer per pool, overlapping and adjacent ranges merged; to_mirror: buf -> mbuf,
 // else mbuf -> buf. Returns the commands recorded; adds what they move to *bytes and *copies.
+// KAR_MIRROR_LOOP=1 (diagnostic, 16.4): how many uploaded bytes were written back by the GPU earlier and not
+// uploaded since (a write-back the dirty tracking then saw as a CPU write would make that a round trip).
+static int mloop_on = -1;
+static uint64_t mloop_up, mloop_hit;
+static void mloop_mark(PoolRec *r, uint64_t lo, uint64_t hi, int up) {
+    if (mloop_on < 0) mloop_on = getenv("KAR_MIRROR_LOOP") && *getenv("KAR_MIRROR_LOOP") == '1';
+    if (!mloop_on) return;
+    uint64_t np = (r->import_hi - r->import_lo + 4095) >> 12;
+    if (!r->wbmap && !(r->wbmap = calloc(np, 1))) return;
+    for (uint64_t p = lo >> 12; p < np && p < (hi + 4095) >> 12; p++) {
+        if (up) mloop_up += 4096, mloop_hit += r->wbmap[p] ? 4096 : 0, r->wbmap[p] = 0;
+        else r->wbmap[p] = 1;
+    }
+}
+
 static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint64_t *bytes, uint64_t *copies) {
     qsort(a, (size_t)n, sizeof *a, range_cmp);
     int rec = 0;
@@ -1586,6 +1602,7 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
         else vkCmdCopyBuffer(cb, r->mbuf, r->buf, (uint32_t)k, mregions);
         rec++;
         for (int j = 0; j < k; j++) *bytes += mregions[j].size;
+        for (int j = 0; j < k; j++) mloop_mark(r, mregions[j].srcOffset, mregions[j].srcOffset + mregions[j].size, to_mirror);
         *copies += (uint64_t)k;
     }
     return rec;
@@ -1768,9 +1785,12 @@ int vk_mem_mirror_probe(uint64_t addr) {
     return ((PoolRec *)sp.pool)->mstate == MS_ON;
 }
 
+int vk_mem_wb_kind;            // KAR_MIRROR_LOOP: the caller's kind (storage, uniform update, copy, fill, texture, other)
+static uint64_t wb_kind_bytes[6];
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     PoolRec *r = sp->pool;
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
+    if (mloop_on > 0 && vk_mem_wb_kind >= 0 && vk_mem_wb_kind < 6) wb_kind_bytes[vk_mem_wb_kind] += size;
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
 }
 
@@ -1949,9 +1969,48 @@ static int verify_record(VkCommandBuffer cb, uint64_t fence) {
     return j->n + 2;
 }
 
+// KAR_WB_RESET=1 (16.4): the GPU's write-back into imported guest memory leaves the pages marked written in the OS
+// write watch, so the next sync copied them back into the mirror (race: 74 of 75 MiB uploaded a frame were pages written
+// back before). At the write-back's fence, before the fence counts as reached, the watch bits of the pages the
+// write-back covered whole are cleared: their guest bytes are the mirror's. A CPU write into such a page while the GPU
+// was writing it would be a race in the game as well.
+typedef struct { int n; uint64_t lo[]; } WbReset;   // pairs: address, size
+static int wb_reset_on = -1;
+static int64_t wbr_pages, wbr_dirty;
+static void wb_reset_cb(void *arg) {
+    WbReset *j = arg;
+    static uint64_t pages[4096];
+    for (int i = 0; i < j->n; i++) {
+        uint64_t a = j->lo[2 * i], size = j->lo[2 * i + 1];
+        for (uint64_t o = 0; o < size; o += 4096ull * 4096) {   // pages[] holds 4096 entries
+            uint64_t len = size - o < 4096ull * 4096 ? size - o : 4096ull * 4096;
+            uint64_t got = plat_mem_written(a + o, len, pages, 4096, 1);
+            if (got != UINT64_MAX) wbr_dirty += (int64_t)got;
+            wbr_pages += (int64_t)(len >> 12);
+        }
+    }
+    free(j);
+}
+
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
     if (!vk_mirror_on) return 0;
     int rec = 0;
+    if (wb_reset_on < 0) wb_reset_on = getenv("KAR_WB_RESET") && *getenv("KAR_WB_RESET") == '1';
+    if (nwbl && wb_reset_on) {   // the whole pages each range covers, queued for the fence (wb_reset_cb)
+        WbReset *j = malloc(sizeof *j + 2 * sizeof(uint64_t) * (size_t)nwbl);
+        if (!j) rt_fatal("vk: out of memory");
+        j->n = 0;
+        for (int i = 0; i < nwbl; i++) {
+            uint64_t a = wbl[i].r->import_lo + wbl[i].off, b = a + wbl[i].size;
+            a = (a + 4095) & ~4095ull, b &= ~4095ull;
+            if (a < b) j->lo[2 * j->n] = a, j->lo[2 * j->n + 1] = b - a, j->n++;
+        }
+        if (j->n) vk_completion_add(fence, wb_reset_cb, j);
+        else free(j);
+    }
+    static int wb_skip = -1;   // KAR_WB_SKIP=1 (diagnostic only, wrong results): no write-back, to see what it causes
+    if (wb_skip < 0) wb_skip = getenv("KAR_WB_SKIP") && *getenv("KAR_WB_SKIP") == '1';
+    if (wb_skip) nwbl = 0;
     if (nwbl) {
         mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -2014,6 +2073,16 @@ static void mirror_log(uint64_t frame) {
            a.first_n / f, a.first_bytes / f / M, a.wb_bytes / f / M, a.wb_copies / f, fc / f, fb / f / M,
            a.presnap_queries / f, a.presnap_bytes / f / M, a.sync_queries / f, a.prologues / f, qpc_ms(a.presnap_t + a.sync_t) / f,
            qpc_ms(a.presnap_t) / f, qpc_ms(a.sync_t) / f, ver);
+    if (mloop_on > 0) {
+        rt_log("mem: mirror loop: uploads %.3f MiB per frame, of them %.3f MiB written back earlier by the GPU; write-back "
+               "watch reset: %.1f MiB of whole pages, %.1f MiB of them marked written", mloop_up / f / M, mloop_hit / f / M,
+               (double)plat_xchg64(&wbr_pages, 0) * 4096 / f / M, (double)plat_xchg64(&wbr_dirty, 0) * 4096 / f / M);
+        rt_log("mem: mirror loop: GPU writes per frame (MiB, before merging): storage %.2f, uniform updates %.2f, copies "
+               "%.2f, fills %.2f, texture to buffer %.2f, other %.2f", wb_kind_bytes[0] / f / M, wb_kind_bytes[1] / f / M,
+               wb_kind_bytes[2] / f / M, wb_kind_bytes[3] / f / M, wb_kind_bytes[4] / f / M, wb_kind_bytes[5] / f / M);
+        memset(wb_kind_bytes, 0, sizeof wb_kind_bytes);
+        mloop_up = mloop_hit = 0;
+    }
 }
 
 // With TOTK_TRACE=perf every 600 frames: what holds device-local memory, to see what grows over a long session.

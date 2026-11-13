@@ -136,6 +136,10 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     static volatile int32_t n_skipped;
     vk_exec_frame_log(t, frame);
     vk_mem_census(frame);
+    if (frame == 600) {   // KAR_WW_PROBE (vk_wwprobe_win.c): once, Windows only
+        extern void vk_ww_probe(void) WEAK;
+        if (vk_ww_probe) vk_ww_probe();
+    }
     if (vk_dump_armed) vk_dump_present(frame);
     if (frame % 300 == 0 && getenv("KAR_DLSS_WATCH")) {   // KAR diagnostic: the engine's EnableDLSS flag (nvn_api_dlss.c)
         extern void kar_dlss_watch(uint64_t frame);
