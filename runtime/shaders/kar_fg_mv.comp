@@ -2,31 +2,78 @@
 // Frame generation camera motion vectors (runtime/vk_fg_mv.c, RELEASE_PLAN.md 16.7 B2). For each pixel of the scene's
 // depth: its position in the previous frame from the camera matrices alone (reproject = previous view-projection x
 // inverse current view-projection), written as a motion vector in pixels (previous - current), plus the depth copied
-// into a plain float image, both what FidelityFX frame interpolation takes as input. Moving objects get the camera's
-// motion only.
+// into a plain float image, both what FidelityFX frame interpolation takes as input.
+//
+// Depth check (the approach of NX2navi's runtime/shaders/dlaa_mv.comp, MIT): each pixel's view distance is kept for the
+// next frame (dist_out; dist_prev is last frame's, pc.prev_ok 1 when it holds one). The camera's motion predicts how far
+// the surface was last frame at the place it came from; where last frame's distance there disagrees, the surface moved
+// on its own. The commonest such surface is the racer the camera follows, which stays where it is on screen: when last
+// frame's distance at the same pixel agrees, the vector is zero instead of the camera's motion.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D depth_tex;            // the scene's depth (depth aspect), w x h
 layout(set = 0, binding = 1, rg16f) uniform writeonly image2D mv_out;
 layout(set = 0, binding = 2, r32f) uniform writeonly image2D depth_out;
+layout(set = 0, binding = 3, r32f) uniform readonly image2D dist_prev;
+layout(set = 0, binding = 4, r32f) uniform writeonly image2D dist_out;
 layout(push_constant) uniform PC {
     vec4 r0, r1, r2, r3;   // rows of the reprojection matrix
     vec2 size;             // w, h
-    float flip_y;          // 1: NDC y = +1 at the top row (the game's convention), 0: at the bottom row
-    float pad;
+    float flip_y;          // 1: NDC y = +1 at the top row, 0: at the bottom row (the game's convention)
+    float prev_ok;         // 1: dist_prev holds last frame's distances at this size
+    vec2 dz;               // the projection's row 2 depth terms A, B: ndc z = (A z + B) / -z (reversed depth)
 } pc;
+
+// View distance from ndc depth; 0 for the sky and other points at or past the far plane.
+float dist(float zn) {
+    float den = zn - pc.dz.x;
+    if (abs(den) < 1e-12) return 0.0;
+    float z = pc.dz.y / den;
+    return z > 0.0 && z < 1e7 ? z : 0.0;
+}
+
+// How far last frame's distance near pixel position q (window, pixels) is from expect, relative: the closest of the
+// 3x3 pixels around it, so a reprojection that lands across a silhouette is not taken for motion. 0 off screen, 1e9
+// where last frame had only sky there.
+float miss(vec2 q, float expect) {
+    ivec2 i = ivec2(floor(q)), hi = ivec2(pc.size) - 1;
+    if (any(lessThan(i, ivec2(0))) || any(greaterThan(i, hi))) return 0.0;
+    float best = 1e9;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            float was = imageLoad(dist_prev, clamp(i + ivec2(dx, dy), ivec2(0), hi)).r;
+            if (was > 0.0) best = min(best, abs(was - expect) / expect);
+        }
+    return best;
+}
 
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(pc.size.x) || p.y >= int(pc.size.y)) return;
-    vec2 uv = (vec2(p) + 0.5) / pc.size;
+    vec2 win = vec2(p) + 0.5;
+    vec2 uv = win / pc.size;
     float d = texelFetch(depth_tex, p, 0).r;
     vec2 ndc = uv * 2.0 - 1.0;
     if (pc.flip_y > 0.5) ndc.y = -ndc.y;
-    vec4 v = vec4(ndc, d, 1.0);
-    vec4 q = vec4(dot(pc.r0, v), dot(pc.r1, v), dot(pc.r2, v), dot(pc.r3, v));
-    vec2 prev = abs(q.w) > 1e-8 ? q.xy / q.w : ndc;
-    if (pc.flip_y > 0.5) prev.y = -prev.y;
-    vec2 prev_uv = prev * 0.5 + 0.5;
-    imageStore(mv_out, p, vec4((prev_uv - uv) * pc.size, 0.0, 0.0));
+    vec4 q = vec4(dot(pc.r0, vec4(ndc, d, 1.0)), dot(pc.r1, vec4(ndc, d, 1.0)), dot(pc.r2, vec4(ndc, d, 1.0)),
+                  dot(pc.r3, vec4(ndc, d, 1.0)));
+    vec2 mv = vec2(0.0);
+    float pz = 0.0;
+    if (q.w > 1e-8) {
+        vec2 prev = q.xy / q.w;
+        pz = q.z / q.w;
+        if (pc.flip_y > 0.5) prev.y = -prev.y;
+        mv = (prev * 0.5 + 0.5) * pc.size - win;
+    }
+    float here = dist(d);
+    imageStore(dist_out, p, vec4(here, 0.0, 0.0, 0.0));
+    // 4 %: a still surface reprojected through the camera lands within about 1 % of last frame's distance; a racer a
+    // short way in front of the track behind it differs by 10 % and more
+    const float TOL = 0.04;
+    if (pc.prev_ok > 0.5 && here > 0.0 && q.w > 1e-8) {
+        float there = dist(pz);
+        float cam = there > 0.0 ? miss(win + mv, there) : 1e9;
+        if (cam > TOL && miss(win, here) < TOL) mv = vec2(0.0);   // it kept its place on screen: the followed racer
+    }
+    imageStore(mv_out, p, vec4(mv, 0.0, 0.0));
     imageStore(depth_out, p, vec4(d, 0.0, 0.0, 0.0));
 }

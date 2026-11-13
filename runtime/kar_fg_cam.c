@@ -19,11 +19,15 @@
 
 #define SLOT_CAMERA 0x3c0
 
-// The scene camera: perspective (projection row 3 = 0 0 -1 0), field of view in radians 0.3..2.1, a 16:9 render size
-// of at least 1280 wide other than 1920x1080 (the interface's 3D cameras). Its view-projection (+0xe0) and inverse
-// (+0x120) are kept per frame; the previous frame's view-projection is kept when a new frame's arrives.
+// Scene camera candidates: perspective (projection row 3 = 0 0 -1 0), field of view in radians 0.5..2.1, a 16:9 render
+// size of at least 1280 wide other than 1920x1080 (the interface's 3D cameras). The race also has a narrow second
+// camera of the scene's size (field of view ~0.34), so each frame keeps the candidate with the widest field of view.
+// Frames are the present counter at the time of the call: the replay of a frame runs before its present, so the
+// motion vectors of frame n use the cameras kept under n (current) and n - 1 (previous).
+typedef struct { float vp[16], ivp[16], dz[2], fov, nearv, farv; uint32_t w, h; uint64_t frame; int ok; } SceneCam;
+#define HIST 4
 static PlatMutex lock = PLAT_MUTEX_INIT;
-static struct { float vp[16], ivp[16], fov, nearv, farv; uint32_t w, h; uint64_t frame; int ok; } cur, prev;
+static SceneCam hist[HIST];   // by frame % HIST
 
 static void keep_scene_camera(Cpu *c, uint64_t fr) {
     const float *cam = (const float *)(uintptr_t)c->x[0];
@@ -31,36 +35,45 @@ static void keep_scene_camera(Cpu *c, uint64_t fr) {
     float fov = cam[0x31c / 4], w = b[0x1e0 / 4], h = b[0x1e4 / 4];
     const float *proj = b + 0x60 / 4;
     if (proj[12] != 0 || proj[13] != 0 || proj[14] != -1 || proj[15] != 0) return;
-    if (!(fov > 0.3f && fov < 2.1f) || w < 1280 || (w == 1920 && h == 1080) || w * 9 < h * 16 * 0.98f ||
+    if (!(fov > 0.5f && fov < 2.1f) || w < 1280 || (w == 1920 && h == 1080) || w * 9 < h * 16 * 0.98f ||
         w * 9 > h * 16 * 1.02f)
         return;
     plat_mutex_lock(&lock);
-    if (cur.ok && cur.frame != fr) prev = cur;
-    memcpy(cur.vp, b + 0xe0 / 4, sizeof cur.vp);
-    memcpy(cur.ivp, b + 0x120 / 4, sizeof cur.ivp);
-    cur.fov = fov, cur.nearv = b[0x1e8 / 4], cur.farv = b[0x1ec / 4], cur.w = (uint32_t)w, cur.h = (uint32_t)h;
-    cur.frame = fr, cur.ok = 1;
+    SceneCam *e = &hist[fr % HIST];
+    if (!e->ok || e->frame != fr || fov >= e->fov) {
+        memcpy(e->vp, b + 0xe0 / 4, sizeof e->vp);
+        memcpy(e->ivp, b + 0x120 / 4, sizeof e->ivp);
+        e->dz[0] = proj[10], e->dz[1] = proj[11];   // projection row 2: ndc z = (A z + B) / -z
+        e->fov = fov, e->nearv = b[0x1e8 / 4], e->farv = b[0x1ec / 4], e->w = (uint32_t)w, e->h = (uint32_t)h;
+        e->frame = fr, e->ok = 1;
+    }
     plat_mutex_unlock(&lock);
-    static int told;
-    if (!told++) rt_log("fgcam: scene camera %#llx, %ux%u, fov %g, near %g far %g", (unsigned long long)c->x[0], cur.w,
-                        cur.h, fov, cur.nearv, cur.farv);
 }
 
-// reproj = previous view-projection x inverse current view-projection (rows), for the camera of size w x h; 0 when
-// there is no previous frame's camera of that size.
-int kar_fg_camera(uint32_t w, uint32_t h, float reproj[16], float *fov, float *nearv, float *farv) {
+// reproj = previous view-projection x inverse current view-projection (rows), for the scene camera of size w x h of
+// this frame and the one before; 0 when either is missing.
+int kar_fg_camera(uint32_t w, uint32_t h, float reproj[16], float dz[2], float *fov, float *nearv, float *farv) {
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     plat_mutex_lock(&lock);
-    int ok = cur.ok && prev.ok && cur.w == w && cur.h == h && prev.w == w && prev.h == h;
+    // the newest kept frame (the game's logic may already be one frame ahead of the replay) and the one before it
+    const SceneCam *cur = NULL, *prev = NULL;
+    for (int i = 0; i < HIST; i++)
+        if (hist[i].ok && hist[i].frame <= fr + 1 && (!cur || hist[i].frame > cur->frame)) cur = &hist[i];
+    if (cur) prev = &hist[(cur->frame + HIST - 1) % HIST];
+    int ok = cur && prev->ok && prev->frame + 1 == cur->frame && cur->frame + 2 >= fr && cur->w == w && cur->h == h &&
+             prev->w == w && prev->h == h;
     if (ok) {
         for (int r = 0; r < 4; r++)
             for (int k = 0; k < 4; k++) {
-                float s = 0;
-                for (int j = 0; j < 4; j++) s += prev.vp[r * 4 + j] * cur.ivp[j * 4 + k];
-                reproj[r * 4 + k] = s;
+                float sum = 0;
+                for (int j = 0; j < 4; j++) sum += prev->vp[r * 4 + j] * cur->ivp[j * 4 + k];
+                reproj[r * 4 + k] = sum;
             }
-        *fov = cur.fov, *nearv = cur.nearv, *farv = cur.farv;
+        *fov = cur->fov, *nearv = cur->nearv, *farv = cur->farv, dz[0] = cur->dz[0], dz[1] = cur->dz[1];
     }
     plat_mutex_unlock(&lock);
+    static int told;
+    if (ok && !told++) rt_log("fgcam: scene camera %ux%u, fov %g, near %g far %g", w, h, *fov, *nearv, *farv);
     return ok;
 }
 

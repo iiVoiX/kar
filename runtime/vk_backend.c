@@ -77,7 +77,7 @@ static int present_hold(void) {
 static void present_main(void *arg) {
     (void)arg;
     uint64_t last = 0, last_queued = 0;
-    uint64_t fg_prev = 0, fg_iv = 0;   // frame generation: when the previous picture arrived, mean interval (ns)
+    uint64_t fg_prev = 0, fg_iv = 0, fg_t0 = 0, fg_shown = 0, fg_real = 0;   // frame generation: when the previous picture arrived, mean interval (ns)
     plat_mutex_lock(&pl);
     for (;;) {
         while (!pending) plat_cond_wait(&pcv, &pl);
@@ -104,6 +104,7 @@ static void present_main(void *arg) {
                 vk_present_blit(mid, VK_IMAGE_LAYOUT_GENERAL, ff, j.has_crop ? j.crop[2] : j.w,
                                 j.has_crop ? j.crop[3] : j.h, NULL);
                 vk_present_flip();
+                fg_shown++;
                 if (fg_iv) fg_due = kern_now_ns() + fg_iv / 2;
             }
         }
@@ -124,6 +125,16 @@ static void present_main(void *arg) {
         if (fg_due) wait_until(fg_due);
         uint64_t t1 = kern_now_ns();
         vk_present_flip();
+        if (vk_fg_on()) {   // every 5 s: the pictures shown (real and interpolated) and the real ones, per second
+            uint64_t now = kern_now_ns();
+            fg_real++, fg_shown++;
+            if (!fg_t0) fg_t0 = now;
+            if (now - fg_t0 >= 5000000000ull) {
+                rt_log("fg: shown %.1f fps (real %.1f)", fg_shown * 1e9 / (double)(now - fg_t0),
+                       fg_real * 1e9 / (double)(now - fg_t0));
+                fg_t0 = now, fg_shown = fg_real = 0;
+            }
+        }
         if (pp_enabled()) {
             uint64_t t2 = kern_now_ns();
             pp_blit += q1 - q0, pp_sub += q2 - q1, pp_hold += t1 - t0, pp_flip += t2 - t1;
