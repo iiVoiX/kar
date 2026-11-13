@@ -60,6 +60,19 @@ static size_t put_utf16(uint8_t *dst, const char *s) {
     return (size_t)((uint8_t *)o - dst);
 }
 
+// KAR_MENU_LOG: the first characters of a UTF-16 text (ASCII as is, others as ?).
+static const char *kar_menu_txt(uint64_t at) {
+    static char t[48];
+    int k = 0;
+    for (; at && k < 40; k++) {
+        uint16_t ch = ((const uint16_t *)(uintptr_t)at)[k];
+        if (!ch) break;
+        t[k] = ch < 0x20 ? '^' : ch < 0x7f ? (char)ch : '?';
+    }
+    t[k] = 0;
+    return t;
+}
+
 static void text_lookup(Cpu *c) {
     const char *label = (const char *)(uintptr_t)c->x[1];
     int hit = 0;
@@ -81,8 +94,8 @@ static void text_lookup(Cpu *c) {
             chain[k] = *(const uint64_t *)(uintptr_t)(fp + 8);
             fp = *(const uint64_t *)(uintptr_t)fp;
         }
-        fprintf(stderr, "kar_menu: f%llu %s -> %#llx%s < %#llx < %#llx < %#llx < %#llx < %#llx\n",
-                (unsigned long long)frame_now(), label, (unsigned long long)c->x[0], hit ? " (own text)" : "",
+        fprintf(stderr, "kar_menu: f%llu %s -> %#llx \"%s\"%s < %#llx < %#llx < %#llx < %#llx < %#llx\n",
+                (unsigned long long)frame_now(), label, (unsigned long long)c->x[0], kar_menu_txt(c->x[0]), hit ? " (own text)" : "",
                 (unsigned long long)chain[0], (unsigned long long)chain[1], (unsigned long long)chain[2],
                 (unsigned long long)chain[3], (unsigned long long)chain[4]);
     }
