@@ -193,7 +193,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 |---|---|---|---|
 | 12.1 | Ein Skript für „N Rennen, Screenshots, Log auswerten“: `tools/kar_race_test.ps1` (startet nicht, solange Wardogs läuft) | OHNE | ✅ |
 | 12.2 | Automatischer Regenbogen-/Schwarzbild-Check: `tools/kar_shot_check.py`, Median-Helligkeit pro Lauf, an 10 bekannten Läufen geeicht (10/10 richtig) | OHNE | ✅ |
-| 12.3 | Validation-Layer-Lauf als fester Test vor jedem Release | OHNE + SPIEL | ⬜ |
+| 12.3 | Validation-Layer-Lauf als fester Test vor jedem Release | OHNE + SPIEL | ⬜ **Lauf 2026-11-13 (val1, Rennen mit 16.x-Standard):** nur VUID-…-08600 (Satz-Kompatibilität bei Bindless/INDEPENDENT_SETS, bekannte Layer-Eigenheit) und …-08114 („VkDescriptorSet 0x0“ = Push-Satz, bekannte Layer-Eigenheit, siehe vk_exec_draw.c), je 10× gekappt; **1× VUID-vkDestroyImage-01000 beim Start** (Bild in einer noch aufgezeichneten Befehlsliste zerstört, direkt nach dem ersten Pool-Import) → offen, klein. Keine neuen Fehler durch Bindless/dyn. UBO/Abbild-Rückschreibung. |
 | 12.4 | Testskripte für jeden Modus (Menüpfade für frischen und alten Spielstand) | OHNE + SPIEL | ⬜ |
 | 12.5 | Langzeit-Soak über Nacht mit Speicher- und fps-Protokoll | SPIEL | ⬜ |
 
