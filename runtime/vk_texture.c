@@ -2070,7 +2070,7 @@ void vk_texture_shutdown(void) {
     for (int i = 0; i < n; i++) destroy_tex(list[i]);
     free(list);
     for (uint32_t i = 0; i < samplers.cap; i++)
-        if (samplers.vals[i] && c) vkDestroySampler(c->device, (VkSampler)samplers.vals[i], NULL);
+        if (samplers.vals[i] && c) vk_destroy_gen_bump(), vkDestroySampler(c->device, (VkSampler)samplers.vals[i], NULL);
     free(by_key.keys), free(by_key.vals), free(by_addr.keys), free(by_addr.vals), free(samplers.keys), free(samplers.vals);
     by_key = (nvn_hmap){.klen = sizeof(TexKey)};
     by_addr = (nvn_hmap){.klen = 8};

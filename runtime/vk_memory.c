@@ -1491,6 +1491,10 @@ static void dirty_frame(uint64_t frame) {
 enum { MR_BUDGET, MR_UNTRACKED, MR_OVERLAP, MR_ALLOC, MR_N };
 
 int vk_mirror_on;
+// Bumped before an image view, buffer or sampler a descriptor set may reference is destroyed (16.5): a set cache that
+// outlives a submission is valid only while it is unchanged, as a later object may get the destroyed one's handle.
+volatile int64_t vk_destroy_gen;
+void vk_destroy_gen_bump(void) { plat_inc64(&vk_destroy_gen); }
 static int mirror_verify;
 static int mirror_gap = 2;             // pre-snap: hot pools at most this many 2 MiB regions apart share one query
 static PoolRec **mlist;                // pool_lock: mirrored pools by import_lo
@@ -2282,8 +2286,8 @@ static void collect_locked(VkCtx *c) {
         switch (d->kind) {
         case DEAD_IMAGE: vkDestroyImage(c->device, (VkImage)(uintptr_t)d->handle, NULL); break;
         case DEAD_IMAGE_VMA: vmaDestroyImage(c->vma, (VkImage)(uintptr_t)d->handle, d->alloc); break;
-        case DEAD_VIEW: vkDestroyImageView(c->device, (VkImageView)(uintptr_t)d->handle, NULL); break;
-        case DEAD_BUFFER_VMA: vmaDestroyBuffer(c->vma, (VkBuffer)(uintptr_t)d->handle, d->alloc); break;
+        case DEAD_VIEW: vk_destroy_gen_bump(); vkDestroyImageView(c->device, (VkImageView)(uintptr_t)d->handle, NULL); break;
+        case DEAD_BUFFER_VMA: vk_destroy_gen_bump(); vmaDestroyBuffer(c->vma, (VkBuffer)(uintptr_t)d->handle, d->alloc); break;
         }
     }
     ndead = k;

@@ -239,7 +239,7 @@ static void cb_done(void *arg) {   // completion thread
         int kept = r->chunks[i].size == CHUNK_BYTES && nspare_chunk < SPARE_CHUNKS;
         if (kept) spare_chunk[nspare_chunk++] = r->chunks[i];
         plat_mutex_unlock(&spare_lock);
-        if (!kept) vmaDestroyBuffer(c->vma, r->chunks[i].buf, r->chunks[i].alloc);
+        if (!kept) vk_destroy_gen_bump(), vmaDestroyBuffer(c->vma, r->chunks[i].buf, r->chunks[i].alloc);
     }
     free(r->written), free(r->written_slot), free(r->pools), free(r->chunks), free(r);
 }
@@ -2653,6 +2653,70 @@ static int getenv_diag_c8(void) {   // KAR_DIAG_C8 logs every element: keep the 
 
 uint64_t vk_rp_bind_ns;   // KAR_REPLAY_PROF: time in bind_resources (vk_exec.c window line)
 static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info);
+
+// KAR_DS_PERSIST=1 (16.5, with KAR_DYN_UBO=1): descriptor sets of allocated (not pushed) sets kept across submissions,
+// by layout and content. Each race frame draws nearly the same materials as the one before, but the sets of one frame
+// rarely repeat within it (the per-submission cache, KAR_DS_CACHE, found 8 % of them). The sets come from pools of
+// their own; a set is never written again, and the cache forgets every set (a new epoch) when an object a set may
+// reference is destroyed (vk_destroy_gen: its handle could come back as another object) or when the pool is full. A full pool is retired with the newest submission that used one
+// of its sets and destroyed once the GPU reached it.
+#define PSC_N (1 << 15)
+static struct { uint64_t h1, h2, epoch; VkDescriptorSetLayout sl; uint32_t n; VkDescriptorSet set; } PSC[PSC_N];
+static uint64_t psc_epoch = 1, psc_last_fence;
+static int64_t psc_dgen = -1;
+static VkDescriptorPool psc_pool;
+static struct { VkDescriptorPool pool; uint64_t fence; } psc_ret[256];
+static int npsc_ret;
+static uint64_t psc_hits, psc_miss, psc_epochs;
+
+void vk_psc_stats(uint64_t *hits, uint64_t *miss, uint64_t *epochs);
+void vk_psc_stats(uint64_t *hits, uint64_t *miss, uint64_t *epochs) {   // KAR_REPLAY_PROF window line (vk_exec.c)
+    *hits = psc_hits, *miss = psc_miss, *epochs = psc_epochs;
+    psc_hits = psc_miss = psc_epochs = 0;
+}
+
+static int psc_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_DS_PERSIST") && *getenv("KAR_DS_PERSIST") == '1';
+    return on;
+}
+
+static VkDescriptorSet psc_alloc(VkDescriptorSetLayout sl) {
+    VkCtx *c = vk_ctx();
+    uint64_t done = vk_sync_fence_done();
+    for (int i = 0; i < npsc_ret;)
+        if (psc_ret[i].fence <= done) vkDestroyDescriptorPool(c->device, psc_ret[i].pool, NULL), psc_ret[i] = psc_ret[--npsc_ret];
+        else i++;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (psc_pool) {
+            VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                              .descriptorPool = psc_pool, .descriptorSetCount = 1, .pSetLayouts = &sl};
+            VkDescriptorSet set;
+            VkResult res = vkAllocateDescriptorSets(c->device, &ai, &set);
+            if (res == VK_SUCCESS) return set;
+            if (res != VK_ERROR_OUT_OF_POOL_MEMORY && res != VK_ERROR_FRAGMENTED_POOL)
+                rt_fatal("vk: persistent descriptor set allocation failed (%d)", (int)res);
+            if (npsc_ret == (int)(sizeof psc_ret / sizeof *psc_ret)) rt_fatal("vk: too many retired descriptor pools");
+            psc_ret[npsc_ret].pool = psc_pool, psc_ret[npsc_ret++].fence = psc_last_fence;   // its sets die with the pool
+            psc_epoch++, psc_epochs++;
+        }
+        static const VkDescriptorPoolSize sizes[] = {
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32768}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 65536},
+            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 16384}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1024}, {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1024},
+            {VK_DESCRIPTOR_TYPE_SAMPLER, 4096}};
+        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
+                                         .poolSizeCount = sizeof sizes / sizeof sizes[0], .pPoolSizes = sizes};
+        if (vkCreateDescriptorPool(c->device, &pi, NULL, &psc_pool) != VK_SUCCESS) rt_fatal("vk: persistent descriptor pool failed");
+    }
+    rt_fatal("vk: persistent descriptor set allocation failed twice");
+}
+
+// The cached set of these descriptors, written now when missing; *hit says which.
+static VkDescriptorSet psc_get(VkExec *ex, const VkPipeInfo *info, uint32_t s, VkDescriptorSetLayout sl,
+                               const VkDescSlot *ds, uint32_t dbytes, VkWriteDescriptorSet *w, uint32_t i0, uint32_t i1,
+                               int *hit);
 static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     static int on = -1;
     if (on < 0) on = getenv("KAR_REPLAY_PROF") && *getenv("KAR_REPLAY_PROF") == '1';
@@ -2707,6 +2771,28 @@ static VkSampler bindless_resident(VkExec *ex, int st, const GfxShaderRes *r) {
     vk_texture_unlock();
     if (put) vk_bindless_flush();
     return first;
+}
+
+static VkDescriptorSet psc_get(VkExec *ex, const VkPipeInfo *info, uint32_t s, VkDescriptorSetLayout sl,
+                               const VkDescSlot *ds, uint32_t dbytes, VkWriteDescriptorSet *w, uint32_t i0, uint32_t i1,
+                               int *hit) {
+    int64_t g = __atomic_load_n(&vk_destroy_gen, __ATOMIC_ACQUIRE);
+    // The key holds the Vulkan handles themselves, so a guest handle that now resolves elsewhere gives another key; only
+    // a destroyed object (whose handle value may come back) ends the epoch.
+    if (g != psc_dgen) psc_dgen = g, psc_epoch++, psc_epochs++;
+    if (ex->fence > psc_last_fence) psc_last_fence = ex->fence;   // the pool's sets are in use up to this submission
+    uint64_t h1, h2;
+    ds_hash(ds, dbytes, &h1, &h2);
+    typeof(PSC[0]) *e = &PSC[(h1 ^ (uint64_t)(uintptr_t)sl * 0x9E3779B97F4A7C15ull) & (PSC_N - 1)];
+    if (e->set && e->epoch == psc_epoch && e->h1 == h1 && e->h2 == h2 && e->sl == sl && e->n == dbytes) {
+        *hit = 1, psc_hits++;
+        return e->set;
+    }
+    VkDescriptorSet set = psc_alloc(sl);
+    write_set(info, s, set, ds, w, i0, i1);
+    e->h1 = h1, e->h2 = h2, e->epoch = psc_epoch, e->sl = sl, e->n = dbytes, e->set = set;
+    *hit = 0, psc_miss++;
+    return set;
 }
 
 static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
@@ -2957,7 +3043,9 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             VkDescriptorSet set = VK_NULL_HANDLE;
             DsCacheEnt *ce = NULL;
             uint64_t h1 = 0, h2 = 0;
-            if (ndyn[s] && dsc_on()) {   // with dynamic uniform buffers the set repeats: through the cache (16.5)
+            int phit = 0;
+            if (psc_on()) set = psc_get(ex, info, s, sl, ds, dbytes, w, i0, i1, &phit);
+            else if (ndyn[s] && dsc_on()) {   // with dynamic uniform buffers the set repeats: through the cache (16.5)
                 CbRes *cr = cb_res(ex);
                 if (!cr->dsc) cr->dsc = calloc(DSC_N, sizeof *cr->dsc);
                 if (cr->dsc) {
@@ -2978,7 +3066,9 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             if (!set || B.ds_last_layout[s] != sl || DS.n[s] != dbytes || memcmp(DS.sig[s], ds, dbytes)) {
                 DsCacheEnt *ce = NULL;
                 uint64_t h1 = 0, h2 = 0;
-                if (dsc_on()) {
+                int phit = 0;
+                if (psc_on()) set = psc_get(ex, info, s, sl, ds, dbytes, w, i0, i1, &phit);
+                else if (dsc_on()) {
                     CbRes *cr = cb_res(ex);
                     if (!cr->dsc) cr->dsc = calloc(DSC_N, sizeof *cr->dsc);
                     if (cr->dsc) {
@@ -2986,7 +3076,9 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
                         ce = &cr->dsc[(h1 ^ (uint64_t)(uintptr_t)sl * 0x9E3779B97F4A7C15ull) & (DSC_N - 1)];
                     }
                 }
-                if (ce && ce->set && ce->h1 == h1 && ce->h2 == h2 && ce->sl == sl && ce->n == dbytes) {
+                if (psc_on()) {
+                    if (phit) BS.set_reuse++;
+                } else if (ce && ce->set && ce->h1 == h1 && ce->h2 == h2 && ce->sl == sl && ce->n == dbytes) {
                     set = ce->set;
                     BS.set_reuse++;
                 } else {

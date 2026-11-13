@@ -240,7 +240,9 @@ void vk_mem_pick(VkMemSpan *sp);
 #define VK_MEM_USE(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_use(&(sp)); } while (0)
 #define VK_MEM_PICK(sp) do { if (vk_mirror_on && (sp).pool) vk_mem_pick(&(sp)); } while (0)
 void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size);
-extern int vk_mem_wb_kind;   // KAR_MIRROR_LOOP diagnostic: what the next vk_mem_gpu_wrote call writes
+extern int vk_mem_wb_kind;
+extern volatile int64_t vk_destroy_gen;   // vk_memory.c: destructions of objects descriptor sets may reference (16.5)
+void vk_destroy_gen_bump(void);   // KAR_MIRROR_LOOP diagnostic: what the next vk_mem_gpu_wrote call writes
 // Uniform blocks as of the submit call (vk_usnap.c): vk_exec_record copies the uniform ranges a submission binds before
 // it records, ubo bindings take the copy (0: not copied, bind memory), GPU writes of the replay drop the copies they touch.
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence);

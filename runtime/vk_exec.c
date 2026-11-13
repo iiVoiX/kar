@@ -1138,6 +1138,14 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
                               best < OP_COUNT_ ? win_opn[best] / nf : 1.0);
                 win_op[best] = 0;
             }
+            static int64_t dg0;
+            int64_t dg = __atomic_load_n(&vk_destroy_gen, __ATOMIC_RELAXED);
+            uint64_t ph, pm, pe;
+            extern void vk_psc_stats(uint64_t *hits, uint64_t *miss, uint64_t *epochs);
+            vk_psc_stats(&ph, &pm, &pe);
+            rt_log("replay prof: destructions of descriptor objects %.2f per frame; persistent sets: hits %.1f, misses %.1f, "
+                   "epochs %.2f per frame", (double)(dg - dg0) / nf, ph / nf, pm / nf, pe / nf);
+            dg0 = dg;
             rt_log("replay prof: frames %llu-%llu: replay %.2f ms per frame, bind_resources %.2f ms; by op (ms, count):%s; "
                    "dispatch: shader %.2f pipeline %.2f bind %.2f rest %.2f ms",
                    (unsigned long long)win_f0, (unsigned long long)f, win_ns / 1e6 / nf,
