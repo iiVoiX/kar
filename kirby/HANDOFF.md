@@ -728,3 +728,8 @@ same fps. Plan: default prebuild off for kar* (or keep fewer), then lazy heap co
   → blcity2/3: unter Bau-Last 3/3 reproduzierbar, auch **ohne** Bindless (blcity3) → gute Reproduktion für 3.2 (Bau-Last als Auslöser).
 - 16.7 (2026-11-13): VRAM-Abbild-Rückschreibung + Bindless jetzt Standard (Schalter =0 aus). Rennen ~100–110 fps. Offen: seltener Fahrzeugkarten-Müll in Top Ride (1/10), Schlusstest. Werkzeuge: KAR_DRAW_TS=<Bild> (GPU-Zeitleiste), KAR_SYNC_PROF, KAR_REPLAY_PROF (je Op/Bindungsart), KAR_WB_DIFF, KAR_MIRROR_LOOP, KAR_WW_PROBE, TOTK_FT_PERIOD, crit_path.py --host-sites.
 - 3.2 (2026-11-13, c32_city run1): City Trial nach den Screenshots (ab ~Bild 3900) haengt: 0,3-0,5 fps ueber Minuten, kein FATAL; Lauf abgebrochen. Ursache offen (Log E:\kirby\tmp\c32_city\run1.err). Top Ride/Road Trip in 3.2 noch nicht gefahren.
+
+## 2026-11-13: DLSS path (16.7, way A) checked statically
+- The DLSS class (eval main+0x4c34664, vtable main+0x8b239e8) is built only by factory main+0x4c3d44c with kind 0;
+  its 6 callers (main+0x5adae40..0x5adaf28) always pass kind 1 (class 0xe0, no DLSS calls). DLSS is unreachable in
+  1.3.3 even with EnableDLSS=1. Frame generation goes way B (motion from depth + matrices, optical flow for objects).
