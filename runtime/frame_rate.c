@@ -114,7 +114,12 @@ int frame_rate_self_timed(void) {
 // The vsync event's rate: 60, or for a self-timed game the limit when it is above 60.
 double frame_rate_vsync_hz(void) {
     if (!frame_rate_self_timed()) return 60;
-    double hz = 1e9 / (double)frame_step_cap_ns();
+    // The game waits for the vsync event every frame. At the limit's own rate a frame that misses one tick waits for
+    // the next, so frames snap to 1/2, 1/3 of the limit (Kirby race at a 144 limit: 65 fps, 1% low 17). Four ticks per
+    // limit period let a late frame go on a quarter period later; the present pacer still holds the limit (race: 70
+    // fps, 1% low 53; game time still wall time).
+    double hz = 4e9 / (double)frame_step_cap_ns();
+    if (hz > 1000) hz = 1000;
     return hz > 60 ? hz : 60;
 }
 
