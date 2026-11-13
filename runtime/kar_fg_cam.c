@@ -71,6 +71,15 @@ int kar_fg_camera(uint32_t w, uint32_t h, float reproj[16], float dz[2], float *
             }
         *fov = cur->fov, *nearv = cur->nearv, *farv = cur->farv, dz[0] = cur->dz[0], dz[1] = cur->dz[1];
     }
+    {   // KAR_FG_MVLOG=1: the frames kept, for the first failures
+        static int on = -1, n;
+        if (on < 0) on = getenv("KAR_FG_MVLOG") && *getenv("KAR_FG_MVLOG") == '1';
+        if (on && !ok && n < 20 && cur) {
+            n++;
+            rt_log("fg: no camera pair at frame %llu: newest %llu (%ux%u), before it %llu ok %d", (unsigned long long)fr,
+                   (unsigned long long)cur->frame, cur->w, cur->h, (unsigned long long)prev->frame, prev->ok);
+        }
+    }
     plat_mutex_unlock(&lock);
     static int told;
     if (ok && !told++) rt_log("fgcam: scene camera %ux%u, fov %g, near %g far %g", w, h, *fov, *nearv, *farv);

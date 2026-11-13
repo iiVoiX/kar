@@ -2064,7 +2064,7 @@ static void upscale_fill(VkExec *ex, uint64_t h) {   // texture lock held
     }
     ex->recorded++;
     // frame generation (vk_fg_mv.c): the scene's depth of the source's size is this frame's here
-    if (vk_fg_mv_record(ex->cb, sw, sh)) B.pipe[1] = VK_NULL_HANDLE;
+    if (vk_fg_mv_record(ex->cb, sw, sh, img->image, img->format, img->width, img->height)) B.pipe[1] = VK_NULL_HANDLE;
     vk_exec_barrier(ex);   // the blit lands before the draw samples it
     if (reopen) vk_exec_pass_begin(ex);
 }

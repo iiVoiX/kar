@@ -138,8 +138,18 @@ void vk_fsr_release(void);   // before the device goes away
 int vk_fg_on(void);
 // Camera motion vectors of one frame (vk_fg_mv.c): rg16f in pixels (previous - current) and an r32f depth copy, w x h,
 // both GENERAL; the camera's vertical field of view (radians) and near/far (reversed depth).
-typedef struct { VkImage mv, depth; uint32_t w, h; float fov, nearv, farv; uint64_t frame; } VkFgMv;
-int vk_fg_mv_record(VkCommandBuffer cb, uint32_t w, uint32_t h);   // replay, after the scene: 1 when recorded
+// hud: a copy of the DLSS output (the scene without the interface) of size hud_w x hud_h, format hud_fmt, GENERAL;
+// VK_NULL_HANDLE when the frame had none.
+typedef struct {
+    VkImage mv, depth, hud;
+    uint32_t w, h, hud_w, hud_h;
+    VkFormat hud_fmt;
+    float fov, nearv, farv;
+    uint64_t frame;
+} VkFgMv;
+// replay, after the scene and the DLSS stand-in wrote out (out_w x out_h, out_fmt): 1 when recorded
+int vk_fg_mv_record(VkCommandBuffer cb, uint32_t w, uint32_t h, VkImage out, VkFormat out_fmt, uint32_t out_w,
+                    uint32_t out_h);
 int vk_fg_mv_latest(void);                // slot number of the newest recording (0: none)
 int vk_fg_mv_get(int slot, VkFgMv *out);
 // mv_slot: vk_fg_mv_latest() when the game presented this picture (0: no motion vectors, zero ones are used)

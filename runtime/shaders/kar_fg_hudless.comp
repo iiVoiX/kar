@@ -1,0 +1,23 @@
+#version 450
+// Frame generation picture without the HUD (runtime/vk_fg.cpp, RELEASE_PLAN.md 16.7 B3). The game composes its final
+// picture from the DLSS output (the 3D scene, no HUD) and the interface layer (composite fs bc440c9e, ending in a
+// square root); this resamples the DLSS output (a copy vk_fg_mv.c takes right after the DLSS stand-in) to the output
+// size and encodes it like the final picture where no interface covers it, so FidelityFX frame interpolation can tell
+// the HUD apart and keep it out of the interpolation.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D scene;                 // DLSS output copy, linear filter
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outp;   // output size, the final picture's encoding
+layout(push_constant) uniform PC {
+    vec2 size;    // output size
+    float mode;   // 0: as stored, 1: square root (the composite's last step), 2: sRGB decode then square root
+    float pad;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.size.x) || p.y >= int(pc.size.y)) return;
+    vec3 c = clamp(textureLod(scene, (vec2(p) + 0.5) / pc.size, 0.0).rgb, 0.0, 1.0);
+    if (pc.mode > 1.5) c = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+    if (pc.mode > 0.5) c = sqrt(c);
+    imageStore(outp, p, vec4(c, 1.0));
+}

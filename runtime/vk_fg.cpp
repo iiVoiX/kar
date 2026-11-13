@@ -18,6 +18,7 @@ extern "C" {
 #include <string.h>
 #include "host.h"
 #include "vk.h"
+#include "kar_fg_hudless_spv.h"
 }
 
 extern "C" int vk_fg_on(void) {
@@ -54,7 +55,15 @@ struct Fg {
     int have_ctx = 0;
     FfxResourceInternal res[5] = {};   // optical flow vector, scene change; dilated depth, dilated motion, prev depth
     int nres = 0;
-    Img cur, out, depth, mv;
+    Img cur, out, depth, mv, hud;   // hud: the scene without the interface at the output size (B3)
+    VkImageView hud_view = VK_NULL_HANDLE;
+    struct { VkImage image; VkImageView view; } hsrc[4] = {};   // sampled views of vk_fg_mv.c's DLSS output copies
+    int hsrc_next = 0;
+    VkDescriptorSetLayout hl_dsl = VK_NULL_HANDLE;
+    VkPipelineLayout hl_layout = VK_NULL_HANDLE;
+    VkPipeline hl_pipe = VK_NULL_HANDLE;
+    VkSampler hl_sampler = VK_NULL_HANDLE;
+    PFN_vkCmdPushDescriptorSetKHR push = nullptr;
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer cb = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
@@ -220,6 +229,10 @@ void dump_pair(VkCtx *c, int mid) {
     if (mid) {
         snprintf(path, sizeof path, "%s/fg_%llu_mid.png", dir && *dir ? dir : ".", (unsigned long long)G.calls);
         dump_image(c, &G.out, path);
+        if (G.hud_view) {
+            snprintf(path, sizeof path, "%s/fg_%llu_hud.png", dir && *dir ? dir : ".", (unsigned long long)G.calls);
+            dump_image(c, &G.hud, path);
+        }
     }
     G.last_ns = kern_now_ns();   // the dump's wait is no pause of the game: no reset for it
 }
@@ -233,10 +246,72 @@ void destroy_ctx(VkCtx *c) {
         ffxOpticalflowContextDestroy(&G.of);
         G.have_ctx = 0, G.nres = 0;
     }
-    free_image(c, &G.cur), free_image(c, &G.out), free_image(c, &G.depth), free_image(c, &G.mv);
+    if (G.hud_view) vkDestroyImageView(c->device, G.hud_view, nullptr), G.hud_view = VK_NULL_HANDLE;
+    for (auto &h : G.hsrc)
+        if (h.view) vkDestroyImageView(c->device, h.view, nullptr), h = {};
+    free_image(c, &G.cur), free_image(c, &G.out), free_image(c, &G.depth), free_image(c, &G.mv), free_image(c, &G.hud);
     _aligned_free(G.scratch);
     G.scratch = nullptr;
     G.w = G.h = 0;
+}
+
+// The pipeline of shaders/kar_fg_hudless.comp (once; 0 when it cannot be made: no picture without the HUD then).
+int hudless_pipe(VkCtx *c) {
+    static int tried;
+    if (tried) return G.hl_pipe != VK_NULL_HANDLE;
+    tried = 1;
+    G.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
+    if (!G.push) return 0;
+    VkDescriptorSetLayoutBinding b[2] = {};
+    b[0].binding = 0, b[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, b[0].descriptorCount = 1;
+    b[1].binding = 1, b[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, b[1].descriptorCount = 1;
+    b[0].stageFlags = b[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo dci = {};
+    dci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    dci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    dci.bindingCount = 2, dci.pBindings = b;
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo li = {};
+    li.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    li.setLayoutCount = 1, li.pSetLayouts = &G.hl_dsl, li.pushConstantRangeCount = 1, li.pPushConstantRanges = &pr;
+    VkSamplerCreateInfo si = {};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateDescriptorSetLayout(c->device, &dci, nullptr, &G.hl_dsl) != VK_SUCCESS ||
+        vkCreatePipelineLayout(c->device, &li, nullptr, &G.hl_layout) != VK_SUCCESS ||
+        vkCreateSampler(c->device, &si, nullptr, &G.hl_sampler) != VK_SUCCESS)
+        return 0;
+    VkShaderModuleCreateInfo mi = {};
+    mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    mi.codeSize = sizeof kar_fg_hudless_spv, mi.pCode = kar_fg_hudless_spv;
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(c->device, &mi, nullptr, &m) != VK_SUCCESS) return 0;
+    VkComputePipelineCreateInfo ci = {};
+    ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT, ci.stage.module = m, ci.stage.pName = "main";
+    ci.layout = G.hl_layout;
+    if (vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, nullptr, &G.hl_pipe) != VK_SUCCESS)
+        G.hl_pipe = VK_NULL_HANDLE;
+    vkDestroyShaderModule(c->device, m, nullptr);
+    return G.hl_pipe != VK_NULL_HANDLE;
+}
+
+VkImageView hsrc_view(VkCtx *c, VkImage image, VkFormat f) {
+    for (auto &h : G.hsrc)
+        if (h.image == image && h.view) return h.view;
+    VkImageViewCreateInfo vi = {};
+    vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vi.image = image, vi.viewType = VK_IMAGE_VIEW_TYPE_2D, vi.format = f;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView v = VK_NULL_HANDLE;
+    if (vkCreateImageView(c->device, &vi, nullptr, &v) != VK_SUCCESS) return VK_NULL_HANDLE;
+    auto &h = G.hsrc[G.hsrc_next];
+    G.hsrc_next = (G.hsrc_next + 1) % 4;
+    if (h.view) vk_defer_view(h.view);   // the GPU may still read it
+    h.image = image, h.view = v;
+    return v;
 }
 
 int create_ctx(VkCtx *c, VkFormat fmt, int w, int h) {
@@ -252,8 +327,18 @@ int create_ctx(VkCtx *c, VkFormat fmt, int w, int h) {
         if (vkCreateFence(c->device, &fi, nullptr, &G.fence) != VK_SUCCESS) return 0;
     }
     if (!make_image(c, &G.cur, fmt, w, h) || !make_image(c, &G.out, fmt, w, h) ||
-        !make_image(c, &G.depth, VK_FORMAT_R32_SFLOAT, w, h) || !make_image(c, &G.mv, VK_FORMAT_R16G16_SFLOAT, w, h))
+        !make_image(c, &G.depth, VK_FORMAT_R32_SFLOAT, w, h) || !make_image(c, &G.mv, VK_FORMAT_R16G16_SFLOAT, w, h) ||
+        !make_image(c, &G.hud, fmt, w, h))
         return 0;
+    {
+        VkImageViewCreateInfo vi = {};
+        vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image = G.hud.image;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = fmt;
+        vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (vkCreateImageView(c->device, &vi, nullptr, &G.hud_view) != VK_SUCCESS) G.hud_view = VK_NULL_HANDLE;
+    }
     VkDeviceContext dc = {c->device, c->phys, proc_addr};
     size_t n = ffxGetScratchMemorySizeVK(c->phys, 4);
     G.scratch = _aligned_malloc(n, 64);
@@ -339,7 +424,7 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
                                    VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, nullptr};
     vkBeginCommandBuffer(G.cb, &bi);
     if (!G.cleared) {   // own images to GENERAL; depth far (1) and motion vectors 0 for good
-        Img *all[4] = {&G.cur, &G.out, &G.depth, &G.mv};
+        Img *all[5] = {&G.cur, &G.out, &G.depth, &G.mv, &G.hud};
         for (Img *m : all) to_general(G.cb, m->image);
         VkClearColorValue one = {{0, 0, 0, 0}}, zero = {{0, 0, 0, 0}};   // reversed depth: 0 is far
         VkImageSubresourceRange r = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -375,9 +460,43 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
     FfxResource cur = res_of(&G.cur, L"KAR_FG_Current"), out = res_of(&G.out, L"KAR_FG_Output");
     FfxErrorCode e = FFX_OK;
 
+    // B3: the scene without the interface, from this picture's DLSS output copy (vk_fg_mv.c), in the final picture's
+    // encoding (KAR_FG_HUDMODE: 0 as stored, 1 square root (default), 2 sRGB decode + square root, -1 off)
+    static int hmode = -2;
+    if (hmode == -2) hmode = getenv("KAR_FG_HUDMODE") ? atoi(getenv("KAR_FG_HUDMODE")) : 1;
+    VkFgMv hv = {};
+    int have_hud = hmode >= 0 && mv_slot && vk_fg_mv_get(mv_slot, &hv) && hv.hud && G.hud_view && hudless_pipe(c);
+    VkImageView hsv = have_hud ? hsrc_view(c, hv.hud, hv.hud_fmt) : VK_NULL_HANDLE;
+    have_hud = have_hud && hsv;
+    if (have_hud) {
+        barrier(G.cb, G.hud.image, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        VkDescriptorImageInfo ii[2] = {{G.hl_sampler, hsv, VK_IMAGE_LAYOUT_GENERAL},
+                                       {VK_NULL_HANDLE, G.hud_view, VK_IMAGE_LAYOUT_GENERAL}};
+        VkWriteDescriptorSet wr[2] = {};
+        for (int i = 0; i < 2; i++) {
+            wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wr[i].dstBinding = (uint32_t)i, wr[i].descriptorCount = 1, wr[i].pImageInfo = &ii[i];
+            wr[i].descriptorType = i ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        }
+        float pc[4] = {(float)cw, (float)ch, (float)hmode, 0};
+        vkCmdBindPipeline(G.cb, VK_PIPELINE_BIND_POINT_COMPUTE, G.hl_pipe);
+        G.push(G.cb, VK_PIPELINE_BIND_POINT_COMPUTE, G.hl_layout, 0, 2, wr);
+        vkCmdPushConstants(G.cb, G.hl_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+        vkCmdDispatch(G.cb, (cw + 7) / 8, (ch + 7) / 8, 1);
+        barrier(G.cb, G.hud.image, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+    }
+    static int told_hud = -1;
+    if (have_hud != told_hud) {
+        told_hud = have_hud;
+        rt_log("fg: %s", have_hud ? "picture without the HUD in use" : "no picture without the HUD");
+    }
+    FfxResource hud = have_hud ? res_of(&G.hud, L"KAR_FG_HUDLess") : FfxResource{};
+
     FfxOpticalflowDispatchDescription od = {};
     od.commandList = cl;
-    od.color = cur;
+    od.color = have_hud ? hud : cur;
     od.opticalFlowVector = of_vec;
     od.opticalFlowSCD = of_scd;
     od.reset = reset;
@@ -419,6 +538,7 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
     fd.displaySize = {(uint32_t)cw, (uint32_t)ch};
     fd.renderSize = pd_.renderSize;
     fd.currentBackBuffer = cur;
+    if (have_hud) fd.currentBackBuffer_HUDLess = hud;
     fd.output = out;
     fd.interpolationRect = {0, 0, cw, ch};
     fd.opticalFlowVector = of_vec;
