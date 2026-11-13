@@ -106,6 +106,9 @@ static void cam_hook(Cpu *c) {
 }
 
 void kar_fg_cam_init(void) {
-    if (rt_patch_set("karfg") < 0) return;
+    int set = rt_patch_set("karfg");
+    if (set < 0) return;
+    extern int vk_fg_on(void);
+    if (vk_fg_on()) rt_patch_switch(set, 1);   // the setting in dkb.ini turns the camera hook on too
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_CAMERA, cam_hook);
 }

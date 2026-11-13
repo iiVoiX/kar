@@ -16,14 +16,19 @@ extern "C" {
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include "cfg.h"
 #include "host.h"
 #include "vk.h"
 #include "kar_fg_hudless_spv.h"
 }
 
+// On with KAR_FG=1 in the environment or frame_gen = 1 in dkb.ini (TOTK_FRAME_GEN); KAR_FG=0 turns it off for a run.
 extern "C" int vk_fg_on(void) {
     static int on = -1;
-    if (on < 0) on = getenv("KAR_FG") && *getenv("KAR_FG") == '1';
+    if (on < 0) {
+        const char *e = getenv("KAR_FG"), *c = cfg_get("TOTK_FRAME_GEN");
+        on = e && *e ? *e == '1' : c && *c && strcmp(c, "0") != 0;
+    }
     return on;
 }
 
