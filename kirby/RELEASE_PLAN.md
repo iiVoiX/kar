@@ -307,6 +307,21 @@ Abgleich mit dem Plan: „teilweise in“ = verwandter Punkt existiert, deckt ab
 | 17.15 | Konsolenmodus TV oder Handheld wählbar | neu | Docked/Handheld-Code vorhanden | SPIEL | ⬜ |
 | 17.16 | Texturen bleiben komprimiert (BC3, halber VRAM, gleiche Geschwindigkeit), außer bei 20 GiB VRAM und 48 GiB RAM (Windows rechnet VRAM aufs Commit-Limit) | neu, betrifft 4.1, 4.7 | BC3-Code vorhanden | OHNE + SPIEL | ⬜ |
 
+## 18. Anregungen aus Longshot (MagicBeanDev, Schwesterprojekt; Doku gelesen 2026-11-13)
+
+Longshot (git.magicbean.dev/MagicBeanDev/Longshot, docs/) ist ein PC-Port derselben Bauart (statische Recompilation, Vulkan, Spiegel/Abbild, Pipeline-Cache). Übernommen werden nur Ideen, kein Code (Lizenz GPL-3.0, eigene Prüfung nötig).
+
+| Nr | Aufgabe | Herkunft | Test | Status |
+|---|---|---|---|---|
+| 18.1 | **Flush nicht-kohärenter Upload-Speicher**: CPU-geschriebene Staging-/Scratch-Bereiche (Textur-Staging, UBO-/Vertex-Scratch) vor der GPU-Nutzung flushen, Slice-Starts an `nonCoherentAtomSize` ausrichten. Auf NVIDIA meist kohärent (daher bei uns unsichtbar), auf AMD/Intel sonst veraltete Texturen/Konstanten | docs/texture-staging-publication.md, draw-stream-visibility.md | OHNE + 11.3 | ⬜ (nur 5 Flush-Stellen im Code; prüfen, welche Speichertypen VMA wählt) |
+| 18.2 | **Texel-Puffer (Buffer-Texturen) nachbilden**: bei uns noch Dummy-View (vk_exec_draw.c „buffer textures are not replayed yet“). Longshot: Views je (VkBuffer, Format, Offset, Bereich) gecacht, mit dem Import-Puffer freigegeben; Speicher-Schreibzugriffe melden `gpu_wrote` | docs/texel-buffer-ownership.md | SPIEL | ⬜ (erst zählen, ob Kirby sie nutzt) |
+| 18.3 | **Vom GPU gezeichnete Daten, die nie im Spielspeicher ankamen** (bei Longshot: Terrain-Kacheln → verwaschene Bodentexturen). Kandidat für unseren seltenen Fahrzeugkarten-Müll: Render-Ziele, die das Spiel später als Textur aus seinem Speicher liest | worklist #2545 | SPIEL | ⬜ |
+| 18.4 | Rückschreib-Beobachtung: bei uns mit `KAR_WB_DIFF` + Abbild-Rückschreibung (16.7) bereits weiter umgesetzt | docs/writeback-observations.md | – | ✅ (bei uns gelöst) |
+| 18.5 | **Speicherwachstum über lange Sitzungen** ist dort der Hauptfehler (RAM/VRAM bis OOM); Pipeline-Cache hält eine volle Heap-Kopie. Bei uns 60-min-Test stabil (3.4); 12.5 Übernacht-Soak und Pipeline-Cache-Speichern ohne Vollkopie prüfen | worklist, docs/pipeline-cache-storage.md | OHNE | ⬜ |
+| 18.6 | Frame-Logik > 60 fps (bei Longshot: zählt Bilder, Ereignisse kaputt); bei Kirby prüfen, ob Zähler/Timer an Bilder gebunden sind (Spiel ist selbst getaktet, 16.x) | worklist #1612/#1742 | SPIEL | ⬜ |
+| 18.7 | Robustheit: Swapchain-Neuaufbau nach Fehler, Geräteverlust beim Present melden, Retry für fehlgeschlagene Image-Views, Sampler-Fehler vor Deskriptor-Veröffentlichung abfangen | docs/swapchain-recovery.md, presentation-device-loss.md, image-view-retry.md, sampler-admission.md | OHNE | ⬜ |
+| 18.8 | Intel: Abstürze beim Pipeline-Bau → Cache-Speichern vom Bauen trennen; AMD: VK_EXT_device_fault (haben wir) | worklist #2456/#2117 | 11.3 | ⬜ |
+
 ## Reihenfolge
 
 1. **Jetzt dran** (Tabelle oben): D8 Schattenkarte (1.11) zurückgestellt (Konsolenbild nötig), 1.8 Bloom ✅ gemessen.
