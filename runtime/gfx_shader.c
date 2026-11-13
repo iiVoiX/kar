@@ -1160,6 +1160,67 @@ static uint32_t arr_n(void) {
     return n;
 }
 
+
+// KAR_ARR_DIMS=1 (diagnostic, bindless 16.2): the image types behind the material arrays (GfxShaderRes.arr_ubo), each
+// distinct (dim, arrayed, depth, sampled type, ms) once: a global descriptor array holds one image type, so this tells
+// how many global arrays bindless needs. The arrays are found by their binding decoration (GfxShaderRes.binding).
+static void arr_dims(const GfxShader *s) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_ARR_DIMS") && *getenv("KAR_ARR_DIMS") == '1';
+    if (!on) return;
+    enum { OP_TYPE_INT_ = 21, OP_TYPE_FLOAT_ = 22, OP_TYPE_IMAGE_ = 25, OP_TYPE_SAMPLED_IMAGE_ = 27, OP_TYPE_ARRAY_ = 28,
+           OP_TYPE_POINTER_ = 32, OP_VAR = 59, OP_DECOR = 71, DEC_BINDING = 33 };
+    const uint32_t *w = s->spirv;
+    uint64_t n = s->words;
+    if (!w || n < 5) return;
+    uint32_t bound = w[3];
+    if (bound > (1u << 22)) return;
+    uint32_t *binding = calloc(bound, 4), *ptr_to = calloc(bound, 4), *arr_of = calloc(bound, 4), *simg_of = calloc(bound, 4);
+    uint32_t (*img)[6] = calloc(bound, sizeof *img);   // sampled type, dim, depth, arrayed, ms, sampled
+    uint8_t *num = calloc(bound, 1);                   // 1 float, 2 signed int, 3 unsigned int
+    if (!binding || !ptr_to || !arr_of || !simg_of || !img || !num) goto done;
+    for (int pass = 0; pass < 2; pass++)
+        for (uint64_t i = 5; i < n;) {
+            uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+            if (!len || i + len > n) break;
+            if (pass == 0) {
+                if (op == OP_DECOR && len >= 4 && w[i + 2] == DEC_BINDING && w[i + 1] < bound) binding[w[i + 1]] = w[i + 3] + 1;
+                else if (op == OP_TYPE_FLOAT_ && w[i + 1] < bound) num[w[i + 1]] = 1;
+                else if (op == OP_TYPE_INT_ && len >= 4 && w[i + 1] < bound) num[w[i + 1]] = w[i + 3] ? 2 : 3;
+                else if (op == OP_TYPE_IMAGE_ && len >= 9 && w[i + 1] < bound)
+                    for (int k = 0; k < 6; k++) img[w[i + 1]][k] = w[i + 2 + k];
+                else if (op == OP_TYPE_SAMPLED_IMAGE_ && len >= 3 && w[i + 1] < bound) simg_of[w[i + 1]] = w[i + 2];
+                else if (op == OP_TYPE_ARRAY_ && len >= 4 && w[i + 1] < bound) arr_of[w[i + 1]] = w[i + 2];
+                else if (op == OP_TYPE_POINTER_ && len >= 4 && w[i + 1] < bound) ptr_to[w[i + 1]] = w[i + 3];
+            } else if (op == OP_VAR && len >= 4 && w[i + 2] < bound) {
+                uint32_t id = w[i + 2], b = binding[id];
+                if (!b) goto next;
+                for (int r = 0; r < s->nres[GFX_RES_TEX]; r++) {
+                    const GfxShaderRes *res = &s->res[GFX_RES_TEX][r];
+                    if (!res->arr_ubo || res->binding != b - 1) continue;
+                    uint32_t t = ptr_to[w[i + 1]], a = t < bound ? arr_of[t] : 0, si = a && a < bound ? simg_of[a] : 0;
+                    if (!si || si >= bound) continue;
+                    const uint32_t *m = img[si];
+                    uint32_t key = m[1] | m[2] << 4 | m[3] << 6 | m[4] << 7 | (m[0] < bound ? num[m[0]] : 0) << 8;
+                    static uint32_t seen[64];
+                    static int nseen;
+                    int k = 0;
+                    while (k < nseen && seen[k] != key) k++;
+                    if (k == nseen && nseen < 64) {
+                        seen[nseen++] = key;
+                        rt_log("arr dims: dim %u depth %u arrayed %u ms %u type %s (stage %d binding %d)", m[1], m[2],
+                               m[3], m[4], (m[0] < bound && num[m[0]] == 1) ? "float" : (m[0] < bound && num[m[0]] == 2) ? "int" : "uint",
+                               s->stage, res->binding);
+                    }
+                }
+            }
+        next:
+            i += len;
+        }
+done:
+    free(binding), free(ptr_to), free(arr_of), free(simg_of), free(img), free(num);
+}
+
 static int arr_patch(GfxShader *s) {
     enum { OP_EXT_INST = 12, OP_TYPE_ARRAY_ = 28, OP_TYPE_POINTER_ = 32, OP_CONST = 43, OP_VAR = 59,
            OP_ACCESS_CHAIN = 65, OP_BITCAST = 124, OP_DECOR = 71, DEC_BINDING = 33, GLSL_UMIN = 38 };
@@ -1515,6 +1576,7 @@ static int reflect(GfxShader *s, int flags) {
     reflect_spirv(s);
     if (!pool_patch(s)) rt_log("gfx_shader: a Direct pool array shader did not have the expected shape; left as is");
     if (!arr_patch(s)) rt_log("gfx_shader: a material array shader did not have the expected shape; left at 32");
+    arr_dims(s);
     if (s->geometry_source_passthrough) {
         if (s->geometry_position != 3) return 0;
         uint32_t locations = 0;
