@@ -2905,6 +2905,17 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             }
         }
     }
+    {   // bindless (vk_bindless.c, 16.2): the global set as set 2, again after a new command buffer or layout
+        static VkCommandBuffer bl_cb[2];
+        static VkPipelineLayout bl_layout[2];
+        int k = !gfx;
+        VkDescriptorSet bls = info->bindless ? vk_bindless_set() : VK_NULL_HANDLE;
+        if (bls && (bl_cb[k] != ex->cb || bl_layout[k] != info->layout)) {
+            vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 2, 1, &bls, 0, NULL);
+            bl_cb[k] = ex->cb, bl_layout[k] = info->layout;
+            ex->recorded++;
+        }
+    }
     if (skip) {
         RS.rec = 0;
         // An equal next draw records nothing when every push set holds its push (TOTK_PUSH_SKIP on) and nothing made

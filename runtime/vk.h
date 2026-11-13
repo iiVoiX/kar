@@ -531,6 +531,7 @@ typedef struct {
     VkDescriptorSetLayout set_layout1;
     int push1;
     uint32_t n_sets;
+    int bindless;                          // the layout has the global bindless set as set 2 (vk_bindless.c, 16.2)
     // Descriptor update template per set (vk_pipeline.c make_tpl): reads one VkDescSlot per descriptor, in binding order,
     // from the start of the set's descriptors. VK_NULL_HANDLE: the set is written with VkWriteDescriptorSet structs.
     VkDescriptorUpdateTemplate tpl[2];

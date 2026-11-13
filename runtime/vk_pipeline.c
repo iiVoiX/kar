@@ -117,6 +117,7 @@ typedef struct Layout {
     uint32_t n0;                       // independent layouts: b[0..n0) are set 0, the rest set 1
     VkPipelineLayout half[2];          // GPL libraries: {set 0, null}, {null, set 1} (made on first use)
     VkDescriptorUpdateTemplate tpl[2]; // per set (make_tpl); VK_NULL_HANDLE: written with write structs
+    int bl;                            // set 2 is the global bindless set: a binding is a material array (16.2)
     VkDescriptorSetLayoutBinding b[];
 } Layout;
 
@@ -1937,6 +1938,27 @@ static int push_fits(const VkDescriptorSetLayoutBinding *b, uint32_t n, int64_t 
     return 1;
 }
 
+// Bindless (vk_bindless.c, RELEASE_PLAN 16.2): with KAR_BINDLESS=1 every pipeline layout gets the global set as set 2.
+// Compute layouts have one set of their own, so set 1 is an empty layout there.
+static VkDescriptorSetLayout empty_set_layout(void) {
+    static VkDescriptorSetLayout e;
+    if (!e) {
+        VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        if (vkCreateDescriptorSetLayout(P.device, &ci, NULL, &e) != VK_SUCCESS) e = VK_NULL_HANDLE;
+    }
+    return e;
+}
+
+// Only layouts with a material array (GfxShaderRes.arr_ubo) get the bindless set: every other pipeline keeps its layout
+// and with it the driver's cache (a new layout recompiles a pipeline; Kirby's big compute shaders take seconds each).
+static VkDescriptorSetLayout bindless_for(const Bindings *B, uint32_t n) {
+    VkDescriptorSetLayout s = vk_bindless_layout();
+    if (!s) return VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < n; i++)
+        if (B->pb[i].res && B->pb[i].res->arr_ubo) return s;
+    return VK_NULL_HANDLE;
+}
+
 static Layout *layout_get(Bindings *B) {
     uint64_t h = FNV0;
     int64_t total = bindings_sort(B, &h);
@@ -1956,8 +1978,11 @@ static Layout *layout_get(Bindings *B) {
         free(l);
         return NULL;
     }
+    VkDescriptorSetLayout bl3[3] = {l->set, empty_set_layout(), bindless_for(B, B->n)};
+    l->bl = bl3[2] && bl3[1];
     VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                      .pSetLayouts = &l->set};
+    if (bl3[2] && bl3[1]) pi.setLayoutCount = 3, pi.pSetLayouts = bl3;
     if (vkCreatePipelineLayout(P.device, &pi, NULL, &l->layout) != VK_SUCCESS) {
         vkDestroyDescriptorSetLayout(P.device, l->set, NULL);
         free(l);
@@ -2011,10 +2036,11 @@ static Layout *layout_pair(Bindings *B, Bindings *F) {
         free(l);
         return NULL;
     }
-    VkDescriptorSetLayout sets[2] = {l->set, l->set1};
+    VkDescriptorSetLayout sets[3] = {l->set, l->set1, bindless_for(B, n)};
+    l->bl = sets[2] != VK_NULL_HANDLE;
     VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                                     .flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT, .setLayoutCount = 2,
-                                     .pSetLayouts = sets};
+                                     .flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT,
+                                     .setLayoutCount = sets[2] ? 3 : 2, .pSetLayouts = sets};
     if (vkCreatePipelineLayout(P.device, &pi, NULL, &l->layout) != VK_SUCCESS) {
         vkDestroyDescriptorSetLayout(P.device, l->set, NULL);
         vkDestroyDescriptorSetLayout(P.device, l->set1, NULL);
@@ -2095,6 +2121,7 @@ static Pipe *pipe_add(const void *key, size_t size, uint64_t h, VkPipeline pipel
     p->info.set_layout1 = l ? l->set1 : VK_NULL_HANDLE;
     p->info.push1 = l ? l->push1 : 0;
     p->info.n_sets = l && l->set1 ? 2 : 1;
+    p->info.bindless = l ? l->bl : 0;
     if (l) p->info.tpl[0] = l->tpl[0], p->info.tpl[1] = l->tpl[1];
     p->lay = l;
     Pipe **head = &pipes[h % PIPE_BUCKETS];
@@ -2437,10 +2464,11 @@ static double ms_since(uint64_t t0) { return (double)(qpc() - t0) / 1e6; }
 
 static VkPipelineLayout half_layout(Layout *l, int h) {
     if (l->half[h]) return l->half[h];
-    VkDescriptorSetLayout sets[2] = {h ? VK_NULL_HANDLE : l->set, h ? l->set1 : VK_NULL_HANDLE};
+    VkDescriptorSetLayout sets[3] = {h ? VK_NULL_HANDLE : l->set, h ? l->set1 : VK_NULL_HANDLE,
+                                     l->bl ? vk_bindless_layout() : VK_NULL_HANDLE};
     VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                                     .flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT, .setLayoutCount = 2,
-                                     .pSetLayouts = sets};
+                                     .flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT,
+                                     .setLayoutCount = sets[2] ? 3 : 2, .pSetLayouts = sets};
     if (vkCreatePipelineLayout(P.device, &pi, NULL, &l->half[h]) != VK_SUCCESS) l->half[h] = VK_NULL_HANDLE;
     return l->half[h];
 }
