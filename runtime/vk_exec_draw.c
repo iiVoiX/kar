@@ -1152,6 +1152,27 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     uint64_t max = LIM.ubo_max, align = LIM.ubo_align;
     VkDescriptorBufferInfo bi;
+    {   // KAR_UBO_LOG=<slot>: the words of that constant bank each program binds (RELEASE_PLAN 2.6 diagnostic)
+        static int want = -2, told;
+        if (want == -2) want = getenv("KAR_UBO_LOG") ? atoi(getenv("KAR_UBO_LOG")) : -1;
+        if ((want == slot || want == 99) && told < 3000 && ex->prog && slot >= 3 && slot < 21) {
+            uint64_t ser = ex->prog->serial;
+            static uint64_t seen[2048];
+            static int ns;
+            int k = 0;
+            while (k < ns && seen[k] != (ser * 8 + (uint64_t)st) * 32 + (uint64_t)slot) k++;
+            if (k == ns && ns < 2048) {
+                seen[ns++] = (ser * 8 + (uint64_t)st) * 32 + (uint64_t)slot;
+                const uint32_t *w = ex->ubo[st][slot - 3].addr ? (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr : (const uint32_t *)"const uint32_t *w = (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr;const uint32_t *w = (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr;const uint32_t *w = (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr;const uint32_t *w = (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr;";
+                char t[1200];
+                int o = 0, n = ex->ubo[st][slot - 3].addr ? (int)(ex->ubo[st][slot - 3].size / 4) : 0;
+                for (int i = 0; i < n && i < 56; i++) o += snprintf(t + o, sizeof t - (size_t)o, " %08x", w[i]);
+                rt_log("vk_exec: ubo%d prog %llu stage %d size %llu:%s", slot, (unsigned long long)ser, st,
+                       (unsigned long long)ex->ubo[st][slot - 3].size, t);
+                told++;
+            }
+        }
+    }
     if (slot == 0 && c0_on()) return c0_info(ex, st);
     if (slot == 1 && ex->prog) {   // compiler constants stored after the shader code
         const uint8_t *ctl, *code;
