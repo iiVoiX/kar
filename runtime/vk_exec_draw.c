@@ -4236,16 +4236,19 @@ static int mvk_upscale_blit(VkExec *ex, const GfxShader *cs) {
     return 1;
 }
 
-// The pipeline of a dispatch. Built by the background workers (vk_pipeline_compute_async), but the dispatch waits for
-// it: a skipped dispatch changes results (indirect arguments, index lists, the colour LUT), and skipping them while the
+// The pipeline of a dispatch. Built by the background workers (vk_pipeline_compute_async); one still queued moves to
+// the head of the queue (vk_pipeline_compute_bump) instead of waiting its turn behind the prefetch. The dispatch waits
+// for it: a skipped dispatch changes results (indirect arguments, index lists, the colour LUT), and skipping them while the
 // boot prebuild was off lost the GPU device at boot. KAR_CS_SKIP_PENDING=1 restores skipping (*pending = 1 then).
 uint64_t vk_rp_sub[4];   // KAR_REPLAY_PROF: dispatch time in shader lookup, compute pipeline, resource binding, the rest
+void vk_pipeline_compute_bump(const GfxShader *cs);
 static VkPipeline compute_pipe(const GfxShader *cs, const VkPipeInfo **info, int *pending) {
     static int skip = -1;
     if (skip < 0) skip = getenv("KAR_CS_SKIP_PENDING") && *getenv("KAR_CS_SKIP_PENDING") == '1';
     VkPipeline p = vk_pipeline_compute_async(cs, info, pending);
     if (!*pending || skip) return p;
     uint64_t t0 = plat_now_ns();
+    vk_pipeline_compute_bump(cs);   // to the head of the queue, before the prefetch's shaders (vk_pipeline.c)
     while (*pending) {
         plat_sleep_ns(500000);
         p = vk_pipeline_compute_async(cs, info, pending);

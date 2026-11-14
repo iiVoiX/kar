@@ -3854,6 +3854,21 @@ VkPipeline vk_pipeline_compute_async(const GfxShader *cs, const VkPipeInfo **inf
     return vk_pipeline_compute(cs, info);   // the queue is full: build it here
 }
 
+// A dispatch that found its pipeline still queued moves it to the head of the queue (vk_exec_draw.c compute_pipe):
+// behind the compute prefetch the queue holds thousands of shaders for a few workers, and with a cold driver cache
+// each takes 1-16 s, so a dispatch waited its turn for minutes (RELEASE_PLAN 13.3, scC). The next free worker takes
+// it; it is never built twice (the shader's SPIR-V is dropped after its one build).
+void vk_pipeline_compute_bump(const GfxShader *cs) {
+    plat_mutex_lock(&CQ.m);
+    for (uint32_t i = CQ.head; i != CQ.tail; i++)
+        if (CQ.q[i % CQ_N] == cs) {
+            CQ.q[i % CQ_N] = CQ.q[CQ.head % CQ_N];
+            CQ.q[CQ.head % CQ_N] = cs;
+            break;
+        }
+    plat_mutex_unlock(&CQ.m);
+}
+
 VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
     if (info) *info = NULL;
     if (!cs || !ensure_init()) return VK_NULL_HANDLE;
