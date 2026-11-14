@@ -177,8 +177,9 @@ static struct { int row; const char *key, *on_val, *off_val; int orig, set; } pc
 
 static uint8_t *row_at(int row) { return (uint8_t *)(uintptr_t)(*(uint64_t *)(uintptr_t)(page_obj + 0xe48) + (uint64_t)row * 0x30); }
 static const char *row_label(int row, int idx) {   // the label of value idx, e.g. Mnu_Opt_Disp_NoviceGuide_On
-    const uint64_t *tab = (const uint64_t *)(uintptr_t)*(uint64_t *)(row_at(row) + 0x18);
-    return tab && idx >= 0 && idx < 8 ? (const char *)(uintptr_t)tab[idx] : NULL;
+    uint64_t beg = *(uint64_t *)(row_at(row) + 0x18), end = *(uint64_t *)(row_at(row) + 0x20);   // the labels' vector
+    int n = beg && end > beg && (end - beg) / 8 <= 16 ? (int)((end - beg) / 8) : 0;
+    return idx >= 0 && idx < n ? (const char *)(uintptr_t)((const uint64_t *)(uintptr_t)beg)[idx] : NULL;
 }
 static int label_is_on(const char *l) { size_t n = l ? strlen(l) : 0; return n > 3 && !strcmp(l + n - 3, "_On"); }
 
@@ -193,6 +194,8 @@ static int readable(uint64_t a, uint64_t n) {
 
 static void page_hook(Cpu *c) {
     uint64_t pg = c->x[19];
+    if (c->x[22] == 0) nrec = 0;   // the row loop starts again (a build, or a refresh after a value change): it records
+                                   // the value text fields anew, so none of an earlier build stays; PC mode stays
     if (pg == page_obj && page_vt) return;
     page_obj = pg;
     page_vt = *(const uint64_t *)(uintptr_t)pg;
