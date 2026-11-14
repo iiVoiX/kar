@@ -958,6 +958,24 @@ static void stamp_range(uint64_t lo, uint64_t hi, uint32_t g) {
     for (uint64_t a = lo; a < hi; a += 1ull << GEN_PAGE_SHIFT) stamp_page(a, g);
 }
 
+// Pages the GPU wrote (vk_gpu_written) carry the generation they were stamped with here: the mirror already holds what
+// the GPU wrote, so its sync skips a page whose generation is still that one (a later CPU write stamps a newer one).
+// Without this the race uploaded every storage range back into the mirror each frame (72 MiB, 5 ms of GPU time ahead
+// of the first replay part, RELEASE_PLAN 16.6). A lossy table: a page that falls out is uploaded as before.
+// KAR_WB_NOLOOP=0 turns it off.
+#define GPUPG_N (1u << 18)
+static struct { uint64_t page; uint32_t gen; } gpupg[GPUPG_N];
+static int noloop_on(void) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("KAR_WB_NOLOOP") && *getenv("KAR_WB_NOLOOP") == '0');
+    return on;
+}
+static uint32_t gpupg_slot(uint64_t page) { return (uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 46) & (GPUPG_N - 1); }
+static int gpu_stamped(uint64_t a, uint32_t g) {   // gen_lock held
+    uint32_t k = gpupg_slot(a >> GEN_PAGE_SHIFT);
+    return gpupg[k].page == (a >> GEN_PAGE_SHIFT) && gpupg[k].gen == g;
+}
+
 void vk_guest_written(uint64_t addr, uint64_t size) {
     if (!size || nvn_gpu_only(addr)) return;
     uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull;
@@ -1326,13 +1344,33 @@ void vk_gpu_written(uint64_t addr, uint64_t size) {
             mem_thaw(addr, size);
             memcpy((void *)(uintptr_t)addr, r->smap + (addr - r->import_lo), size);
             s_wb_bytes += size;
+            if (noloop_on()) {   // this copy is no CPU write of the game: the whole pages' watch bits go
+                uint64_t a = (addr + 0xfff) & ~0xfffull, b = (addr + size) & ~0xfffull;
+                static uint64_t pages[4096];
+                for (; a < b; a += 4096ull * 4096) {
+                    uint64_t len = b - a < 4096ull * 4096 ? b - a : 4096ull * 4096;
+                    (void)plat_mem_written(a, len, pages, 4096, 1);
+                }
+            }
         }
         for (int i = 0; i < nspend; i++)
             if (spend[i].lo == addr && spend[i].hi == addr + size) { spend[i] = spend[--nspend], spend_dirty = 1; break; }
         plat_mutex_unlock(&shadow_lock);
         plat_mutex_unlock_shared(&pool_lock);
     }
-    vk_guest_written(addr, size);
+    if (!noloop_on() || !size || nvn_gpu_only(addr)) {
+        vk_guest_written(addr, size);
+        return;
+    }
+    uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull;
+    plat_mutex_lock(&gen_lock);
+    uint32_t g = ++gen_now;
+    for (uint64_t a = lo; a < hi; a += 1ull << GEN_PAGE_SHIFT) {
+        stamp_page(a, g);
+        uint32_t k = gpupg_slot(a >> GEN_PAGE_SHIFT);
+        gpupg[k].page = a >> GEN_PAGE_SHIFT, gpupg[k].gen = g;
+    }
+    plat_mutex_unlock(&gen_lock);
 }
 
 static void shadow_log(uint64_t frame) {
@@ -1850,9 +1888,11 @@ static void mirror_sync(PoolRec *r) {
         if (b > hi) b = hi;
         const uint32_t *ch = gen_chunk[a >> GEN_CHUNK_SHIFT];   // a 2 MiB region lies in one chunk
         if (!ch) continue;
-        for (uint64_t x = a; x < b; x += 1ull << GEN_PAGE_SHIFT)
-            if (ch[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] > since)
+        for (uint64_t x = a; x < b; x += 1ull << GEN_PAGE_SHIFT) {
+            uint32_t pg = ch[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)];
+            if (pg > since && !(noloop_on() && gpu_stamped(x, pg)))
                 range_add(&pend, &npend, &cpend, r, x - lo, 1ull << GEN_PAGE_SHIFT);
+        }
     }
     r->mgen = gen_now;
     if (excl) plat_mutex_unlock(&gen_lock);
@@ -1986,11 +2026,22 @@ int vk_mem_mirror_pending(void) { return npend; }
 
 void vk_mem_mirror_prologue(VkCommandBuffer cb) {
     if (!npend) return;
+    extern void vk_dts_mark_cb(VkCommandBuffer cb, int tag);   // KAR_DRAW_TS: b after the entry barrier, p after the uploads
     mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
              VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vk_dts_mark_cb(cb, 15);
+    uint64_t ub0 = mrep.upload_bytes, uc0 = mrep.upload_copies;
     copy_ranges(cb, pend, npend, 1, &mrep.upload_bytes, &mrep.upload_copies);
+    {   // KAR_DRAW_TS frame: what this prologue uploads
+        static long long f = -2;
+        if (f == -2) f = getenv("KAR_DRAW_TS") ? atoll(getenv("KAR_DRAW_TS")) : -1;
+        if (f >= 0 && (long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) == f)
+            rt_log("mem: prologue uploads %.3f MiB in %llu copies from %d ranges", (mrep.upload_bytes - ub0) / 1048576.0,
+                   (unsigned long long)(mrep.upload_copies - uc0), npend);
+    }
     mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    vk_dts_mark_cb(cb, 16);
     int sh = 0;   // KAR_WB_SHADOW: what was uploaded is now guest memory's content in the shadow too (mirror to shadow)
     for (int i = 0; i < npend; i++) {
         PoolRec *r = pend[i].r;
