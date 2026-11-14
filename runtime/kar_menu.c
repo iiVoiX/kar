@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "host.h"
+#include "platform/platform.h"
 #include "dispatch.h"
 #include "cpu.h"
 #include "nvn_api.h"
@@ -32,13 +33,8 @@
 // PC mode of the display page (Anzeige): rows bound to a port setting (pc_rows) show it instead. Labels answered with
 // our own text while pc_mode is on; the page is closed and opened again on a switch (L/R), so it is built with them.
 // The tab "Allgemein" becomes "PC-Grafik". Rows not bound yet keep the game's own option.
-static struct { const char *label; const char *text; uint64_t at; } pc_texts[] = {
-    {"Mnu_Opt_Disp_OptMode_Cmn", "PC-Grafik", 0},
-    {"Mnu_Opt_Disp_NoviceGuide", "HUD-Position", 0},
-    {"Mnu_Opt_Disp_NoviceGuide_On", "Rand", 0},
-    {"Mnu_Opt_Disp_NoviceGuide_Off", "Mitte", 0},
-};
-#define NPC (sizeof pc_texts / sizeof *pc_texts)
+static struct { const char *label; const char *text; uint64_t at; } pc_texts[32];   // made from pc_rows (kar_menu_init)
+static size_t NPC;
 static volatile int pc_mode;
 static int log_left;
 static const char *log_match;   // KAR_MENU_LOG=<label substring>: every matching lookup with its frame (diagnostic)
@@ -134,7 +130,8 @@ static void text_record(Cpu *c) {
     if (managed(label, n)) remember(c->x[0], c->x[1], 0, label, n);
 }
 
-static struct { uint64_t comp; char label[64]; } titles[8];
+static struct { uint64_t comp; char label[64]; } titles[16];
+static PlatMutex title_lock = PLAT_MUTEX_INIT;   // several workers build the page's components in one frame
 static int ntitle;
 static uint64_t title_frame;
 
@@ -156,9 +153,11 @@ static void static_record(Cpu *c) {
     // switch of PC mode can make the component look its label up again (titles_refresh).
     if (p && n < 64 && managed(p, n) && *(const uint64_t *)(uintptr_t)(c->x[29] + 8) == TITLE_CALLER) {
         uint64_t now = frame_now();
+        plat_mutex_lock(&title_lock);
         if (now - title_frame > 30) ntitle = 0;
         title_frame = now;
-        if (ntitle < 8) titles[ntitle].comp = c->x[0] - 0x70, snprintf(titles[ntitle].label, sizeof titles[0].label, "%.*s", (int)n, p), ntitle++;
+        if (ntitle < 16) titles[ntitle].comp = c->x[0] - 0x70, snprintf(titles[ntitle].label, sizeof titles[0].label, "%.*s", (int)n, p), ntitle++;
+        plat_mutex_unlock(&title_lock);
     }
     // Prefab texts are not recorded: x1 is a local of the caller on a worker's stack (the caller copies the text into
     // the row itself), so setting it again later writes into a dead stack slot.
@@ -170,8 +169,16 @@ static void static_record(Cpu *c) {
 // table of the value labels) and the focused row at +0xe90. Entering PC mode puts the setting's index into the row and
 // sets its value text; a change (value_hook, f_700300e100) goes to the setting; leaving PC mode (L/R or B) puts the
 // game's own index back, so the game's option stays as it was.
-static struct { int row; const char *key, *on_val, *off_val; int orig, set; } pc_rows[] = {
-    {1, "TOTK_HUD_POSITION", "edges", "centered", 0, 0},   // Einsteigertipps: _On = edges
+typedef struct { const char *game_label, *cfg_val, *text; } PcVal;   // a value: the game's label for it, the setting's value
+static struct {
+    int row;                        // the row of the display page
+    const char *key;                // the port setting
+    const char *title_label, *title;   // the row's title label and what it shows in PC mode
+    PcVal vals[4];
+    int orig, entered, bound;       // the game's index, the index PC mode started with, bound this time (not set by the environment)
+} pc_rows[] = {
+    {1, "TOTK_HUD_POSITION", "Mnu_Opt_Disp_NoviceGuide", "HUD-Position",
+     {{"Mnu_Opt_Disp_NoviceGuide_Off", "centered", "Mitte"}, {"Mnu_Opt_Disp_NoviceGuide_On", "edges", "Rand"}}},
 };
 #define NROWS (sizeof pc_rows / sizeof *pc_rows)
 
@@ -181,7 +188,6 @@ static const char *row_label(int row, int idx) {   // the label of value idx, e.
     int n = beg && end > beg && (end - beg) / 8 <= 16 ? (int)((end - beg) / 8) : 0;
     return idx >= 0 && idx < n ? (const char *)(uintptr_t)((const uint64_t *)(uintptr_t)beg)[idx] : NULL;
 }
-static int label_is_on(const char *l) { size_t n = l ? strlen(l) : 0; return n > 3 && !strcmp(l + n - 3, "_On"); }
 
 // The page object and what identified it when it was built: its vtable word and row 1's hash. After the page is
 // freed the memory may be reused or unmapped, so page_alive checks every pointer it follows (crash in pcA).
@@ -238,10 +244,18 @@ static void row_show(Cpu *c, int row, int idx) {
             }
 }
 
+static const PcVal *val_of(int i, const char *label) {
+    for (int j = 0; j < 4 && pc_rows[i].vals[j].game_label; j++)
+        if (label && !strcmp(label, pc_rows[i].vals[j].game_label)) return &pc_rows[i].vals[j];
+    return NULL;
+}
+
+// Entering PC mode: each bound row shows its setting (the index whose value is the setting's, else the game's stays).
 static void rows_enter(Cpu *c) {
     if (!page_obj) return;
     if (log_match) {   // diagnostic: the row records and the recorded text fields, to find the visible row titles
         for (int r = 0; r < 5; r++) {
+            for (int k = 0; k < 8 && row_label(r, k); k++) fprintf(stderr, "kar_menu: row %d label %d %s\n", r, k, row_label(r, k));
             const uint64_t *q = (const uint64_t *)(uintptr_t)row_at(r);
             fprintf(stderr, "kar_menu: row %d: %016llx %016llx %016llx %016llx %016llx %016llx\n", r,
                     (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
@@ -259,26 +273,32 @@ static void rows_enter(Cpu *c) {
             fprintf(stderr, "kar_menu: page+%#x %016llx\n", k * 8, (unsigned long long)pg[k]);
     }
     for (size_t i = 0; i < NROWS; i++) {
-        int row = pc_rows[i].row, want_on = !strcmp(cfg_value(pc_rows[i].key), pc_rows[i].on_val), idx = -1;
+        int row = pc_rows[i].row, idx = -1;
         pc_rows[i].orig = *(int32_t *)(row_at(row) + 0xc);
-        for (int k = 0; k < 8 && idx < 0; k++)
-            if (row_label(row, k) && label_is_on(row_label(row, k)) == want_on) idx = k;
-        if (idx >= 0) row_show(c, row, idx);
+        pc_rows[i].bound = !cfg_from_env(pc_rows[i].key);   // the environment fixes it: the row stays the game's
+        if (!pc_rows[i].bound) continue;
+        const char *want = cfg_value(pc_rows[i].key);
+        for (int k = 0; k < 8 && row_label(row, k) && idx < 0; k++) {
+            const PcVal *v = val_of((int)i, row_label(row, k));
+            if (v && !strcmp(v->cfg_val, want)) idx = k;
+        }
+        if (idx < 0) idx = pc_rows[i].orig;
+        pc_rows[i].entered = idx;
+        row_show(c, row, idx);
     }
 }
 
-// Leaving PC mode: the row's value index now is the player's choice for the setting (a value hook cannot tell a
-// LEFT/RIGHT from the selector laying out its values, both call f_700300e100); then the game's own index goes back.
+// Leaving PC mode: a bound row whose index the player changed gives its value to the setting (a value not in the table
+// is left alone when the row was only visited); then the game's own index goes back.
 static void rows_leave(Cpu *c) {
     if (!page_obj) return;
     for (size_t i = 0; i < NROWS; i++) {
+        if (!pc_rows[i].bound) continue;
         int row = pc_rows[i].row, cur = *(int32_t *)(row_at(row) + 0xc);
-        const char *l = row_label(row, cur);
-        if (l) {
-            const char *v = label_is_on(l) ? pc_rows[i].on_val : pc_rows[i].off_val;
-            if (strcmp(cfg_value(pc_rows[i].key), v)) cfg_set(pc_rows[i].key, v), cfg_save();
-            if (log_match) fprintf(stderr, "kar_menu: row %d leaves at %d (%s): %s = %s\n", row, cur, l, pc_rows[i].key, v);
-        }
+        const PcVal *v = cur != pc_rows[i].entered ? val_of((int)i, row_label(row, cur)) : NULL;
+        if (v && strcmp(cfg_value(pc_rows[i].key), v->cfg_val)) cfg_set(pc_rows[i].key, v->cfg_val), cfg_save();
+        if (log_match) fprintf(stderr, "kar_menu: row %d leaves at %d (entered %d): %s = %s\n", row, cur, pc_rows[i].entered,
+                               pc_rows[i].key, cfg_value(pc_rows[i].key));
         row_show(c, row, pc_rows[i].orig);
     }
 }
@@ -326,11 +346,13 @@ static void menu_tick(Cpu *c) {
     static uint64_t prev;
     uint64_t b = input_game_buttons(), down = b & ~prev;
     prev = b;
-    if (!(down & (1u << 1 | 1u << 6 | 1u << 7)) || !nrec || !page_alive()) return;
-    if ((down & 1u << 1) && !pc_mode) return;
+    if (!(down & (1u << 0 | 1u << 1 | 1u << 6 | 1u << 7)) || !nrec || !page_alive()) return;
+    // A on the cards (no row focused: +0xe90 is -1) opens a sub page: PC mode ends first, as with B
+    int a_card = (down & 1u << 0) && *(const int32_t *)(uintptr_t)(page_obj + 0xe90) < 0;
+    if ((down & (1u << 0 | 1u << 1)) && !(down & (1u << 6 | 1u << 7)) && (!pc_mode || ((down & 1u << 0) && !a_card))) return;
     Cpu save;
     memcpy(save.x, c->x, sizeof save.x), memcpy(save.v, c->v, sizeof save.v), save.nzcv = c->nzcv;
-    if (down & 1u << 1) {   // B: the player leaves the page
+    if (down & (1u << 0 | 1u << 1) && !(down & (1u << 6 | 1u << 7))) {   // B or A on a card: the player leaves the page
         rows_leave(c);
         pc_mode = 0;
         titles_refresh(c);
@@ -348,8 +370,16 @@ static void menu_tick(Cpu *c) {
 void kar_menu_init(void) {
     if (rt_patch_set("karmenu") < 0) return;   // another game or generated code predating the patch
     uint8_t *page = rt_patch_page();
+    NPC = 0;
+    pc_texts[NPC++] = (typeof(pc_texts[0])){"Mnu_Opt_Disp_OptMode_Cmn", "PC-Grafik", 0};
+    for (size_t i = 0; i < NROWS; i++) {
+        pc_texts[NPC++] = (typeof(pc_texts[0])){pc_rows[i].title_label, pc_rows[i].title, 0};
+        for (int j = 0; j < 4 && pc_rows[i].vals[j].game_label && NPC < 32; j++)
+            pc_texts[NPC++] = (typeof(pc_texts[0])){pc_rows[i].vals[j].game_label, pc_rows[i].vals[j].text, 0};
+    }
     size_t off = TEXTS;
     for (size_t i = 0; i < NPC; i++) {
+        if (off + 2 * strlen(pc_texts[i].text) + 2 > TITLE_CTX) rt_fatal("kar_menu: the PC texts reach the title context at +0xf00");
         pc_texts[i].at = (uint64_t)(uintptr_t)(page + off);
         off += put_utf16(page + off, pc_texts[i].text);
         off = (off + 7) & ~(size_t)7;
