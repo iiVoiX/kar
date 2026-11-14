@@ -185,8 +185,11 @@ static void ov_vp9_init(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 4) & 0xffff,
 static void ov_vp9_init_nowork(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 3) & 0xffff, arg_x(c, 4) & 0xffff); }
 static void ov_vp9_init_nowork_update(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff); }
 
+static void event_free(uint64_t key);
+
 // Result FinalizeVp9Decoder(Vp9DecoderType *)
 static void ov_vp9_fini(Cpu *c) {
+    event_free(arg_x(c, 0));
     plat_mutex_lock(&lock);
     Dec *d = dec_of(arg_x(c, 0));
     if (d) {
@@ -255,31 +258,40 @@ static void clear_event(Cpu *c, uint64_t ev);
 
 // A guest SystemEventType (manual clear) standing for the game object at `key`: the same one for the same object, so
 // movie after movie reuses the events instead of filling the kernel's table of bound events. Guest thread only.
-// ponytail: 64 objects, linear scan; the player has one decoder and 15 sync point events.
+// The player allocates a new decoder and 15 new sync point events for every movie, at new addresses (the main menu
+// loops preview movies on its cards): FinalizeVp9Decoder and DestroySyncPointEvent give their slot back (event_free)
+// and the next new object takes that event, already bound, cleared. A table still full (64 live objects) hands the
+// oldest slot over with a log line instead of the FATAL that ended a run after five minutes in the menu (7.2).
+static struct { uint64_t key, ev; } ev_tab[64];
+static int ev_n, ev_victim;
+static PlatMutex ev_lock = PLAT_MUTEX_INIT;
+
+static void event_free(uint64_t key) {
+    plat_mutex_lock(&ev_lock);
+    for (int i = 0; i < ev_n; i++)
+        if (ev_tab[i].key == key) ev_tab[i].key = 0;   // ev stays: bound, for the next object
+    plat_mutex_unlock(&ev_lock);
+}
+
 static uint64_t event_for(Cpu *c, uint64_t key) {
-    static struct { uint64_t key, ev; } tab[64];
-    static int n, victim;
-    static PlatMutex tlock = PLAT_MUTEX_INIT;
-    plat_mutex_lock(&tlock);
+    plat_mutex_lock(&ev_lock);
     uint64_t ev = 0;
-    for (int i = 0; i < n && !ev; i++)
-        if (tab[i].key == key) ev = tab[i].ev;
-    if (!ev) {
-        if (n == 64) {
-            // The player allocates a new decoder and 15 new sync point events for every movie, at new addresses (the
-            // Online-Match notice loops a background movie): the oldest object's event is handed to this one, already
-            // bound, and cleared (RELEASE_PLAN 7.2: this was a FATAL after a few minutes in the notice).
-            ev = tab[victim].ev;
-            tab[victim].key = key;
-            victim = (victim + 1) % 64;
-            plat_mutex_unlock(&tlock);
-            clear_event(c, ev);
-            return ev;
-        }
+    int reuse = 0;
+    for (int i = 0; i < ev_n && !ev; i++)
+        if (ev_tab[i].key == key) ev = ev_tab[i].ev;
+    for (int i = 0; i < ev_n && !ev; i++)
+        if (!ev_tab[i].key) ev_tab[i].key = key, ev = ev_tab[i].ev, reuse = 1;
+    if (!ev && ev_n < 64) {
         ev = (uint64_t)(uintptr_t)mem_kernel_alloc(0x100, 16);
-        tab[n].key = key, tab[n++].ev = ev;
+        ev_tab[ev_n].key = key, ev_tab[ev_n++].ev = ev;
+    } else if (!ev) {
+        static int told;
+        if (told++ < 4) rt_log("codec: 64 live decoder and sync point objects; the oldest slot goes to %#llx", (unsigned long long)key);
+        ev_tab[ev_victim].key = key, ev = ev_tab[ev_victim].ev, reuse = 1;
+        ev_victim = (ev_victim + 1) % 64;
     }
-    plat_mutex_unlock(&tlock);
+    plat_mutex_unlock(&ev_lock);
+    if (reuse) clear_event(c, ev);
     kern_bind_system_event(c, ev, 0);   // once per event; leaves the event's handles in x0-x2
     return ev;
 }
@@ -525,8 +537,8 @@ static void ov_sp_cancel(Cpu *c) {
     plat_mutex_unlock(&lock);
     clear_event(c, ev);
 }
-// void DestroySyncPointEvent(SyncPointEventType *): the event stays bound for the next Create on the same object
-static void ov_sp_nop(Cpu *c) { (void)c; }
+// void DestroySyncPointEvent(SyncPointEventType *): the event stays bound, its slot is free for the next object
+static void ov_sp_destroy(Cpu *c) { event_free(arg_x(c, 0)); }
 
 HOST_OVERRIDE("_ZN2nn5codec5video10InitializeEv", ov_video_init);
 HOST_OVERRIDE("_ZN2nn5codec5video8FinalizeEv", ov_video_fini);
@@ -568,4 +580,4 @@ HOST_OVERRIDE("_ZN2nn6syncpt3sdk16TryWaitSyncPointERKNS1_15SyncPointHandleE", ov
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERKNS1_15SyncPointHandleE",
               ov_sp_request);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE", ov_sp_cancel);
-HOST_OVERRIDE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE", ov_sp_nop);
+HOST_OVERRIDE("_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE", ov_sp_destroy);
