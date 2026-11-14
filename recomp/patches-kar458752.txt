@@ -455,3 +455,5 @@ set karmutexlog KAR_MUTEX_LOG 1
 site karmutexlog sdk 153d78 52800460 52800460 @call:3f0   # EDEADLK: error-checking mutex already held by this thread
 site karmutexlog sdk 153d9c 52800160 52800160 @call:3f0   # EAGAIN: recursive count overflow
 site karmutexlog sdk 153dd8 528002c0 528002c0 @call:3f0   # EINVAL: type byte above 2 (uninitialised or freed mutex)
+site karmenu main 300e100 b98e9008 b98e9008 @call:380   # f_700300e100 (display page: value of the focused row changed; x0 page, w1 index)
+site karmenu main 300ca84 f9472668 f9472668 @call:390   # display page build loop: x19 = the page (kar_menu.c page_hook)

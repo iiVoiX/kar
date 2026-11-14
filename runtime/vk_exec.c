@@ -685,9 +685,12 @@ static void hud_cols_done(void *arg) {
     }
     __atomic_store_n(&HC.busy, 0, __ATOMIC_RELEASE);
 }
-static int hud_edges_mode(void) {
+static int hud_edges_mode(void) {   // read again when a setting changed (the in-game PC row, kar_menu.c)
     static int on = -1;
-    if (on < 0) {
+    static unsigned seen = ~0u;
+    unsigned v = cfg_version();
+    if (on < 0 || v != seen) {
+        seen = v;
         const char *e = getenv("KAR_HUD_EDGES");
         on = e && *e ? atoi(e) : strcmp(cfg_value("TOTK_HUD_POSITION"), "centered") != 0;
         HC.log = getenv("KAR_HUD_COLS") && *getenv("KAR_HUD_COLS") == '1';
