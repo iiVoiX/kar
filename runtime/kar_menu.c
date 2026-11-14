@@ -26,17 +26,14 @@
 #define SET_STATIC 0x70011333c0ull  // f_70011333c0(label string, text field): a prefab text (fixed label)
 #define TEXTS 0x400
 
-// PC mode of the display page (Anzeige): the same rows show the port's settings. Labels answered with our own text
-// while pc_mode is on. The tab "Allgemein" becomes "PC-Grafik".
+// PC mode of the display page (Anzeige): rows bound to a port setting (pc_rows) show it instead. Labels answered with
+// our own text while pc_mode is on; the page is closed and opened again on a switch (L/R), so it is built with them.
+// The tab "Allgemein" becomes "PC-Grafik". Rows not bound yet keep the game's own option.
 static struct { const char *label; const char *text; uint64_t at; } pc_texts[] = {
     {"Mnu_Opt_Disp_OptMode_Cmn", "PC-Grafik", 0},
-    {"Mnu_Opt_Disp_TextSize", "Aufl\xc3\xb6sung", 0},
     {"Mnu_Opt_Disp_NoviceGuide", "HUD-Position", 0},
     {"Mnu_Opt_Disp_NoviceGuide_On", "Rand", 0},
     {"Mnu_Opt_Disp_NoviceGuide_Off", "Mitte", 0},
-    {"Mnu_Opt_Disp_Checker", "Hochskalierung", 0},
-    {"Mnu_Opt_Disp_Sep", "V-Sync", 0},
-    {"Mnu_Opt_Disp_ColorFilter", "Fenstermodus", 0},
 };
 #define NPC (sizeof pc_texts / sizeof *pc_texts)
 static volatile int pc_mode;
@@ -116,7 +113,7 @@ static int managed(const char *label, size_t n) {
 static void remember(uint64_t dst, uint64_t label, int fixed, const char *name, size_t n) {
     uint64_t now = frame_now();
     static uint64_t rec_page;   // a new build of the page starts in its own mode; a value text set on the same page does not
-    if (now - rec_frame > 30 && (page_obj != rec_page || !page_obj)) { nrec = 0; pc_mode = 0; }
+    if (now - rec_frame > 30 && (page_obj != rec_page || !page_obj)) nrec = 0;   // a new build of the page
     rec_page = page_obj;
     rec_frame = now;
     for (int i = 0; i < nrec; i++)
@@ -142,12 +139,24 @@ static void static_record(Cpu *c) {
     const char *p = (const char *)s;
     size_t n = 23 - (size_t)s[0x17];   // inline: byte 0x17 holds the free room of the 23 inline bytes
     if ((int8_t)s[0x17] < 0) { p = (const char *)(uintptr_t)*(const uint64_t *)s; n = *(const uint64_t *)(s + 8); }
-    if (log_match && (int8_t)s[0x17] >= 0)
-        fprintf(stderr, "kar_menu: short string %02x %02x | %.24s\n", s[0], s[0x17], (const char *)s);
-    if (p && n < 64 && managed(p, n)) remember(c->x[1], c->x[0], 1, p, n);
+    if (log_match) {   // every call: the raw string object, to see how row titles arrive
+        const uint64_t *q = (const uint64_t *)s;
+        fprintf(stderr, "kar_menu: f%llu static x0 %016llx %016llx %016llx dst %#llx parsed '%.*s'\n",
+                (unsigned long long)frame_now(), (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2],
+                (unsigned long long)c->x[1], (int)(p && n < 64 ? n : 0), p ? p : "");
+    }
+    if (log_match && p && n == 24 && !memcmp(p, "Mnu_Opt_Disp_NoviceGuide", 24))   // diagnostic: the caller's registers
+        fprintf(stderr, "kar_menu: title regs x19 %#llx x20 %#llx x21 %#llx x22 %#llx x23 %#llx x24 %#llx x25 %#llx x26 %#llx "
+                        "x27 %#llx x28 %#llx fp %#llx ret %#llx\n",
+                (unsigned long long)c->x[19], (unsigned long long)c->x[20], (unsigned long long)c->x[21],
+                (unsigned long long)c->x[22], (unsigned long long)c->x[23], (unsigned long long)c->x[24],
+                (unsigned long long)c->x[25], (unsigned long long)c->x[26], (unsigned long long)c->x[27],
+                (unsigned long long)c->x[28], (unsigned long long)c->x[29],
+                (unsigned long long)*(const uint64_t *)(uintptr_t)(c->x[29] + 8));
+    // Prefab texts are not recorded: x1 is a local of the caller on a worker's stack (the caller copies the text into
+    // the row itself), so setting it again later writes into a dead stack slot.
 }
 
-static int still_there(int i) { return !memcmp(rec[i].snap, (const void *)(uintptr_t)rec[i].dst, sizeof rec[i].snap); }
 
 // PC rows (RELEASE_PLAN 15.4): a row of the display page that shows a port setting while the page is in PC mode. The
 // page object (recorded by page_hook) keeps its rows at +0xe48 (0x30 bytes each: +0xc the value index, +0x18 the
@@ -166,14 +175,37 @@ static const char *row_label(int row, int idx) {   // the label of value idx, e.
 }
 static int label_is_on(const char *l) { size_t n = l ? strlen(l) : 0; return n > 3 && !strcmp(l + n - 3, "_On"); }
 
-static void page_hook(Cpu *c) { page_obj = c->x[19]; }
+// The page object and what identified it when it was built: its vtable word and row 1's hash. After the page is
+// freed the memory may be reused or unmapped, so page_alive checks every pointer it follows (crash in pcA).
+static uint64_t page_vt, page_hash1;
+static int readable(uint64_t a, uint64_t n) {
+    RtMemoryInfo mi;
+    if (a < 0x10000 || mem_query(a, &mi) || !mi.state || !(mi.perm & 1)) return 0;
+    return a + n <= mi.base + mi.size;
+}
 
-// The recorded page is still the display page: its rows pointer is set and row 1's first value label is one of
-// Einsteigertipps (Mnu_Opt_Disp_NoviceGuide_*).
+static void page_hook(Cpu *c) {
+    uint64_t pg = c->x[19];
+    if (pg == page_obj && page_vt) return;
+    page_obj = pg;
+    page_vt = *(const uint64_t *)(uintptr_t)pg;
+    uint64_t rows = *(const uint64_t *)(uintptr_t)(pg + 0xe48);
+    page_hash1 = rows ? *(const uint64_t *)(uintptr_t)(rows + 0x30) : 0;
+}
+
+// The recorded page is still the display page: same vtable and row 1 hash, and row 1's first value label is one of
+// Einsteigertipps (Mnu_Opt_Disp_NoviceGuide_*). Otherwise it is forgotten.
 static int page_alive(void) {
-    if (!page_obj || !*(uint64_t *)(uintptr_t)(page_obj + 0xe48)) return 0;
-    const char *l = row_label(1, 0);
-    return l && !strncmp(l, "Mnu_Opt_Disp_NoviceGuide", 24);
+    if (!page_obj) return 0;
+    uint64_t rows = 0, tab = 0, l = 0;
+    int ok = readable(page_obj, 0xe98) && *(const uint64_t *)(uintptr_t)page_obj == page_vt &&
+             (rows = *(const uint64_t *)(uintptr_t)(page_obj + 0xe48)) && readable(rows, 0x60) &&
+             *(const uint64_t *)(uintptr_t)(rows + 0x30) == page_hash1 &&
+             (tab = *(const uint64_t *)(uintptr_t)(rows + 0x30 + 0x18)) && readable(tab, 8) &&
+             (l = *(const uint64_t *)(uintptr_t)tab) && readable(l, 25) &&
+             !strncmp((const char *)(uintptr_t)l, "Mnu_Opt_Disp_NoviceGuide", 24);
+    if (!ok) page_obj = 0, page_vt = 0;
+    return ok;
 }
 
 static void value_hook(Cpu *c) {   // diagnostic only (KAR_MENU_LOG): rows_leave takes the value
@@ -198,6 +230,24 @@ static void row_show(Cpu *c, int row, int idx) {
 
 static void rows_enter(Cpu *c) {
     if (!page_obj) return;
+    if (log_match) {   // diagnostic: the row records and the recorded text fields, to find the visible row titles
+        for (int r = 0; r < 5; r++) {
+            const uint64_t *q = (const uint64_t *)(uintptr_t)row_at(r);
+            fprintf(stderr, "kar_menu: row %d: %016llx %016llx %016llx %016llx %016llx %016llx\n", r,
+                    (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3],
+                    (unsigned long long)q[4], (unsigned long long)q[5]);
+        }
+        for (int i = 0; i < nrec; i++)
+            fprintf(stderr, "kar_menu: rec %d dst %#llx label %s\n", i, (unsigned long long)rec[i].dst,
+                    rec[i].fixed ? "(prefab)" : (const char *)(uintptr_t)rec[i].label);
+        const uint64_t *pg = (const uint64_t *)(uintptr_t)page_obj;
+        const uint64_t *vt = (const uint64_t *)(uintptr_t)pg[0];
+        fprintf(stderr, "kar_menu: page %#llx vtable %#llx: %#llx %#llx %#llx %#llx\n", (unsigned long long)page_obj,
+                (unsigned long long)pg[0], (unsigned long long)vt[0], (unsigned long long)vt[1], (unsigned long long)vt[2],
+                (unsigned long long)vt[3]);
+        for (int k = 0x1c0; k < 0x1d4; k++)   // page words 0xe00..0xea0
+            fprintf(stderr, "kar_menu: page+%#x %016llx\n", k * 8, (unsigned long long)pg[k]);
+    }
     for (size_t i = 0; i < NROWS; i++) {
         int row = pc_rows[i].row, want_on = !strcmp(cfg_value(pc_rows[i].key), pc_rows[i].on_val), idx = -1;
         pc_rows[i].orig = *(int32_t *)(row_at(row) + 0xc);
@@ -223,56 +273,40 @@ static void rows_leave(Cpu *c) {
     }
 }
 
-// 0x7002fe7230 + 0x10, every frame on the game thread: L/R on the display page switch the mode and set its texts again.
+// 0x7002fe7230 + 0x10, every frame on the game thread. L/R on the display page switch PC mode in place: entering puts
+// the settings into the bound rows, leaving takes the rows' values into the settings and puts the game's values back;
+// the recorded value texts are set again. B in PC mode (the player leaves the page) does the same as leaving.
+// The row titles keep the game's text until the page is built again (RELEASE_PLAN 15.4: being worked on).
 void kar_wide_tick(void);
+
+static void set_texts(Cpu *c) {   // the recorded value texts again, through text_lookup
+    resetting = 1;
+    for (int i = 0; i < nrec; i++)
+        if (!rec[i].fixed)
+            rt_call(c, SET_TEXT, 4, rec[i].dst, rec[i].label, (uint64_t)strlen((const char *)(uintptr_t)rec[i].label), (uint64_t)0);
+    resetting = 0;
+}
+
 static void menu_tick(Cpu *c) {
     kar_wide_tick();
-    if (!nrec) return;
-    for (int i = 0; i < nrec; i++)   // the frame after a set: what the field holds now identifies it later
-        if (!rec[i].snapped) { memcpy(rec[i].snap, (const void *)(uintptr_t)rec[i].dst, sizeof rec[i].snap); rec[i].snapped = 1; }
     static uint64_t prev;
-    uint64_t b = input_game_buttons();
-    uint64_t down = b & ~prev;
+    uint64_t b = input_game_buttons(), down = b & ~prev;
     prev = b;
-    if (pc_mode && (down & 1u << 1) && page_alive()) {   // B: the page closes, the game's values go back first
-        Cpu save_b;
-        memcpy(save_b.x, c->x, sizeof save_b.x), memcpy(save_b.v, c->v, sizeof save_b.v), save_b.nzcv = c->nzcv;
+    if (!(down & (1u << 1 | 1u << 6 | 1u << 7)) || !nrec || !page_alive()) return;
+    if ((down & 1u << 1) && !pc_mode) return;
+    Cpu save;
+    memcpy(save.x, c->x, sizeof save.x), memcpy(save.v, c->v, sizeof save.v), save.nzcv = c->nzcv;
+    if (down & 1u << 1) {   // B: the player leaves the page
         rows_leave(c);
         pc_mode = 0;
-        memcpy(c->x, save_b.x, sizeof save_b.x), memcpy(c->v, save_b.v, sizeof save_b.v), c->nzcv = save_b.nzcv;
-        return;
+    } else {   // L or R
+        if (pc_mode) rows_leave(c);
+        pc_mode = !pc_mode;
+        if (pc_mode) rows_enter(c);
+        set_texts(c);
+        if (log_match) fprintf(stderr, "kar_menu: f%llu pc mode %d, %d texts set\n", (unsigned long long)frame_now(), pc_mode, nrec);
     }
-    if (!(down & (1u << 6 | 1u << 7))) return;   // L or R
-    int alive = page_alive();   // the page object still holds its rows (the text fields change as they animate)
-    for (int i = 0; i < nrec && !alive; i++)
-        if (!still_there(i)) {   // the page is gone (or rebuilt elsewhere): forget it
-            if (log_match) {
-                const uint8_t *d = (const uint8_t *)(uintptr_t)rec[i].dst;
-                fprintf(stderr, "kar_menu: page gone at field %d, %d fields dropped:", i, nrec);
-                for (int k = 0; k < 32; k++) fprintf(stderr, " %02x/%02x", rec[i].snap[k], d[k]);
-                fprintf(stderr, "\n");
-            }
-            nrec = 0;
-            return;
-        }
-    Cpu save;
-    memcpy(save.x, c->x, sizeof save.x);
-    memcpy(save.v, c->v, sizeof save.v);
-    save.nzcv = c->nzcv;
-    if (pc_mode && alive) rows_leave(c);
-    pc_mode = !pc_mode;
-    if (pc_mode && alive) rows_enter(c);
-    resetting = 1;
-    for (int i = 0; i < nrec; i++) {
-        if (rec[i].fixed) rt_call(c, SET_STATIC, 2, rec[i].label, rec[i].dst);
-        else rt_call(c, SET_TEXT, 4, rec[i].dst, rec[i].label, (uint64_t)strlen((const char *)(uintptr_t)rec[i].label), (uint64_t)0);
-        memcpy(rec[i].snap, (const void *)(uintptr_t)rec[i].dst, sizeof rec[i].snap);
-    }
-    resetting = 0;
-    memcpy(c->x, save.x, sizeof save.x);
-    memcpy(c->v, save.v, sizeof save.v);
-    c->nzcv = save.nzcv;
-    if (log_match) fprintf(stderr, "kar_menu: f%llu pc mode %d, %d texts set\n", (unsigned long long)frame_now(), pc_mode, nrec);
+    memcpy(c->x, save.x, sizeof save.x), memcpy(c->v, save.v, sizeof save.v), c->nzcv = save.nzcv;
 }
 
 void kar_menu_init(void) {
