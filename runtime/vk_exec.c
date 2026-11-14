@@ -607,10 +607,11 @@ static struct { VkImage layer; VkFormat fmt; uint32_t w, h; uint64_t frame; int 
 // centre until all cuts have been clear as long. KAR_HUD_COLS=1 logs the state every 2 s.
 int kar_wide_persp_count(void);
 uint64_t kar_pace_count(void);
+uint64_t kar_wide_persp_all(void);
 #define HC_STEP 4    // rows read
 #define HC_HOLD 12   // reads in a row that switch the guard
 static struct { VkBuffer buf; VmaAllocation mem; void *map; uint32_t w, h, bpp, area, rows; int busy, log, blocked;
-                int cross_n, clear_n, crossed_mask; uint16_t col[2][4096]; uint64_t t0, n, nblocked, nmany; } HC;
+                int cross_n, clear_n, crossed_mask, top_on, top_up, top_down; uint16_t col[2][4096]; uint64_t t0, n, nblocked, nmany, used_sum[2], fill_sum; } HC;
 // The cuts, in columns of the 1920-wide layout: top left, top right, bottom left, bottom right
 // (KAR_HUD_CUTS=tl,tr,bl,br; default 400,1120,400,1500). The top right one lies left of the tip boxes, the bottom right
 // one left of the speedometer; the top right one between the timer (ends near 1050) and the tip boxes (from 1190).
@@ -637,6 +638,20 @@ static void hud_cols_done(void *arg) {
             if (memcmp(row + (size_t)x * HC.bpp, clear, HC.bpp)) col[x]++;
     }
     int mask = 0;
+    for (int hh = 0; hh < 2; hh++) {   // how much of the layer holds anything: a sparse race HUD or a dense menu
+        uint32_t u = 0, f = 0;
+        for (uint32_t x = 0; x < HC.area; x++) u += HC.col[hh][x] != 0, f += HC.col[hh][x];
+        HC.used_sum[hh] += u, HC.fill_sum += f;
+        if (!hh) {
+            // The race HUD always holds something in the top half (the timer, the map, the lap counter); the main
+            // menu's UI layer holds nothing there (its cards are part of the 3D scene) and its speech bubble would be
+            // split by the cuts. So the HUD goes to the edges once the top half has been in use for HC_HOLD reads and
+            // back to the middle after 5 s without (a fade does not switch it).
+            if (u >= 60) HC.top_up++, HC.top_down = 0; else HC.top_down++, HC.top_up = 0;
+            if (!HC.top_on && HC.top_up >= HC_HOLD) __atomic_store_n(&HC.top_on, 1, __ATOMIC_RELAXED);
+            if (HC.top_on && HC.top_down >= HC_HOLD * 12) __atomic_store_n(&HC.top_on, 0, __ATOMIC_RELAXED);
+        }
+    }
     for (int hh = 0; hh < 2; hh++)
         for (int s = 0; s < 2; s++) {
             int c = hud_fixed_cut(hh, s) * (int)HC.area / 1920;
@@ -658,9 +673,14 @@ static void hud_cols_done(void *arg) {
     uint64_t now = plat_now_ns();
     if (!HC.t0) HC.t0 = now;
     if (HC.log && now - HC.t0 >= 2000000000ull) {
-        rt_log("hud edges: %llu reads, %llu centred by the guard, %llu on 3+ cuts, cuts crossed (tl tr bl br) %d%d%d%d",
+        rt_log("hud edges: persp %d (all %llu) pace %llu, %llu reads, %llu centred by the guard, %llu on 3+ cuts, cuts crossed (tl tr bl br) %d%d%d%d",
+               kar_wide_persp_count(), (unsigned long long)kar_wide_persp_all(), (unsigned long long)kar_pace_count(),
                (unsigned long long)HC.n, (unsigned long long)HC.nblocked, (unsigned long long)HC.nmany, HC.crossed_mask & 1, HC.crossed_mask >> 1 & 1, HC.crossed_mask >> 2 & 1,
                HC.crossed_mask >> 3 & 1);
+        rt_log("hud edges: used columns top %llu bottom %llu of %u, filled samples %llu (mean per read)",
+               (unsigned long long)(HC.used_sum[0] / (HC.n ? HC.n : 1)), (unsigned long long)(HC.used_sum[1] / (HC.n ? HC.n : 1)),
+               HC.area, (unsigned long long)(HC.fill_sum / (HC.n ? HC.n : 1)));
+        HC.used_sum[0] = HC.used_sum[1] = HC.fill_sum = 0;
         HC.n = HC.nblocked = HC.nmany = 0, HC.crossed_mask = 0, HC.t0 = now;
     }
     __atomic_store_n(&HC.busy, 0, __ATOMIC_RELEASE);
@@ -780,7 +800,7 @@ static void ui_layer_shift(VkExec *ex) {
         if (persp != persp_last) persp_last = persp, persp_at = tnow;
         if (pace != pace_last) pace_last = pace, pace_at = tnow;
         int race = persp_at && tnow - persp_at < 500000000ull && (!pace_at || tnow - pace_at > 500000000ull);
-        if (mode && (race || mode == 2) && !__atomic_load_n(&HC.blocked, __ATOMIC_RELAXED) && UI.w - area >= 2 * off) {
+        if (mode && (mode == 2 || (race && __atomic_load_n(&HC.top_on, __ATOMIC_RELAXED))) && !__atomic_load_n(&HC.blocked, __ATOMIC_RELAXED) && UI.w - area >= 2 * off) {
             VkImageCopy band[10];
             uint32_t nb = 0;
             for (int hh = 0; hh < 2; hh++) {   // the top and the bottom half, each with its own cuts

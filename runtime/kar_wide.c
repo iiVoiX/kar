@@ -143,13 +143,16 @@ static void project_hook(Cpu *c) {
 // scene was rendered 16:9 and stretched across the wide output. A 16:9 camera gets the wanted aspect (Hor+).
 static uint64_t persp_n;
 int kar_wide_persp_count(void) { return (int)__atomic_load_n(&persp_n, __ATOMIC_RELAXED); }   // vk_exec.c hud_cols_done
+static uint64_t persp_all;
+uint64_t kar_wide_persp_all(void) { return __atomic_load_n(&persp_all, __ATOMIC_RELAXED); }   // diagnostic (hud edges log)
 static void persp_hook(Cpu *c) {
-    __atomic_add_fetch(&persp_n, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&persp_all, 1, __ATOMIC_RELAXED);
     if (!want_w || !want_h || nocam()) return;
     // Only the loaded value: the camera keeps 16:9 in memory, since the game derives its field of view from that field
     // too (writing it back widened the vertical angle from 68 to 90 degrees).
     const float *a = (const float *)(uintptr_t)(c->x[19] + 0x208);
     if (!(*a > 1.777f && *a < 1.7785f)) return;
+    __atomic_add_fetch(&persp_n, 1, __ATOMIC_RELAXED);   // a 16:9 camera: the count the HUD at the edges looks at
     float wide = (float)want_w / (float)want_h;
     uint32_t bits;
     memcpy(&bits, &wide, 4);
