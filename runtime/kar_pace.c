@@ -7,7 +7,14 @@
 
 #define SLOT_PACE 0x3e0
 
-static void pace_hook(Cpu *c) { c->v[2] = 0; }
+// The hook only runs while the limiter is on (its flags-off path at main+0xfb2378 branches past it), so a count that
+// stands still means the race: vk_exec.c uses it for the HUD at the screen edges (RELEASE_PLAN 17.3b).
+static uint64_t pace_n;
+uint64_t kar_pace_count(void) { return __atomic_load_n(&pace_n, __ATOMIC_RELAXED); }
+static void pace_hook(Cpu *c) {
+    __atomic_add_fetch(&pace_n, 1, __ATOMIC_RELAXED);
+    c->v[2] = 0;
+}
 
 void kar_pace_init(void) {
     if (rt_patch_set("karpace") < 0) return;

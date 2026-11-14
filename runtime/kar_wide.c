@@ -141,7 +141,10 @@ static void project_hook(Cpu *c) {
 // s10, at both of its perspective paths (x19 the camera). The race camera's projection takes its aspect from here, not
 // from the +0x318 copy aspect_hook widens (that one only reaches the constant block's aspect field): with 16:9 here the
 // scene was rendered 16:9 and stretched across the wide output. A 16:9 camera gets the wanted aspect (Hor+).
+static uint64_t persp_n;
+int kar_wide_persp_count(void) { return (int)__atomic_load_n(&persp_n, __ATOMIC_RELAXED); }   // vk_exec.c hud_cols_done
 static void persp_hook(Cpu *c) {
+    __atomic_add_fetch(&persp_n, 1, __ATOMIC_RELAXED);
     if (!want_w || !want_h || nocam()) return;
     // Only the loaded value: the camera keeps 16:9 in memory, since the game derives its field of view from that field
     // too (writing it back widened the vertical angle from 68 to 90 degrees).

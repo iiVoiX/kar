@@ -595,6 +595,141 @@ int kar_ui_shift_mode(void) {
 
 static struct { VkImage layer; VkFormat fmt; uint32_t w, h; uint64_t frame; int shifted; VkImage spare; VmaAllocation mem; } UI;
 
+// HUD at the screen edges (RELEASE_PLAN 17.3b): hud_position = edges (default) in the race, centered = off;
+// KAR_HUD_EDGES overrides it (1 = in the race, 2 = on every screen, 0 = off).
+// Kirby lays its interface out for 1920x1080 only, so the wide layer holds it in its left 16:9 area. Every second
+// frame every 4th row of that area is read back (hud_cols_read) and compared with the cleared colour the game left in
+// the undrawn part right of it; hud_cols_done finds the empty column gaps. What lies left of the widest gap in the left
+// half then goes to the left screen edge, what lies right of the widest gap in the right half to the right edge, and
+// only when that content starts in the outer eighth of the area (a corner display, not the left word of a banner); the rest (banners, the countdown, anything across the middle) stays centred; a screen with no such gap stays
+// centred as before. The cut found on one frame is used on the frames after it; it stays where it is while its column
+// remains empty, so elements do not hop between the edge and the middle. KAR_HUD_COLS=1 logs the gaps every 2 s.
+int kar_wide_persp_count(void);
+uint64_t kar_pace_count(void);
+#define HC_STEP 4   // rows read
+#define HC_GAP 12   // narrowest gap that counts
+static struct { VkBuffer buf; VmaAllocation mem; void *map; uint32_t w, h, bpp, area, rows; int busy, log;
+                uint8_t col[4096]; int cut_l, cut_r; uint64_t t0, n; } HC;
+static int hud_gap_at(const uint8_t *col, int x) {   // column x and its neighbours are empty
+    for (int i = x - 2; i <= x + 2; i++) if (i < 0 || i >= (int)HC.area || col[i]) return 0;
+    return 1;
+}
+static int hud_cut_ok(const uint8_t *col, int x, int left) {   // a cut that moves a corner display only
+    int a = (int)HC.area, first = -1;
+    if (left) {
+        for (int i = 0; i < x && first < 0; i++) if (col[i]) first = i;
+        return x < a * 2 / 5 && first >= 0 && first < a / 8 && hud_gap_at(col, x);
+    }
+    for (int i = a - 1; i >= x && first < 0; i--) if (col[i]) first = i;
+    return x > a * 3 / 5 && first >= 0 && first >= a - a / 8 && hud_gap_at(col, x);
+}
+static void hud_cols_done(void *arg) {
+    (void)arg;
+    const uint8_t *p = HC.map;
+    uint32_t stride = (HC.area + 1) * HC.bpp, half = HC.area / 2;
+    memset(HC.col, 0, HC.area);
+    for (uint32_t r = 0; r < HC.rows; r++) {
+        const uint8_t *row = p + (size_t)r * stride, *clear = row + (size_t)HC.area * HC.bpp;
+        for (uint32_t x = 0; x < HC.area; x++)
+            if (!HC.col[x] && memcmp(row + (size_t)x * HC.bpp, clear, HC.bpp)) HC.col[x] = 1;
+    }
+    int l = __atomic_load_n(&HC.cut_l, __ATOMIC_RELAXED), r = __atomic_load_n(&HC.cut_r, __ATOMIC_RELAXED);
+    if (!l || !hud_cut_ok(HC.col, l, 1)) {   // the widest gap with content left of it, in the left half
+        int best = 0, bw = 0, seen = 0;
+        for (uint32_t x = 0; x < half;) {
+            uint32_t e = x;
+            while (e < HC.area && !HC.col[e]) e++;
+            if (e == x) { seen = 1, x++; continue; }
+            if (seen && (int)(e - x) >= HC_GAP && (int)(e - x) > bw) bw = (int)(e - x), best = (int)(x + e) / 2;
+            x = e;
+        }
+        l = best && hud_cut_ok(HC.col, best, 1) ? best : 0;
+    }
+    if (!r || !hud_cut_ok(HC.col, r, 0)) {   // mirrored: the widest gap with content right of it, in the right half
+        int best = 0, bw = 0, seen = 0;
+        for (int x = (int)HC.area - 1; x >= (int)half;) {
+            int e = x;
+            while (e >= 0 && !HC.col[e]) e--;
+            if (e == x) { seen = 1, x--; continue; }
+            if (seen && x - e >= HC_GAP && x - e > bw) bw = x - e, best = (x + e + 2) / 2;
+            x = e;
+        }
+        r = best && hud_cut_ok(HC.col, best, 0) ? best : 0;
+    }
+    __atomic_store_n(&HC.cut_l, l, __ATOMIC_RELAXED);
+    __atomic_store_n(&HC.cut_r, r, __ATOMIC_RELAXED);
+    HC.n++;
+    uint64_t now = plat_now_ns();
+    if (!HC.t0) HC.t0 = now;
+    if (HC.log && now - HC.t0 >= 2000000000ull) {
+        char t[1024]; int o = 0;
+        for (uint32_t x = 0; x < HC.area && o < (int)sizeof t - 32;) {
+            uint32_t e = x;
+            while (e < HC.area && HC.col[e] == HC.col[x]) e++;
+            if (!HC.col[x]) o += snprintf(t + o, sizeof t - (size_t)o, " %u-%u", x, e - 1);
+            x = e;
+        }
+        rt_log("hud cols: %llu reads, cuts %d/%d, empty on the last:%s", (unsigned long long)HC.n, l, r, o ? t : " none");
+        HC.n = 0, HC.t0 = now;
+    }
+    __atomic_store_n(&HC.busy, 0, __ATOMIC_RELEASE);
+}
+static int hud_edges_mode(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("KAR_HUD_EDGES");
+        on = e && *e ? atoi(e) : strcmp(cfg_value("TOTK_HUD_POSITION"), "centered") != 0;
+        HC.log = getenv("KAR_HUD_COLS") && *getenv("KAR_HUD_COLS") == '1';
+    }
+    return on;
+}
+static void hud_cols_read(VkExec *ex, uint64_t fr) {
+    if (!hud_edges_mode() || __atomic_load_n(&HC.busy, __ATOMIC_ACQUIRE) || (fr & 3)) return;
+    uint32_t bpp = 0;
+    switch (UI.fmt) {
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SRGB: case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_B10G11R11_UFLOAT_PACK32: bpp = 4; break;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R16G16B16A16_UNORM: bpp = 8; break;
+    default:
+        rt_log("kar wide: HUD at the edges off, interface layer format %d not handled", (int)UI.fmt);
+        HC.busy = 1;   // never again
+        return;
+    }
+    uint32_t area = UI.h * 16 / 9;
+    if (area >= UI.w || area > sizeof HC.col || UI.h > 1080) return;
+    if (!HC.buf) {
+        HC.w = UI.w, HC.h = UI.h, HC.bpp = bpp, HC.area = area, HC.rows = (UI.h + HC_STEP - 1) / HC_STEP;
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = (VkDeviceSize)HC.rows * (area + 1) * bpp,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo mi = {0};
+        if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &HC.buf, &HC.mem, &mi) != VK_SUCCESS || !mi.pMappedData) {
+            HC.busy = 1;   // never again
+            return;
+        }
+        HC.map = mi.pMappedData;
+        rt_log("kar wide: HUD at the screen edges (KAR_HUD_EDGES=%d), reading the interface layer %ux%u, format %d",
+               hud_edges_mode(), UI.w, UI.h, (int)UI.fmt);
+    }
+    if (UI.w != HC.w || UI.h != HC.h || bpp != HC.bpp) return;
+    VkBufferImageCopy c[(1080 + HC_STEP - 1) / HC_STEP];
+    uint32_t n = 0;
+    for (uint32_t r = 0; r < HC.rows && n < sizeof c / sizeof c[0]; r++, n++)
+        c[n] = (VkBufferImageCopy){.bufferOffset = (VkDeviceSize)r * (area + 1) * bpp,
+                                   .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                   .imageOffset = {0, (int32_t)(r * HC_STEP), 0}, .imageExtent = {area + 1, 1, 1}};
+    vkCmdCopyImageToBuffer(ex->cb, UI.layer, VK_IMAGE_LAYOUT_GENERAL, HC.buf, n, c);
+    VkMemoryBarrier2 hb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                           .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &hb};
+    vkCmdPipelineBarrier2(ex->cb, &d);
+    HC.busy = 1;
+    vk_completion_add(ex->fence, hud_cols_done, NULL);
+}
+
 static void ui_layer_shift(VkExec *ex) {
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     for (uint32_t i = 0; i < 8 && i < (uint32_t)ex->pass_ncolor; i++) {
@@ -638,9 +773,45 @@ static void ui_layer_shift(VkExec *ex) {
         VkImageCopy all = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                            .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .extent = {area, UI.h, 1}};
         vkCmdPipelineBarrier2(ex->cb, &d);
+        hud_cols_read(ex, fr);
         all.extent.width = UI.w;   // the whole layer: the 16:9 area and the undrawn part right of it
         vkCmdCopyImage(ex->cb, UI.layer, VK_IMAGE_LAYOUT_GENERAL, UI.spare, VK_IMAGE_LAYOUT_GENERAL, 1, &all);
         vkCmdPipelineBarrier2(ex->cb, &d);
+        // HUD at the edges: the left band to the left edge, the middle centred, the right band to the right edge, and
+        // the two gaps this opens filled with the cleared colour from the undrawn right part (hud_cols_done).
+        int mode = hud_edges_mode();
+        // The race: a 3D camera ran within the last half second and the game's frame limiter (on in the menus, the
+        // results and the replay, kar_pace.c) did not.
+        static int persp_last;
+        static uint64_t persp_at, pace_last, pace_at;
+        int persp = kar_wide_persp_count();
+        uint64_t tnow = plat_now_ns(), pace = kar_pace_count();
+        if (persp != persp_last) persp_last = persp, persp_at = tnow;
+        if (pace != pace_last) pace_last = pace, pace_at = tnow;
+        int race = persp_at && tnow - persp_at < 500000000ull && (!pace_at || tnow - pace_at > 500000000ull);
+        int cl = __atomic_load_n(&HC.cut_l, __ATOMIC_RELAXED), cr = __atomic_load_n(&HC.cut_r, __ATOMIC_RELAXED);
+        if (!cr) cr = (int)area;
+        if (mode && (race || mode == 2) && (cl || cr < (int)area) && cl <= cr && UI.w - area >= 2 * off) {
+            VkImageCopy band[5];
+            uint32_t nb = 0;
+            const struct { int sx, w, dx; } bands[5] = {
+                {0, cl, 0},                                   // left band, at the left edge
+                {(int)area, (int)off, cl},                    // the gap it leaves, cleared
+                {cl, cr - cl, (int)off + cl},                 // the middle, centred
+                {(int)area, (int)off, (int)off + cr},         // the gap before the right band, cleared
+                {cr, (int)area - cr, 2 * (int)off + cr},      // right band, at the right edge
+            };
+            for (int k = 0; k < 5; k++)
+                if (bands[k].w > 0)
+                    band[nb++] = (VkImageCopy){.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                               .srcOffset = {bands[k].sx, 0, 0},
+                                               .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                               .dstOffset = {bands[k].dx, 0, 0}, .extent = {(uint32_t)bands[k].w, UI.h, 1}};
+            vkCmdCopyImage(ex->cb, UI.spare, VK_IMAGE_LAYOUT_GENERAL, UI.layer, VK_IMAGE_LAYOUT_GENERAL, nb, band);
+            vkCmdPipelineBarrier2(ex->cb, &d);
+            UI.shifted = 1;
+            return;
+        }
         all.extent.width = area;
         all.dstOffset.x = (int32_t)off;
         vkCmdCopyImage(ex->cb, UI.spare, VK_IMAGE_LAYOUT_GENERAL, UI.layer, VK_IMAGE_LAYOUT_GENERAL, 1, &all);
