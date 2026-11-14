@@ -664,7 +664,7 @@ static void hud_cols_done(void *arg) {
         }
     // A screen of its own (the results) lies on three or four cuts at once; in the race a tip box or a rider's
     // marker lies on one or two now and then, and that must not send the whole HUD to the middle.
-    int many = __builtin_popcount((unsigned)mask) >= 3;
+    int many = __builtin_popcount((unsigned)mask) >= 3 || (mask & 5) == 5 || (mask & 10) == 10;   // 3 cuts, or one side in both halves (the pause panel)
     if (many) HC.cross_n++, HC.clear_n = 0; else HC.clear_n++, HC.cross_n = 0;
     HC.nmany += many;
     if (!HC.blocked && HC.cross_n >= HC_HOLD) __atomic_store_n(&HC.blocked, 1, __ATOMIC_RELAXED);
