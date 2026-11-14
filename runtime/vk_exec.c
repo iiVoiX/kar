@@ -602,7 +602,7 @@ static struct { VkImage layer; VkFormat fmt; uint32_t w, h; uint64_t frame; int 
 // right of the other to the right edge, and the middle (timer, banners, messages) stays centred (hud_fixed_cut,
 // ui_layer_shift). Fixed cuts, since cuts that followed the content made the HUD hop whenever an element flew in.
 // Guard: every 4th frame every 4th row of the area is read back (hud_cols_read) and compared with the cleared colour
-// the game left in the undrawn part right of it. When tall content lies on a cut for HC_HOLD reads in a row (about a third
+// the game left in the undrawn part right of it. When tall content lies on three or more cuts for HC_HOLD reads in a row (about a third
 // of a second: a results screen, a full-width banner, not an element flying past) the whole layer goes back to the
 // centre until all cuts have been clear as long. KAR_HUD_COLS=1 logs the state every 2 s.
 int kar_wide_persp_count(void);
@@ -610,7 +610,7 @@ uint64_t kar_pace_count(void);
 #define HC_STEP 4    // rows read
 #define HC_HOLD 12   // reads in a row that switch the guard
 static struct { VkBuffer buf; VmaAllocation mem; void *map; uint32_t w, h, bpp, area, rows; int busy, log, blocked;
-                int cross_n, clear_n, crossed_mask; uint16_t col[2][4096]; uint64_t t0, n, nblocked; } HC;
+                int cross_n, clear_n, crossed_mask; uint16_t col[2][4096]; uint64_t t0, n, nblocked, nmany; } HC;
 // The cuts, in columns of the 1920-wide layout: top left, top right, bottom left, bottom right
 // (KAR_HUD_CUTS=tl,tr,bl,br; default 400,1120,400,1500). The top right one lies left of the tip boxes, the bottom right
 // one left of the speedometer; the top right one between the timer (ends near 1050) and the tip boxes (from 1190).
@@ -647,17 +647,21 @@ static void hud_cols_done(void *arg) {
             for (int i = c - 2; i <= c + 2; i++)
                 if (i >= 0 && i < (int)HC.area && HC.col[hh][i] >= tall) { mask |= 1 << (hh * 2 + s); break; }
         }
-    if (mask) HC.cross_n++, HC.clear_n = 0; else HC.clear_n++, HC.cross_n = 0;
+    // A screen of its own (the results) lies on three or four cuts at once; in the race a tip box or a rider's
+    // marker lies on one or two now and then, and that must not send the whole HUD to the middle.
+    int many = __builtin_popcount((unsigned)mask) >= 3;
+    if (many) HC.cross_n++, HC.clear_n = 0; else HC.clear_n++, HC.cross_n = 0;
+    HC.nmany += many;
     if (!HC.blocked && HC.cross_n >= HC_HOLD) __atomic_store_n(&HC.blocked, 1, __ATOMIC_RELAXED);
     if (HC.blocked && HC.clear_n >= HC_HOLD) __atomic_store_n(&HC.blocked, 0, __ATOMIC_RELAXED);
     HC.crossed_mask |= mask, HC.n++, HC.nblocked += HC.blocked;
     uint64_t now = plat_now_ns();
     if (!HC.t0) HC.t0 = now;
     if (HC.log && now - HC.t0 >= 2000000000ull) {
-        rt_log("hud edges: %llu reads, %llu centred by the guard, cuts crossed (tl tr bl br) %d%d%d%d", (unsigned long long)HC.n,
-               (unsigned long long)HC.nblocked, HC.crossed_mask & 1, HC.crossed_mask >> 1 & 1, HC.crossed_mask >> 2 & 1,
+        rt_log("hud edges: %llu reads, %llu centred by the guard, %llu on 3+ cuts, cuts crossed (tl tr bl br) %d%d%d%d",
+               (unsigned long long)HC.n, (unsigned long long)HC.nblocked, (unsigned long long)HC.nmany, HC.crossed_mask & 1, HC.crossed_mask >> 1 & 1, HC.crossed_mask >> 2 & 1,
                HC.crossed_mask >> 3 & 1);
-        HC.n = HC.nblocked = 0, HC.crossed_mask = 0, HC.t0 = now;
+        HC.n = HC.nblocked = HC.nmany = 0, HC.crossed_mask = 0, HC.t0 = now;
     }
     __atomic_store_n(&HC.busy, 0, __ATOMIC_RELEASE);
 }
