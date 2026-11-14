@@ -326,6 +326,11 @@ static int create_swapchain(void) {
     for (uint32_t i = 0; i < nf && !found; i++)
         if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; found = 1; }
     uint32_t count = caps.minImageCount + 1;
+    {   // KAR_SC_IMAGES=<n> (diagnostic, 16.6): the swapchain's image count. With few images the present's wait for a
+        // free one (its acquire semaphore) can hold the queue, and every submission behind it waits on the GPU too.
+        const char *e = getenv("KAR_SC_IMAGES");
+        if (e && atoi(e) > 0 && (uint32_t)atoi(e) >= caps.minImageCount) count = (uint32_t)atoi(e);
+    }
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;
 

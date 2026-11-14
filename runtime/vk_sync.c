@@ -461,13 +461,35 @@ static void st_mark(char kind) {
     }
 }
 
+// KAR_SPLIT_FENCE=1 (diagnostic, 16.6): every part goes to the queue with a fence of its own (not waited for here), in
+// case the driver holds back submissions that signal nothing until one that does: the race frame's parts reached the
+// queue spread over ~7 ms but ran on the GPU back to back at the end. A ring of fences; a slot is waited for before reuse.
+static VkFence part_fence(VkCtx *c) {
+    static int on = -1;
+    static VkFence ring[32];
+    static int next;
+    if (on < 0) on = getenv("KAR_SPLIT_FENCE") && *getenv("KAR_SPLIT_FENCE") == '1';
+    if (!on) return VK_NULL_HANDLE;
+    VkFence *f = &ring[next];
+    next = (next + 1) % 32;
+    if (*f) {
+        vkWaitForFences(c->device, 1, f, VK_TRUE, UINT64_MAX);
+        vkResetFences(c->device, 1, f);
+    } else {
+        VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vkCreateFence(c->device, &fi, NULL, f) != VK_SUCCESS) return VK_NULL_HANDLE;
+    }
+    return *f;
+}
+
 static VkCommandBuffer split_impl(int wait) {
     VkCtx *c = vk_ctx();
     VkFence prefix = VK_NULL_HANDLE;
     if (wait) {
         VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         if (vkCreateFence(c->device, &fi, NULL, &prefix) != VK_SUCCESS) rt_fatal("vk: prefix fence allocation");
-    }
+    } else
+        prefix = part_fence(c);
     VkCommandBuffer cb = slots[cur_slot].cb;
     ts_end(cb, cur_fence);
     if (!rec_end_cb(cb, 0, 0)) vkEndCommandBuffer(cb);   // every command of the part is in cb, ended by its recorder
