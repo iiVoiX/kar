@@ -1152,23 +1152,43 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     uint64_t max = LIM.ubo_max, align = LIM.ubo_align;
     VkDescriptorBufferInfo bi;
-    {   // KAR_UBO_LOG=<slot>: the words of that constant bank each program binds (RELEASE_PLAN 2.6 diagnostic)
+    {   // KAR_UBO_LOG=<slot>|99 (all): the words of a user constant buffer the first time each program binds it;
+        // KAR_UBO_PROG=<serial>: that program's buffers on every call (RELEASE_PLAN 2.6 diagnostic). Slot 3+ = ubo[slot-3].
         static int want = -2, told;
-        if (want == -2) want = getenv("KAR_UBO_LOG") ? atoi(getenv("KAR_UBO_LOG")) : -1;
+        static long long every = -2;
+        if (want == -2) {
+            want = getenv("KAR_UBO_LOG") ? atoi(getenv("KAR_UBO_LOG")) : -1;
+            every = getenv("KAR_UBO_PROG") ? atoll(getenv("KAR_UBO_PROG")) : -1;
+        }
         if ((want == slot || want == 99) && told < 3000 && ex->prog && slot >= 3 && slot < 21) {
             uint64_t ser = ex->prog->serial;
             static uint64_t seen[2048];
             static int ns;
-            int k = 0;
-            while (k < ns && seen[k] != (ser * 8 + (uint64_t)st) * 32 + (uint64_t)slot) k++;
-            if (k == ns && ns < 2048) {
-                seen[ns++] = (ser * 8 + (uint64_t)st) * 32 + (uint64_t)slot;
-                const uint32_t *w = ex->ubo[st][slot - 3].addr ? (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr : (const uint32_t *)"const uint32_t *w = (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr;const uint32_t *w = (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr;const uint32_t *w = (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr;const uint32_t *w = (const uint32_t *)(uintptr_t)ex->ubo[st][slot - 3].addr;";
-                char t[1200];
-                int o = 0, n = ex->ubo[st][slot - 3].addr ? (int)(ex->ubo[st][slot - 3].size / 4) : 0;
-                for (int i = 0; i < n && i < 56; i++) o += snprintf(t + o, sizeof t - (size_t)o, " %08x", w[i]);
-                rt_log("vk_exec: ubo%d prog %llu stage %d size %llu:%s", slot, (unsigned long long)ser, st,
-                       (unsigned long long)ex->ubo[st][slot - 3].size, t);
+            uint64_t key = (ser * 8 + (uint64_t)st) * 32 + (uint64_t)slot;
+            int k = 0, log_it;
+            while (k < ns && seen[k] != key) k++;
+            log_it = every >= 0 && (long long)ser == every ? 1 : k == ns;
+            if (k == ns && ns < 2048) seen[ns++] = key;
+            const p_bind_buf *bb = &ex->ubo[st][slot - 3];
+            if (log_it && bb->addr) {
+                const uint32_t *w = (const uint32_t *)(uintptr_t)bb->addr;
+                char t[2200];
+                int o = 0, n = (int)(bb->size / 4);
+                for (int i = 0; i < n && i < 200; i++) o += snprintf(t + o, sizeof t - (size_t)o, " %08x", w[i]);
+                rt_log("vk_exec: ubo%d prog %llu stage %d addr %#llx size %llu:%s", slot, (unsigned long long)ser, st,
+                       (unsigned long long)bb->addr, (unsigned long long)bb->size, t);
+                uint32_t snap[200];   // the submit-time copy the GPU reads (vk_usnap): differences from the live words
+                uint64_t sn = (uint64_t)(n < 200 ? n : 200) * 4;
+                if (vk_usnap_read(bb->addr, snap, sn)) {
+                    int d = 0;
+                    o = 0;
+                    t[0] = 0;
+                    for (int i = 0; i < (int)(sn / 4) && d < 24; i++)
+                        if (snap[i] != w[i]) d++, o += snprintf(t + o, sizeof t - (size_t)o, " w%d %08x->%08x", i, w[i], snap[i]);
+                    rt_log("vk_exec: ubo%d prog %llu snapshot differs from live in %d words:%s", slot, (unsigned long long)ser, d, t);
+                } else {
+                    rt_log("vk_exec: ubo%d prog %llu has no snapshot", slot, (unsigned long long)ser);
+                }
                 told++;
             }
         }
