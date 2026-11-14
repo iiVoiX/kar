@@ -438,6 +438,29 @@ static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
     return cb;
 }
 
+// KAR_DRAW_TS=<frame> (16.6): in that frame, when each part and each value's last part went to the queue, in ms from
+// the frame's first submission, and when the recording of each value began; logged at the value's last part. Read
+// next to the GPU timeline vk_exec_draw.c logs for the same frame.
+static uint64_t st_t0, st_rec0;
+static char st_buf[512];
+static int st_len;
+static long long st_frame(void) {
+    static long long f = -2;
+    if (f == -2) f = getenv("KAR_DRAW_TS") ? atoll(getenv("KAR_DRAW_TS")) : -1;
+    return f >= 0 && (long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) == f ? f : -1;
+}
+static void st_mark(char kind) {
+    if (st_frame() < 0) return;
+    uint64_t now = kern_now_ns();
+    if (!st_t0) st_t0 = now;
+    if (st_len < (int)sizeof st_buf - 16)
+        st_len += snprintf(st_buf + st_len, sizeof st_buf - st_len, " %c%.2f", kind, (now - st_t0) / 1e6);
+    if (kind == 'V') {
+        rt_log("submit ts: frame %lld (ms from the first submission; P part, V a value's last part):%s", st_frame(), st_buf);
+        st_len = 0;
+    }
+}
+
 static VkCommandBuffer split_impl(int wait) {
     VkCtx *c = vk_ctx();
     VkFence prefix = VK_NULL_HANDLE;
@@ -461,6 +484,7 @@ static VkCommandBuffer split_impl(int wait) {
         vk_device_fault_report(r);
         rt_fatal("vk: vkQueueSubmit2 of a part of value %llu failed (%d)", (unsigned long long)cur_fence, (int)r);
     }
+    st_mark('P');
     if (wait) {
         // The full submission's timeline value is not signalled yet. Wait only for this prefix, without running its
         // final completion callbacks or releasing the resources/command slots protected by cur_fence.
@@ -554,6 +578,7 @@ uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t su
         vk_device_fault_report(r);
         rt_fatal("vk: vkQueueSubmit2 of value %llu failed (%d)", (unsigned long long)fence, (int)r);
     }
+    st_mark('V');
     s->fence = recorded ? fence : 0;
     vk_sync_prof_issued(fence);
     plat_mutex_lock(&st_lock);
