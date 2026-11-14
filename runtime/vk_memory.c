@@ -1610,9 +1610,45 @@ static void wbd_cb(void *arg) {
                wbd_total ? 100.0 * wbd_changed / wbd_total : 0.0), wbd_total = wbd_changed = wbd_blocks = wbd_cblocks = 0;
 }
 
+// KAR_MIRROR_STAGE=1 (16.6): the uploads into the VRAM mirrors go through a staging buffer the CPU fills with memcpy
+// instead of a GPU copy out of the imported guest memory. The race frame's prologue (under a MiB of uploads) took 9 ms
+// on the GPU before the first replay part could start: the GPU reads imported host memory very slowly. Eight 8 MiB
+// buffers in turn, each reused only four presented frames after its last use (the game waits for the GPU of the frame
+// before, so that one is long done); a prologue that does not fit, or finds no free buffer, copies the old way.
+#define STAGE_N 8
+#define STAGE_BYTES (8u << 20)
+static struct { VkBuffer buf; VmaAllocation alloc; uint8_t *map; uint64_t frame; int made; } stg[STAGE_N];
+static int stg_next;
+static int stage_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_MIRROR_STAGE") && *getenv("KAR_MIRROR_STAGE") == '1';
+    return on;
+}
+static int stage_take(void) {   // a free buffer's index, or -1
+    uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int k = stg_next;
+    if (stg[k].made && stg[k].frame + 4 > now) return -1;
+    if (!stg[k].made) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = STAGE_BYTES,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                               VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &stg[k].buf, &stg[k].alloc, &info) != VK_SUCCESS) return -1;
+        stg[k].map = info.pMappedData, stg[k].made = 1;
+        static int told;
+        if (!told++) rt_log("mem: mirror uploads through staging buffers (KAR_MIRROR_STAGE=1)");
+    }
+    stg_next = (k + 1) % STAGE_N;
+    stg[k].frame = now;
+    return k;
+}
+
 static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint64_t *bytes, uint64_t *copies) {
     qsort(a, (size_t)n, sizeof *a, range_cmp);
-    int rec = 0;
+    int rec = 0, sb = -2;   // staging: one buffer for the whole call, taken at the first pool that uses it
+    uint64_t at = 0;
     for (int i = 0; i < n;) {
         PoolRec *r = a[i].r;
         uint64_t lim = r->import_hi - r->import_lo;
@@ -1630,8 +1666,28 @@ static int copy_ranges(VkCommandBuffer cb, MRange *a, int n, int to_mirror, uint
             mregions[k++] = (VkBufferCopy){lo, lo, hi - lo};
         }
         if (!k) continue;
+        if (to_mirror && stage_on()) {   // staging: this pool's ranges into one staging buffer, then one copy
+            uint64_t need = 0;
+            for (int j = 0; j < k; j++) need += mregions[j].size;
+            if (sb == -2) sb = stage_take();
+            if (sb >= 0 && k <= 64 && at + need <= STAGE_BYTES) {
+                VkBufferCopy sc[64];
+                uint64_t from = at;
+                for (int j = 0; j < k; j++) {
+                    memcpy(stg[sb].map + at, (const void *)(uintptr_t)(r->import_lo + mregions[j].srcOffset), mregions[j].size);
+                    sc[j] = (VkBufferCopy){at, mregions[j].dstOffset, mregions[j].size};
+                    at += mregions[j].size;
+                }
+                {
+                    vmaFlushAllocation(vk_ctx()->vma, stg[sb].alloc, from, at - from);
+                    vkCmdCopyBuffer(cb, stg[sb].buf, r->mbuf, (uint32_t)k, sc);
+                    goto copied;
+                }
+            }
+        }
         if (to_mirror) vkCmdCopyBuffer(cb, r->buf, r->mbuf, (uint32_t)k, mregions);
         else vkCmdCopyBuffer(cb, r->mbuf, r->buf, (uint32_t)k, mregions);
+    copied:
         rec++;
         for (int j = 0; j < k; j++) *bytes += mregions[j].size;
         if (!to_mirror && wbd_job)   // KAR_WB_DIFF: the guest bytes before this write-back

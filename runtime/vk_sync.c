@@ -432,7 +432,10 @@ static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(cb, &bi);
     int pair = ts_open(cb);
+    extern void vk_dts_mark_cb(VkCommandBuffer cb, int tag);
+    vk_dts_mark_cb(cb, 13);   // KAR_DRAW_TS: U mirror uploads begin, u done
     vk_mem_mirror_prologue(cb);
+    vk_dts_mark_cb(cb, 14);
     ts_close(cb, pair, fence, NULL);
     vkEndCommandBuffer(cb);
     return cb;
@@ -444,6 +447,7 @@ static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
 static uint64_t st_t0, st_rec0;
 static char st_buf[512];
 static int st_len;
+uint64_t vk_sync_st_t0(void) { return st_t0; }   // vk_exec_draw.c: the CPU base of the KAR_DRAW_TS frame
 static long long st_frame(void) {
     static long long f = -2;
     if (f == -2) f = getenv("KAR_DRAW_TS") ? atoll(getenv("KAR_DRAW_TS")) : -1;

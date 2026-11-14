@@ -3895,6 +3895,35 @@ static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
         for (int i = 0; i < dts_n; i++)
             if (tsa[2 * i + 1]) ts[m] = tsa[2 * i], dts_info[m] = dts_info[i], m++;
         dts_n = m;
+        // With VK_KHR_calibrated_timestamps: the command-buffer starts and marks on the CPU's clock, in ms from the
+        // frame's first submission (vk_sync.c submit ts), to set beside the times the parts went to the queue.
+        extern uint64_t vk_sync_st_t0(void);
+        if (c->has_calibrated_ts && vk_sync_st_t0() && dts_n) {
+            PFN_vkGetCalibratedTimestampsKHR gct =
+                (PFN_vkGetCalibratedTimestampsKHR)vkGetDeviceProcAddr(c->device, "vkGetCalibratedTimestampsKHR");
+            VkCalibratedTimestampInfoKHR ci[2] = {
+                {.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .timeDomain = VK_TIME_DOMAIN_DEVICE_KHR},
+                {.sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR,
+                 .timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR}};
+            uint64_t now[2], dev;
+            if (gct && gct(c->device, 2, ci, now, &dev) == VK_SUCCESS) {
+                double gpu_ns = c->props.limits.timestampPeriod;
+                // QPC ticks to the ns plat_now_ns gives
+                uint64_t cpu_now = (uint64_t)((unsigned __int128)now[1] * 1000000000u / plat_counter_hz());
+                uint64_t t0 = vk_sync_st_t0();
+                char t[2048];
+                int o = 0;
+                for (int i = 0; i < dts_n && o < (int)sizeof t - 32; i++) {
+                    if (dts_info[i].kind < 10 && !dts_info[i].first) continue;
+                    double at = (double)(int64_t)(cpu_now - t0) - (double)(int64_t)(now[0] - ts[i]) * gpu_ns;
+                    o += snprintf(t + o, sizeof t - (size_t)o, " %s%.2f",
+                                  dts_info[i].kind == 10 ? "S" : dts_info[i].kind == 11 ? "C" : dts_info[i].kind == 12 ? "E" : dts_info[i].kind == 13 ? "U" : dts_info[i].kind == 14 ? "u" : "cb",
+                                  at / 1e6);
+                }
+                rt_log("draw ts: on the CPU clock, ms from the frame's first submission (deviation %llu ns):%s",
+                       (unsigned long long)dev, t);
+            }
+        }
         double per = c->props.limits.timestampPeriod / 1e6, total = 0;   // ms per tick
         typedef struct { uint64_t a, b; int kind; double ms; int n; uint64_t work; } Agg;
         static Agg agg[DTS_N];
@@ -3913,7 +3942,7 @@ static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
             for (int i = 0; i < dts_n && o < (int)sizeof t - 64; i++) {
                 if (dts_info[i].kind < 10 && !dts_info[i].first) { nd++; continue; }
                 o += snprintf(t + o, sizeof t - (size_t)o, " [%d draws] %s%.2f", nd,
-                              dts_info[i].kind == 10 ? "S" : dts_info[i].kind == 11 ? "C" : dts_info[i].kind == 12 ? "E" : "cb",
+                              dts_info[i].kind == 10 ? "S" : dts_info[i].kind == 11 ? "C" : dts_info[i].kind == 12 ? "E" : dts_info[i].kind == 13 ? "U" : dts_info[i].kind == 14 ? "u" : "cb",
                               ts[i] >= ts[0] ? (double)(ts[i] - ts[0]) * c->props.limits.timestampPeriod / 1e6 : -1.0);
                 nd = dts_info[i].kind < 10;
             }
@@ -3948,6 +3977,15 @@ static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
 
 // KAR_DRAW_TS: a mark in the frame's timeline (vk_exec.c record_impl): 10 submission start (after the mirror
 // prologue's syncs), 11 commands done, 12 after the mirror write-back. Bottom of pipe, like the draws.
+// A mark in a command buffer of the runtime's own (vk_sync.c: the mirror prologue), same timeline.
+void vk_dts_mark_cb(VkCommandBuffer cb, int tag) {
+    if (dts_state != 1 || dts_n >= DTS_N || !cb) return;
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, dts_pool, (uint32_t)dts_n);
+    dts_info[dts_n].a = dts_info[dts_n].b = dts_info[dts_n].work = 0, dts_info[dts_n].kind = tag;
+    dts_info[dts_n].first = 0;
+    dts_n++;
+}
+
 void vk_dts_mark(VkExec *ex, int tag) {
     if (dts_state != 1 || dts_n >= DTS_N || !ex->cb) return;
     vkCmdWriteTimestamp(ex->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, dts_pool, (uint32_t)dts_n);
