@@ -39,3 +39,10 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   projection hook is kar_wide.c `project_hook`, f_7005384740, aspect at +0x318, fov +0x31c), fed to
   `ffxFrameInterpolationPrepare` in vk_fg.cpp; then B3 HUD-less picture (DLSS stand-in output before the composite).
 - Test `KAR_POOL_BL=1` (menu_mail2.txt, bubble at 2300).
+
+## Stand 2026-11-14 (kurz)
+- Testläufe von kar.exe ohne Nachfrage (Dauer-OK), nur nicht wenn WardogsClient läuft.
+- Bild-gezählte Skripte (menu_*, mode_*) brauchen `TOTK_FPS_LIMIT=60`; Hinweis-Dialoge aktivieren „OK“ erst nach Scrollen bis zum Ende.
+- Neu standardmäßig an: karpace (16.6a), HUD am Rand (17.3b, `hud_position`/`KAR_HUD_EDGES`/`KAR_HUD_CUTS`), Compute-Vorbau nach Treiberwechsel mit Ladebildschirm (13.3, `KAR_CS_COLD`), Codec-Event-Wiederverwendung (7.2).
+- Diagnose-Schalter: `KAR_SLEEP_LOG`, `KAR_HUD_COLS`, `KAR_UBO_LOG`/`KAR_UBO_PROG`, `KAR_MUTEX_LOG` (an), `KAR_BOOT_DEMO`/`KAR_BOOT_SHOT`.
+- Nächste Schritte (advisor): Dauerlauf inkl. Menü-Leerlauf und Wiederholung (3.4/12.5), Validation-Lauf (12.3, beantwortet 2.6), HUD-Schalter ins Spielmenü (15.x).
