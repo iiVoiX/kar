@@ -147,6 +147,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 | 7.4 | Top Ride (Draufsicht-Modus) und Road Trip (Story) einmal komplett | SPIEL | ⬜ |
 | 7.5 | Zwischensequenzen und Videos (Film-Decoder `ov_movie2.c`) in allen Modi | SPIEL | ⬜ |
 | 7.6 | Replays ansehen und speichern | SPIEL | ⬜ |
+| 7.7 | **Mehrspieler übers Netz** (Nutzerfrage 2026-11-14: eigener Online-Server?) | OHNE + SPIEL | ⬜ **Befund (Code-Zählung, ohne Spielstart):** Online läuft über Nintendos **NPLN** (`npln::auth/matchmaking/friends/leaderboard/ugcstore/gamesync/appconfig/wisdom`) mit P2P-Transport (`p2ptransportchannel`, ICE-artig) und Relay – ein eigener Server hieße diese Dienste samt Anmeldung nachbauen: sehr groß, kein öffentliches Vorbild bekannt. **Daneben nutzt main `nn::ldn`** (CreateNetwork, OpenAccessPoint, SetAdvertiseData, Connect …) = lokales Drahtlos-Spiel. Realistischer Weg: `nn::ldn` im Host nachbilden und über LAN/Internet-Tunnel (UDP) verbinden, wie andere Switch-Emulatoren. Vorher prüfen: wo das Spiel den Drahtlos-Modus anbietet, und dass der Port heute nichts nach außen sendet. |
 
 ## 8. Eingabe
 
