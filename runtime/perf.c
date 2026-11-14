@@ -142,6 +142,13 @@ static void ft_report(uint64_t now, const char *tag) {
         rt_log("frametime: %s: %llu frames in %.1f s, mean %.1f fps, 1%% low %.1f fps, over 25 ms %llu, 50 ms %llu, 100 ms %llu",
                tag, (unsigned long long)ft.frames, (now - ft.t0) / 1e9, ft.frames * 1e9 / ft.sum, low ? 1e9 / low : 0.0,
                (unsigned long long)ft.over25, (unsigned long long)ft.over50, (unsigned long long)ft.over100);
+        {   // what paces the frames now (a game stuck at 60 while the limit is higher: is it the limit, the vsync event or focus?)
+            extern uint64_t frame_step_cap_ns(void);
+            extern double frame_rate_vsync_hz(void);
+            extern int gfx_window_focused(void);
+            rt_log("frametime:   pacing: limit period %.2f ms, vsync event %.0f Hz, window %s", frame_step_cap_ns() / 1e6,
+                   frame_rate_vsync_hz(), gfx_window_focused() ? "focused" : "in the background");
+        }
         for (int i = 0; i < ft.nworst; i++) {
             const FtWorst *w = &ft.worst[i];
             rt_log("frametime:   worst frame %llu: %.1f ms; shader translation %.1f, pipeline build %.1f, texture upload %.1f (astc %.1f), replay %.1f, fence/present wait %.1f, pacing %.1f",

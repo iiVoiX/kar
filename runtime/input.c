@@ -691,18 +691,50 @@ int input_rumble_triggers_enabled(void) {
     return cfg_bool("TOTK_RUMBLE_TRIGGERS");
 }
 
+// Rumble goes to the pad on a thread of its own: SDL_RumbleGamepad can take milliseconds (a wireless pad's write), and
+// called on the game's thread under the input lock it held up every frame the game sent a vibration value: playing
+// with a pad, the game sat at 60 fps where it ran at 140 idle. input_rumble only leaves the newest request; the worker
+// sends it. The request is still accepted while a pad with rumble is open.
+static PlatMutex rlock = PLAT_MUTEX_INIT;
+static PlatCond rcond = PLAT_COND_INIT;
+static struct { uint16_t low, high; uint32_t ms; int trig, pending; } rq;
+
+static void rumble_main(void *arg) {
+    (void)arg;
+    plat_mutex_lock(&rlock);
+    for (;;) {
+        while (!rq.pending) plat_cond_wait(&rcond, &rlock);
+        typeof(rq) r = rq;
+        rq.pending = 0;
+        plat_mutex_unlock(&rlock);
+        uint64_t t0 = plat_now_ns();
+        plat_mutex_lock(&lock);
+        if (state == 1 && pad && pad_rumble) {
+            SDL_RumbleGamepad(pad, r.low, r.high, r.ms);
+            if (r.trig) SDL_RumbleGamepadTriggers(pad, r.high, r.high, r.ms);   // unsupported pads return false: ignored
+        }
+        plat_mutex_unlock(&lock);
+        uint64_t dt = plat_now_ns() - t0;
+        static int slow;
+        if (dt > 2000000 && slow < 5) slow++, rt_log("input: a rumble call to the pad took %.1f ms", dt / 1e6);
+        plat_mutex_lock(&rlock);
+    }
+}
+
 int input_rumble(uint16_t low, uint16_t high, uint32_t ms) {
-    int ok = 0;
-    static int triggers = -1;
+    static int triggers = -1, started;
     static unsigned seen;
     if (triggers < 0 || seen != cfg_version()) seen = cfg_version(), triggers = input_rumble_triggers_enabled();
     plat_mutex_lock(&lock);
-    if (state == 1 && pad && pad_rumble) {
-        ok = SDL_RumbleGamepad(pad, low, high, ms);
-        if (triggers) SDL_RumbleGamepadTriggers(pad, high, high, ms);   // unsupported pads return false: ignored
-    }
+    int ok = state == 1 && pad && pad_rumble;
     plat_mutex_unlock(&lock);
-    return ok;
+    if (!ok) return 0;
+    plat_mutex_lock(&rlock);
+    if (!started) started = plat_thread_spawn(rumble_main, NULL, "rumble", 0) != 0;
+    rq.low = low, rq.high = high, rq.ms = ms, rq.trig = triggers, rq.pending = 1;
+    plat_cond_signal(&rcond);
+    plat_mutex_unlock(&rlock);
+    return 1;
 }
 
 // SDL gamepad sensor axes (SDL_sensor.h, a gamepad held in front of you): x to the right, y up out of the face (lying
