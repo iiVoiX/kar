@@ -441,3 +441,10 @@ site karwide main 5383c80 bd420a6a bd420a6a @call:3d0   # same, second perspecti
 # Frame generation camera data (runtime/kar_fg_cam.c, RELEASE_PLAN.md 16.7 B2)
 set karfg KAR_FG 0
 site karfg main 5384b34 b9020c28 b9020c28 @call:3c0   # f_7005384740: last store of the camera block before ret (x0 camera, x1 block)
+
+# The game's own frame limiter (RELEASE_PLAN 16.6a, runtime/kar_pace.c): f_7000fb22fc sleeps (nn::os::SleepThread) until
+# 1/target fps has passed, enabled by its pacing object for the replay and the menus (60) and off in the race. The hook
+# zeroes the time left to wait: no sleep, but the function still reports the real frame delta (valid), so the
+# runtime's frame limit paces those scenes and the game times them by the measured delta.
+set karpace KAR_PACE 1
+site karpace main fb23e8 1e624c62 1e624c62 @call:3e0   # d2 = time left to wait (fcsel), before fcmp d2 / b.le skips the sleep

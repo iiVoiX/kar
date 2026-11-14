@@ -476,10 +476,24 @@ static void pick(int32_t *x, int32_t *y, int32_t kx, int32_t ky) {
     if (b > a) { *x = kx; *y = ky; }
 }
 
+// SDL_UpdateGamepads, at most every 4 ms (under lock). The game polls its controllers several times a frame on its own
+// thread; updating SDL's pad state on each poll cost milliseconds with a real pad (the motion thread updates every 4 ms
+// anyway), and playing by hand held the game at 60 fps where scripted input ran at 130. Slow updates are logged.
+static uint64_t pad_upd_ns;
+static void pad_update(void) {
+    uint64_t now = plat_now_ns();
+    if (now - pad_upd_ns < 4000000) return;
+    SDL_UpdateGamepads();
+    uint64_t t = plat_now_ns();
+    pad_upd_ns = t;
+    static int slow;
+    if (t - now > 2000000 && slow < 5) slow++, rt_log("input: SDL_UpdateGamepads took %.1f ms", (t - now) / 1e6);
+}
+
 // Under lock, state 1: the open gamepad's inputs by position (pd[PAD_*] != 0 held); 0 without a connected gamepad.
 static int pad_physical(uint8_t pd[PAD_COUNT]) {
     if ((!pad || !SDL_GamepadConnected(pad)) && plat_now_ns() / 1000000u >= next_scan) { next_scan = plat_now_ns() / 1000000u + RESCAN_MS; scan_pads(); }
-    SDL_UpdateGamepads();
+    pad_update();
     if (!pad || !SDL_GamepadConnected(pad)) return 0;
     for (int p = PAD_SOUTH; p < PAD_ZL; p++) pd[p] = SDL_GetGamepadButton(pad, pad_sdl[p]);
     pd[PAD_ZL] = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > TRIGGER_ON;
@@ -793,7 +807,7 @@ static void motion_main(void *arg) {
         int have = 0;
         plat_mutex_lock(&lock);
         if (pad && SDL_GamepadConnected(pad)) {
-            SDL_UpdateGamepads();
+            pad_update();
             have = sensors_ready() && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, a, 3) &&
                    SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, g, 3);
         }

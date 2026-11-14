@@ -126,6 +126,9 @@ void input_cursor_suspend(int on) {
     cursor_update(gfx_window_handle());
 }
 
+static volatile uint8_t keyheld[256];   // ikb_down below
+static void key_msg(WPARAM w, LPARAM l, int down);
+
 // Window procedure hook (gfx_window_win.c calls it first). Returns 1 with *res set when the message is fully handled.
 int input_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res) {
     switch (m) {
@@ -151,7 +154,18 @@ int input_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res) {
         if ((w & 0xFFF0) == SC_KEYMENU && l == 0) { *res = 0; return 1; }
         break;
     case WM_KEYDOWN:   // Esc is unbound in the game layout: it releases the cursor and opens the menu (menu_window_msg)
+        key_msg(w, l, 1);
         if (w == VK_ESCAPE && !(cur_rel & CUR_REL)) { cur_rel_update(rel_esc); cursor_update(h); }
+        break;
+    case WM_SYSKEYDOWN:   // Alt and F10 come as system keys
+        key_msg(w, l, 1);
+        break;
+    case WM_KEYUP: case WM_SYSKEYUP:
+        key_msg(w, l, 0);
+        break;
+    case WM_KILLFOCUS:   // keys released while another window has the focus never send their key up here
+        memset((void *)keyheld, 0, sizeof keyheld);
+        cursor_update(h);
         break;
     case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:   // client area only; poll_merged drops the click
         if (cur_rel & CUR_REL) { cur_rel_update(rel_clear); cursor_update(h); }
@@ -164,7 +178,7 @@ int input_window_msg(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT *res) {
         InterlockedExchange(&cur_active, w != 0);
         cursor_update(h);
         break;
-    case WM_SETFOCUS: case WM_KILLFOCUS: case WM_SIZE: case WM_MOVE:
+    case WM_SETFOCUS: case WM_SIZE: case WM_MOVE:
         cursor_update(h);
         break;
     case WM_ENTERSIZEMOVE:
@@ -194,9 +208,22 @@ int ikb_foreground(void) {
     return w && w == GetForegroundWindow();
 }
 
+// Keyboard state from the window's key messages (input_window_msg), not one GetAsyncKeyState call per key: the game polls
+// its controllers several times a frame and each poll asks for every key, a system call each, which held a focused
+// window at 60 fps while a background one (no key reading) ran at 130. Mouse buttons (VK 1-6) are still asked.
+static void key_msg(WPARAM w, LPARAM l, int down) {
+    unsigned vk = (unsigned)w & 0xff, sc = (l >> 16) & 0xff, ext = (l >> 24) & 1;
+    keyheld[vk] = (uint8_t)down;
+    if (vk == VK_SHIFT) keyheld[sc == 0x36 ? VK_RSHIFT : VK_LSHIFT] = (uint8_t)down;
+    if (vk == VK_CONTROL) keyheld[ext ? VK_RCONTROL : VK_LCONTROL] = (uint8_t)down;
+    if (vk == VK_MENU) keyheld[ext ? VK_RMENU : VK_LMENU] = (uint8_t)down;
+}
+
 int ikb_down(int key) {
     int vk = key_vk(key);
-    return vk && key_down(vk);
+    if (!vk) return 0;
+    if (vk <= VK_XBUTTON2 || vk >= 256) return key_down(vk);
+    return keyheld[vk];
 }
 
 int ikb_escape(void) { return key_down(VK_ESCAPE); }

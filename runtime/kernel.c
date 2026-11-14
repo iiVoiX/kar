@@ -1857,6 +1857,30 @@ int kern_svc(Cpu *c, uint32_t imm) {
         int64_t ns = (int64_t)x[0];
         RtThread *t = cur(imm);
         if (ns > 0) {
+            static int slog = -1;   // KAR_SLEEP_LOG=1: who sleeps how long (16.6, the 60 fps lock)
+            if (slog < 0) slog = getenv("KAR_SLEEP_LOG") && *getenv("KAR_SLEEP_LOG") == '1';
+            if (slog) {   // per thread and caller: count and mean asked, one summary every 2 s
+                static struct { uint32_t th; uint64_t lr, n, ns; } tab[48];
+                static uint64_t last;
+                static PlatMutex sl_lock = PLAT_MUTEX_INIT;
+                plat_mutex_lock(&sl_lock);
+                int k = 0;
+                while (k < 48 && tab[k].n && !(tab[k].th == t->handle && tab[k].lr == x[30])) k++;
+                if (k < 48) tab[k].th = t->handle, tab[k].lr = x[30], tab[k].n++, tab[k].ns += (uint64_t)ns;
+                uint64_t now = kern_now_ns();
+                if (now - last > 2000000000ull) {
+                    char o[1536];
+                    int m = 0;
+                    for (int i = 0; i < 48 && tab[i].n && m < (int)sizeof o - 64; i++)
+                        m += snprintf(o + m, sizeof o - (size_t)m, " %x@%llx:%llux%.1f", tab[i].th,
+                                      (unsigned long long)tab[i].lr, (unsigned long long)tab[i].n,
+                                      tab[i].ns / 1e6 / tab[i].n);
+                    rt_log("sleeps:%s", o);
+                    memset(tab, 0, sizeof tab);
+                    last = now;
+                }
+                plat_mutex_unlock(&sl_lock);
+            }
             lock();
             core_put(t);
             acct(t, S_SLEEP);

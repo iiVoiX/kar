@@ -185,6 +185,20 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     static volatile int32_t n_skipped;
     vk_exec_frame_log(t, frame);
     vk_mem_census(frame);
+    {   // KAR_STALL_AT=<frame>[:<ms>] (diagnostic): the game's present call takes that long once, as a long shader build
+        // does, to see whether the game's frame-rate control then holds 60 fps
+        static long long at = -2;
+        static unsigned ms = 3000;
+        if (at == -2) {
+            const char *e = getenv("KAR_STALL_AT");
+            at = e ? atoll(e) : -1;
+            if (e && strchr(e, ':')) ms = (unsigned)atoi(strchr(e, ':') + 1);
+        }
+        if (at >= 0 && (long long)frame == at) {
+            rt_log("present: KAR_STALL_AT: stalling %u ms at frame %llu", ms, (unsigned long long)frame);
+            plat_sleep_ms(ms);
+        }
+    }
     if (frame == 600) {   // KAR_WW_PROBE (vk_wwprobe_win.c): once, Windows only
         extern void vk_ww_probe(void) WEAK;
         if (vk_ww_probe) vk_ww_probe();

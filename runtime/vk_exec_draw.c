@@ -3917,7 +3917,7 @@ static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
                     if (dts_info[i].kind < 10 && !dts_info[i].first) continue;
                     double at = (double)(int64_t)(cpu_now - t0) - (double)(int64_t)(now[0] - ts[i]) * gpu_ns;
                     o += snprintf(t + o, sizeof t - (size_t)o, " %s%.2f",
-                                  dts_info[i].kind == 10 ? "S" : dts_info[i].kind == 11 ? "C" : dts_info[i].kind == 12 ? "E" : dts_info[i].kind == 13 ? "U" : dts_info[i].kind == 14 ? "u" : "cb",
+                                  dts_info[i].kind == 10 ? "S" : dts_info[i].kind == 11 ? "C" : dts_info[i].kind == 12 ? "E" : dts_info[i].kind == 13 ? "U" : dts_info[i].kind == 14 ? "u" : dts_info[i].kind == 15 ? "b" : dts_info[i].kind == 16 ? "p" : "cb",
                                   at / 1e6);
                 }
                 rt_log("draw ts: on the CPU clock, ms from the frame's first submission (deviation %llu ns):%s",
@@ -3942,7 +3942,7 @@ static void draw_ts(const VkExec *ex, int kind, uint64_t work) {
             for (int i = 0; i < dts_n && o < (int)sizeof t - 64; i++) {
                 if (dts_info[i].kind < 10 && !dts_info[i].first) { nd++; continue; }
                 o += snprintf(t + o, sizeof t - (size_t)o, " [%d draws] %s%.2f", nd,
-                              dts_info[i].kind == 10 ? "S" : dts_info[i].kind == 11 ? "C" : dts_info[i].kind == 12 ? "E" : dts_info[i].kind == 13 ? "U" : dts_info[i].kind == 14 ? "u" : "cb",
+                              dts_info[i].kind == 10 ? "S" : dts_info[i].kind == 11 ? "C" : dts_info[i].kind == 12 ? "E" : dts_info[i].kind == 13 ? "U" : dts_info[i].kind == 14 ? "u" : dts_info[i].kind == 15 ? "b" : dts_info[i].kind == 16 ? "p" : "cb",
                               ts[i] >= ts[0] ? (double)(ts[i] - ts[0]) * c->props.limits.timestampPeriod / 1e6 : -1.0);
                 nd = dts_info[i].kind < 10;
             }
