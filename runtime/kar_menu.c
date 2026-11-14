@@ -33,7 +33,7 @@
 // PC mode of the display page (Anzeige): rows bound to a port setting (pc_rows) show it instead. Labels answered with
 // our own text while pc_mode is on; the page is closed and opened again on a switch (L/R), so it is built with them.
 // The tab "Allgemein" becomes "PC-Grafik". Rows not bound yet keep the game's own option.
-static struct { const char *label; const char *text; uint64_t at; } pc_texts[32];   // made from pc_rows (kar_menu_init)
+static struct { const char *label; const char *text; uint64_t at; } pc_texts[64];   // made from pc_rows (kar_menu_init)
 static size_t NPC;
 static volatile int pc_mode;
 static int log_left;
@@ -127,7 +127,9 @@ static void text_record(Cpu *c) {
     const char *label = (const char *)(uintptr_t)c->x[1];
     if (resetting || !label) return;
     size_t n = strlen(label);
-    if (managed(label, n)) remember(c->x[0], c->x[1], 0, label, n);
+    uint64_t ret = *(const uint64_t *)(uintptr_t)(c->x[29] + 8);   // only the display page's value texts: the build
+    if (managed(label, n) && (ret == 0x700300cb08ull || ret == 0x700300e1c8ull))   // loop and the value handler
+        remember(c->x[0], c->x[1], 0, label, n);
 }
 
 static struct { uint64_t comp; char label[64]; } titles[16];
@@ -169,7 +171,7 @@ static void static_record(Cpu *c) {
 // table of the value labels) and the focused row at +0xe90. Entering PC mode puts the setting's index into the row and
 // sets its value text; a change (value_hook, f_700300e100) goes to the setting; leaving PC mode (L/R or B) puts the
 // game's own index back, so the game's option stays as it was.
-typedef struct { const char *game_label, *cfg_val, *text; } PcVal;   // a value: the game's label for it, the setting's value
+typedef struct { const char *game_label, *cfg_val, *text, *help_label, *help; } PcVal;   // the game's label and help label for a value, the setting's value, our texts
 static struct {
     int row;                        // the row of the display page
     const char *key;                // the port setting
@@ -178,7 +180,10 @@ static struct {
     int orig, entered, bound;       // the game's index, the index PC mode started with, bound this time (not set by the environment)
 } pc_rows[] = {
     {1, "TOTK_HUD_POSITION", "Mnu_Opt_Disp_NoviceGuide", "HUD-Position",
-     {{"Mnu_Opt_Disp_NoviceGuide_Off", "centered", "Mitte"}, {"Mnu_Opt_Disp_NoviceGuide_On", "edges", "Rand"}}},
+     {{"Mnu_Opt_Disp_NoviceGuide_Off", "centered", "Mitte", "Mnu_Opt_Disp_NoviceGuide_Off_Help",
+       "Zeigt die Rennanzeigen im mittleren 16:9-Bereich."},
+      {"Mnu_Opt_Disp_NoviceGuide_On", "edges", "Rand", "Mnu_Opt_Disp_NoviceGuide_On_Help",
+       "Setzt die Rennanzeigen an die Bildschirmr\xc3\xa4nder (Breitbild)."}}},
 };
 #define NROWS (sizeof pc_rows / sizeof *pc_rows)
 
@@ -346,6 +351,13 @@ static void menu_tick(Cpu *c) {
     static uint64_t prev;
     uint64_t b = input_game_buttons(), down = b & ~prev;
     prev = b;
+    if (log_match && page_alive()) {   // diagnostic: every value index change of the five rows, as it lands
+        static int32_t seen[5] = {-9, -9, -9, -9, -9};
+        for (int r = 0; r < 5; r++) {
+            int32_t v = *(const int32_t *)(row_at(r) + 0xc);
+            if (v != seen[r]) fprintf(stderr, "kar_menu: f%llu row %d index %d -> %d\n", (unsigned long long)frame_now(), r, seen[r], v), seen[r] = v;
+        }
+    }
     if (!(down & (1u << 0 | 1u << 1 | 1u << 6 | 1u << 7)) || !nrec || !page_alive()) return;
     // A on the cards (no row focused: +0xe90 is -1) opens a sub page: PC mode ends first, as with B
     int a_card = (down & 1u << 0) && *(const int32_t *)(uintptr_t)(page_obj + 0xe90) < 0;
@@ -355,7 +367,9 @@ static void menu_tick(Cpu *c) {
     if (down & (1u << 0 | 1u << 1) && !(down & (1u << 6 | 1u << 7))) {   // B or A on a card: the player leaves the page
         rows_leave(c);
         pc_mode = 0;
+        set_texts(c);
         titles_refresh(c);
+        if (log_match) fprintf(stderr, "kar_menu: f%llu pc mode 0 (leaving the page)\n", (unsigned long long)frame_now());
     } else {   // L or R
         if (pc_mode) rows_leave(c);
         pc_mode = !pc_mode;
@@ -374,8 +388,12 @@ void kar_menu_init(void) {
     pc_texts[NPC++] = (typeof(pc_texts[0])){"Mnu_Opt_Disp_OptMode_Cmn", "PC-Grafik", 0};
     for (size_t i = 0; i < NROWS; i++) {
         pc_texts[NPC++] = (typeof(pc_texts[0])){pc_rows[i].title_label, pc_rows[i].title, 0};
-        for (int j = 0; j < 4 && pc_rows[i].vals[j].game_label && NPC < 32; j++)
-            pc_texts[NPC++] = (typeof(pc_texts[0])){pc_rows[i].vals[j].game_label, pc_rows[i].vals[j].text, 0};
+        for (int j = 0; j < 4 && pc_rows[i].vals[j].game_label; j++) {
+            const PcVal *v = &pc_rows[i].vals[j];
+            if (NPC + 2 > sizeof pc_texts / sizeof *pc_texts) rt_fatal("kar_menu: more PC texts than pc_texts holds");
+            pc_texts[NPC++] = (typeof(pc_texts[0])){v->game_label, v->text, 0};
+            if (v->help_label) pc_texts[NPC++] = (typeof(pc_texts[0])){v->help_label, v->help, 0};
+        }
     }
     size_t off = TEXTS;
     for (size_t i = 0; i < NPC; i++) {
