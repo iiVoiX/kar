@@ -25,6 +25,9 @@
 #define SLOT_PAGE 0x390    // the display page build loop (x19 = the page)
 #define SET_STATIC 0x70011333c0ull  // f_70011333c0(label string, text field): a prefab text (fixed label)
 #define TEXTS 0x400
+#define TITLE_CTX 0xf00                // a resolver context for f_7004d01668 in the patch page (0x50 bytes)
+#define TITLE_UPDATE 0x7004d01668ull   // f_7004d01668(component, context): looks the label (+0x70) up again
+#define TITLE_CALLER 0x7004d016d8ull   // where f_7004d01668 calls the prefab text function
 
 // PC mode of the display page (Anzeige): rows bound to a port setting (pc_rows) show it instead. Labels answered with
 // our own text while pc_mode is on; the page is closed and opened again on a switch (L/R), so it is built with them.
@@ -131,6 +134,10 @@ static void text_record(Cpu *c) {
     if (managed(label, n)) remember(c->x[0], c->x[1], 0, label, n);
 }
 
+static struct { uint64_t comp; char label[64]; } titles[8];
+static int ntitle;
+static uint64_t title_frame;
+
 // f_70011333c0 + 0xc: x0 the label as a string object (byte 0x17 < 0: pointer at +0, length at +8; else inline,
 // length in byte 0x17), x1 the text field. Prefab texts: the row names, the tab, "Zurücksetzen".
 static void static_record(Cpu *c) {
@@ -145,14 +152,14 @@ static void static_record(Cpu *c) {
                 (unsigned long long)frame_now(), (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2],
                 (unsigned long long)c->x[1], (int)(p && n < 64 ? n : 0), p ? p : "");
     }
-    if (log_match && p && n == 24 && !memcmp(p, "Mnu_Opt_Disp_NoviceGuide", 24))   // diagnostic: the caller's registers
-        fprintf(stderr, "kar_menu: title regs x19 %#llx x20 %#llx x21 %#llx x22 %#llx x23 %#llx x24 %#llx x25 %#llx x26 %#llx "
-                        "x27 %#llx x28 %#llx fp %#llx ret %#llx\n",
-                (unsigned long long)c->x[19], (unsigned long long)c->x[20], (unsigned long long)c->x[21],
-                (unsigned long long)c->x[22], (unsigned long long)c->x[23], (unsigned long long)c->x[24],
-                (unsigned long long)c->x[25], (unsigned long long)c->x[26], (unsigned long long)c->x[27],
-                (unsigned long long)c->x[28], (unsigned long long)c->x[29],
-                (unsigned long long)*(const uint64_t *)(uintptr_t)(c->x[29] + 8));
+    // A row title: the engine's text component (x0 - 0x70 holds the label at +0x70) asks for its text. Kept, so a
+    // switch of PC mode can make the component look its label up again (titles_refresh).
+    if (p && n < 64 && managed(p, n) && *(const uint64_t *)(uintptr_t)(c->x[29] + 8) == TITLE_CALLER) {
+        uint64_t now = frame_now();
+        if (now - title_frame > 30) ntitle = 0;
+        title_frame = now;
+        if (ntitle < 8) titles[ntitle].comp = c->x[0] - 0x70, snprintf(titles[ntitle].label, sizeof titles[0].label, "%.*s", (int)n, p), ntitle++;
+    }
     // Prefab texts are not recorded: x1 is a local of the caller on a worker's stack (the caller copies the text into
     // the row itself), so setting it again later writes into a dead stack slot.
 }
@@ -273,6 +280,30 @@ static void rows_leave(Cpu *c) {
     }
 }
 
+// The row titles of the page again (after pc_mode changed): f_7004d01668 resolves each component's label through
+// text_lookup and swaps the text in when it differs. Its context only has to say which function resolves (+0x48,
+// the prefab text function; +0x40 not 0); that function reads x0 and x1 only.
+static int readable(uint64_t a, uint64_t n);
+static void titles_refresh(Cpu *c) {
+    uint8_t *ctx = rt_patch_page() + TITLE_CTX;
+    memset(ctx, 0, 0x50);
+    *(uint64_t *)(ctx + 0x40) = 1;
+    *(uint64_t *)(ctx + 0x48) = SET_STATIC;
+    for (int i = 0; i < ntitle; i++) {
+        uint64_t comp = titles[i].comp;
+        if (!readable(comp, 0x248) || *(const uint8_t *)(uintptr_t)(comp + 0x244)) continue;
+        const uint8_t *str = (const uint8_t *)(uintptr_t)(comp + 0x70);   // the label, as a string object
+        const char *lp = (const char *)str;
+        size_t ln = 23 - (size_t)str[0x17];
+        if ((int8_t)str[0x17] < 0) lp = (const char *)(uintptr_t)*(const uint64_t *)str, ln = *(const uint64_t *)(str + 8);
+        if (ln != strlen(titles[i].label) || !readable((uint64_t)(uintptr_t)lp, ln) || memcmp(lp, titles[i].label, ln)) continue;
+        resetting = 1;
+        rt_call(c, TITLE_UPDATE, 2, comp, (uint64_t)(uintptr_t)ctx);
+        resetting = 0;
+        if (log_match) fprintf(stderr, "kar_menu: title %s refreshed at %#llx\n", titles[i].label, (unsigned long long)comp);
+    }
+}
+
 // 0x7002fe7230 + 0x10, every frame on the game thread. L/R on the display page switch PC mode in place: entering puts
 // the settings into the bound rows, leaving takes the rows' values into the settings and puts the game's values back;
 // the recorded value texts are set again. B in PC mode (the player leaves the page) does the same as leaving.
@@ -299,11 +330,13 @@ static void menu_tick(Cpu *c) {
     if (down & 1u << 1) {   // B: the player leaves the page
         rows_leave(c);
         pc_mode = 0;
+        titles_refresh(c);
     } else {   // L or R
         if (pc_mode) rows_leave(c);
         pc_mode = !pc_mode;
         if (pc_mode) rows_enter(c);
         set_texts(c);
+        titles_refresh(c);
         if (log_match) fprintf(stderr, "kar_menu: f%llu pc mode %d, %d texts set\n", (unsigned long long)frame_now(), pc_mode, nrec);
     }
     memcpy(c->x, save.x, sizeof save.x), memcpy(c->v, save.v, sizeof save.v), c->nzcv = save.nzcv;
