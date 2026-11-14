@@ -367,6 +367,7 @@ static void boot_main(void *arg) {
     kar_wide_init();
     kar_fg_cam_init();
     kar_pace_init();
+    kar_diag_init();
     frame_step_init();
     res_init();
     cb_addr[0] = hostfn_register("<rtld loader_ready>", cb_loader_ready);

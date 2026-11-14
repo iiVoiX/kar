@@ -597,80 +597,67 @@ static struct { VkImage layer; VkFormat fmt; uint32_t w, h; uint64_t frame; int 
 
 // HUD at the screen edges (RELEASE_PLAN 17.3b): hud_position = edges (default) in the race, centered = off;
 // KAR_HUD_EDGES overrides it (1 = in the race, 2 = on every screen, 0 = off).
-// Kirby lays its interface out for 1920x1080 only, so the wide layer holds it in its left 16:9 area. Every second
-// frame every 4th row of that area is read back (hud_cols_read) and compared with the cleared colour the game left in
-// the undrawn part right of it; hud_cols_done finds the empty column gaps. What lies left of the widest gap in the left
-// half then goes to the left screen edge, what lies right of the widest gap in the right half to the right edge, and
-// only when that content starts in the outer eighth of the area (a corner display, not the left word of a banner); the rest (banners, the countdown, anything across the middle) stays centred; a screen with no such gap stays
-// centred as before. The cut found on one frame is used on the frames after it; it stays where it is while its column
-// remains empty, so elements do not hop between the edge and the middle. KAR_HUD_COLS=1 logs the gaps every 2 s.
+// Kirby lays its interface out for 1920x1080 only, so the wide layer holds it in its left 16:9 area. In the race,
+// separately for the top and the bottom half, what lies left of a fixed cut goes to the left screen edge, what lies
+// right of the other to the right edge, and the middle (timer, banners, messages) stays centred (hud_fixed_cut,
+// ui_layer_shift). Fixed cuts, since cuts that followed the content made the HUD hop whenever an element flew in.
+// Guard: every 4th frame every 4th row of the area is read back (hud_cols_read) and compared with the cleared colour
+// the game left in the undrawn part right of it. When tall content lies on a cut for HC_HOLD reads in a row (about a third
+// of a second: a results screen, a full-width banner, not an element flying past) the whole layer goes back to the
+// centre until all cuts have been clear as long. KAR_HUD_COLS=1 logs the state every 2 s.
 int kar_wide_persp_count(void);
 uint64_t kar_pace_count(void);
-#define HC_STEP 4   // rows read
-#define HC_GAP 12   // narrowest gap that counts
-static struct { VkBuffer buf; VmaAllocation mem; void *map; uint32_t w, h, bpp, area, rows; int busy, log;
-                uint8_t col[4096]; int cut_l, cut_r; uint64_t t0, n; } HC;
-static int hud_gap_at(const uint8_t *col, int x) {   // column x and its neighbours are empty
-    for (int i = x - 2; i <= x + 2; i++) if (i < 0 || i >= (int)HC.area || col[i]) return 0;
-    return 1;
-}
-static int hud_cut_ok(const uint8_t *col, int x, int left) {   // a cut that moves a corner display only
-    int a = (int)HC.area, first = -1;
-    if (left) {
-        for (int i = 0; i < x && first < 0; i++) if (col[i]) first = i;
-        return x < a * 2 / 5 && first >= 0 && first < a / 8 && hud_gap_at(col, x);
+#define HC_STEP 4    // rows read
+#define HC_HOLD 12   // reads in a row that switch the guard
+static struct { VkBuffer buf; VmaAllocation mem; void *map; uint32_t w, h, bpp, area, rows; int busy, log, blocked;
+                int cross_n, clear_n, crossed_mask; uint16_t col[2][4096]; uint64_t t0, n, nblocked; } HC;
+// The cuts, in columns of the 1920-wide layout: top left, top right, bottom left, bottom right
+// (KAR_HUD_CUTS=tl,tr,bl,br; default 400,1120,400,1500). The top right one lies left of the tip boxes, the bottom right
+// one left of the speedometer; the top right one between the timer (ends near 1050) and the tip boxes (from 1190).
+static int hud_fixed_cut(int half, int right) {
+    static int cut[4] = {-1};
+    if (cut[0] < 0) {
+        const char *e = getenv("KAR_HUD_CUTS");
+        cut[0] = 400, cut[1] = 1120, cut[2] = 400, cut[3] = 1500;
+        if (e && *e) sscanf(e, "%d,%d,%d,%d", &cut[0], &cut[1], &cut[2], &cut[3]);
+        for (int i = 0; i < 4; i++)
+            if (i & 1 ? cut[i] < 960 || cut[i] > 1920 : cut[i] < 0 || cut[i] > 960) cut[i] = i & 1 ? 1920 : 0;
     }
-    for (int i = a - 1; i >= x && first < 0; i--) if (col[i]) first = i;
-    return x > a * 3 / 5 && first >= 0 && first >= a - a / 8 && hud_gap_at(col, x);
+    return cut[half * 2 + right];
 }
 static void hud_cols_done(void *arg) {
     (void)arg;
     const uint8_t *p = HC.map;
-    uint32_t stride = (HC.area + 1) * HC.bpp, half = HC.area / 2;
-    memset(HC.col, 0, HC.area);
+    uint32_t stride = (HC.area + 1) * HC.bpp;
+    memset(HC.col, 0, sizeof HC.col);
     for (uint32_t r = 0; r < HC.rows; r++) {
         const uint8_t *row = p + (size_t)r * stride, *clear = row + (size_t)HC.area * HC.bpp;
+        uint16_t *col = HC.col[r * HC_STEP >= HC.h / 2];
         for (uint32_t x = 0; x < HC.area; x++)
-            if (!HC.col[x] && memcmp(row + (size_t)x * HC.bpp, clear, HC.bpp)) HC.col[x] = 1;
+            if (memcmp(row + (size_t)x * HC.bpp, clear, HC.bpp)) col[x]++;
     }
-    int l = __atomic_load_n(&HC.cut_l, __ATOMIC_RELAXED), r = __atomic_load_n(&HC.cut_r, __ATOMIC_RELAXED);
-    if (!l || !hud_cut_ok(HC.col, l, 1)) {   // the widest gap with content left of it, in the left half
-        int best = 0, bw = 0, seen = 0;
-        for (uint32_t x = 0; x < half;) {
-            uint32_t e = x;
-            while (e < HC.area && !HC.col[e]) e++;
-            if (e == x) { seen = 1, x++; continue; }
-            if (seen && (int)(e - x) >= HC_GAP && (int)(e - x) > bw) bw = (int)(e - x), best = (int)(x + e) / 2;
-            x = e;
+    int mask = 0;
+    for (int hh = 0; hh < 2; hh++)
+        for (int s = 0; s < 2; s++) {
+            int c = hud_fixed_cut(hh, s) * (int)HC.area / 1920;
+            if (c <= 0 || c >= (int)HC.area) continue;
+            // Tall content on the cut only (a quarter of the half's rows): a results panel or a banner, not the
+            // small markers over the other riders that cross the screen all race long.
+            int tall = (int)(HC.rows / 2) / 4;
+            for (int i = c - 2; i <= c + 2; i++)
+                if (i >= 0 && i < (int)HC.area && HC.col[hh][i] >= tall) { mask |= 1 << (hh * 2 + s); break; }
         }
-        l = best && hud_cut_ok(HC.col, best, 1) ? best : 0;
-    }
-    if (!r || !hud_cut_ok(HC.col, r, 0)) {   // mirrored: the widest gap with content right of it, in the right half
-        int best = 0, bw = 0, seen = 0;
-        for (int x = (int)HC.area - 1; x >= (int)half;) {
-            int e = x;
-            while (e >= 0 && !HC.col[e]) e--;
-            if (e == x) { seen = 1, x--; continue; }
-            if (seen && x - e >= HC_GAP && x - e > bw) bw = x - e, best = (x + e + 2) / 2;
-            x = e;
-        }
-        r = best && hud_cut_ok(HC.col, best, 0) ? best : 0;
-    }
-    __atomic_store_n(&HC.cut_l, l, __ATOMIC_RELAXED);
-    __atomic_store_n(&HC.cut_r, r, __ATOMIC_RELAXED);
-    HC.n++;
+    if (mask) HC.cross_n++, HC.clear_n = 0; else HC.clear_n++, HC.cross_n = 0;
+    if (!HC.blocked && HC.cross_n >= HC_HOLD) __atomic_store_n(&HC.blocked, 1, __ATOMIC_RELAXED);
+    if (HC.blocked && HC.clear_n >= HC_HOLD) __atomic_store_n(&HC.blocked, 0, __ATOMIC_RELAXED);
+    HC.crossed_mask |= mask, HC.n++, HC.nblocked += HC.blocked;
     uint64_t now = plat_now_ns();
     if (!HC.t0) HC.t0 = now;
     if (HC.log && now - HC.t0 >= 2000000000ull) {
-        char t[1024]; int o = 0;
-        for (uint32_t x = 0; x < HC.area && o < (int)sizeof t - 32;) {
-            uint32_t e = x;
-            while (e < HC.area && HC.col[e] == HC.col[x]) e++;
-            if (!HC.col[x]) o += snprintf(t + o, sizeof t - (size_t)o, " %u-%u", x, e - 1);
-            x = e;
-        }
-        rt_log("hud cols: %llu reads, cuts %d/%d, empty on the last:%s", (unsigned long long)HC.n, l, r, o ? t : " none");
-        HC.n = 0, HC.t0 = now;
+        rt_log("hud edges: %llu reads, %llu centred by the guard, cuts crossed (tl tr bl br) %d%d%d%d", (unsigned long long)HC.n,
+               (unsigned long long)HC.nblocked, HC.crossed_mask & 1, HC.crossed_mask >> 1 & 1, HC.crossed_mask >> 2 & 1,
+               HC.crossed_mask >> 3 & 1);
+        HC.n = HC.nblocked = 0, HC.crossed_mask = 0, HC.t0 = now;
     }
     __atomic_store_n(&HC.busy, 0, __ATOMIC_RELEASE);
 }
@@ -696,7 +683,7 @@ static void hud_cols_read(VkExec *ex, uint64_t fr) {
         return;
     }
     uint32_t area = UI.h * 16 / 9;
-    if (area >= UI.w || area > sizeof HC.col || UI.h > 1080) return;
+    if (area >= UI.w || area > sizeof HC.col[0] || UI.h > 1080) return;
     if (!HC.buf) {
         HC.w = UI.w, HC.h = UI.h, HC.bpp = bpp, HC.area = area, HC.rows = (UI.h + HC_STEP - 1) / HC_STEP;
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -789,24 +776,28 @@ static void ui_layer_shift(VkExec *ex) {
         if (persp != persp_last) persp_last = persp, persp_at = tnow;
         if (pace != pace_last) pace_last = pace, pace_at = tnow;
         int race = persp_at && tnow - persp_at < 500000000ull && (!pace_at || tnow - pace_at > 500000000ull);
-        int cl = __atomic_load_n(&HC.cut_l, __ATOMIC_RELAXED), cr = __atomic_load_n(&HC.cut_r, __ATOMIC_RELAXED);
-        if (!cr) cr = (int)area;
-        if (mode && (race || mode == 2) && (cl || cr < (int)area) && cl <= cr && UI.w - area >= 2 * off) {
-            VkImageCopy band[5];
+        if (mode && (race || mode == 2) && !__atomic_load_n(&HC.blocked, __ATOMIC_RELAXED) && UI.w - area >= 2 * off) {
+            VkImageCopy band[10];
             uint32_t nb = 0;
-            const struct { int sx, w, dx; } bands[5] = {
-                {0, cl, 0},                                   // left band, at the left edge
-                {(int)area, (int)off, cl},                    // the gap it leaves, cleared
-                {cl, cr - cl, (int)off + cl},                 // the middle, centred
-                {(int)area, (int)off, (int)off + cr},         // the gap before the right band, cleared
-                {cr, (int)area - cr, 2 * (int)off + cr},      // right band, at the right edge
-            };
-            for (int k = 0; k < 5; k++)
-                if (bands[k].w > 0)
-                    band[nb++] = (VkImageCopy){.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                                               .srcOffset = {bands[k].sx, 0, 0},
-                                               .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                                               .dstOffset = {bands[k].dx, 0, 0}, .extent = {(uint32_t)bands[k].w, UI.h, 1}};
+            for (int hh = 0; hh < 2; hh++) {   // the top and the bottom half, each with its own cuts
+                int cl = hud_fixed_cut(hh, 0) * (int)area / 1920, cr = hud_fixed_cut(hh, 1) * (int)area / 1920;
+                if (cl > cr) cl = 0, cr = (int)area;
+                int y0 = hh ? (int)UI.h / 2 : 0, rows = hh ? (int)UI.h - (int)UI.h / 2 : (int)UI.h / 2;
+                const struct { int sx, w, dx; } bands[5] = {
+                    {0, cl, 0},                                   // left band, at the left edge
+                    {(int)area, (int)off, cl},                    // the gap it leaves, cleared
+                    {cl, cr - cl, (int)off + cl},                 // the middle, centred
+                    {(int)area, (int)off, (int)off + cr},         // the gap before the right band, cleared
+                    {cr, (int)area - cr, 2 * (int)off + cr},      // right band, at the right edge
+                };
+                for (int k = 0; k < 5; k++)
+                    if (bands[k].w > 0)
+                        band[nb++] = (VkImageCopy){.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                                   .srcOffset = {bands[k].sx, y0, 0},
+                                                   .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                                   .dstOffset = {bands[k].dx, y0, 0},
+                                                   .extent = {(uint32_t)bands[k].w, (uint32_t)rows, 1}};
+            }
             vkCmdCopyImage(ex->cb, UI.spare, VK_IMAGE_LAYOUT_GENERAL, UI.layer, VK_IMAGE_LAYOUT_GENERAL, nb, band);
             vkCmdPipelineBarrier2(ex->cb, &d);
             UI.shifted = 1;

@@ -293,6 +293,7 @@ int kar_wide_output(uint32_t w, uint32_t h);              // the target has the 
 int kar_wide_active(void);                                 // the karwide patches are on with a wide size
 void kar_fg_cam_init(void);                               // Kirby camera blocks for frame generation (kar_fg_cam.c), before hostfn_seal
 void kar_pace_init(void);                                 // the game's 60 fps menu limiter off (kar_pace.c), before hostfn_seal
+void kar_diag_init(void);                                 // mutex lock error log (kar_diag.c), before hostfn_seal
 void kar_wide_init(void);                                  // Kirby ultrawide display-size hook (kar_wide.c), before hostfn_seal
 void dkb_camera_init(void);                                // camera patch callbacks, before hostfn_seal
 void frame_step_init(void);                                // after rt_patches_init: the real-time step's first value

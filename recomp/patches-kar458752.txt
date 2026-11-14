@@ -448,3 +448,10 @@ site karfg main 5384b34 b9020c28 b9020c28 @call:3c0   # f_7005384740: last store
 # runtime's frame limit paces those scenes and the game times them by the measured delta.
 set karpace KAR_PACE 1
 site karpace main fb23e8 1e624c62 1e624c62 @call:3e0   # d2 = time left to wait (fcsel), before fcmp d2 / b.le skips the sleep
+
+# Diagnostic (RELEASE_PLAN 3.9, runtime/kar_diag.c): the error returns of the sdk's pthread_mutex_lock (std::mutex::lock
+# throws on them and a race crashed there once). Each site keeps its mov w0, #err and then logs the mutex and the caller.
+set karmutexlog KAR_MUTEX_LOG 1
+site karmutexlog sdk 153d78 52800460 52800460 @call:3f0   # EDEADLK: error-checking mutex already held by this thread
+site karmutexlog sdk 153d9c 52800160 52800160 @call:3f0   # EAGAIN: recursive count overflow
+site karmutexlog sdk 153dd8 528002c0 528002c0 @call:3f0   # EINVAL: type byte above 2 (uninitialised or freed mutex)
