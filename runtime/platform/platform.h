@@ -405,6 +405,7 @@ void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb);
 // resident anonymous pages). 0 when unknown.
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);
 void plat_text_draw(uint8_t *rgba, int w, int h, int x, int y, int px, uint32_t rgb, const char *utf8, int center);   // native text (boot screen)
+extern int plat_text_heavy;   // 1: plat_text_draw uses a black italic face (the boot screen's titles); Windows only
 void plat_thread_cpu_report(void (*log)(const char *line));   // diagnostic: busiest threads since the last call
 void plat_mem_map_report(uint64_t guest_limit, void (*log)(const char *line));   // diagnostic: committed memory by kind
 

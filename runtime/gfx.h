@@ -81,6 +81,7 @@ void gfx_shader_prefetch_cs(const uint8_t *control, const uint8_t *code);
 void gfx_shader_set_prefetch_sink(void (*sink)(const GfxShader *));
 // Frees a compute shader's SPIR-V once its pipeline is built; gfx_shader_spirv loads it again when asked.
 void gfx_shader_drop_spirv(const GfxShader *cs);
+size_t gfx_shader_cs_used_iids(uint8_t (**out)[32]);   // compute inputs of the used list (cs-used.bin), caller frees
 void gfx_shader_drop_all_spirv(void);
 void gfx_shader_note_cs_used(const GfxShader *cs);   // a dispatch used it: cs-used.bin (the compute prefetch list)   // after the boot prewarm: all shaders give their SPIR-V back
 void gfx_shader_mem_stats(uint64_t *n, uint64_t *bytes);   // memory cache: shaders, SPIR-V bytes held

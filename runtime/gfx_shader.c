@@ -4184,6 +4184,23 @@ static CsuEnt *csu_find_file(const uint8_t iid[32]) {
     return CSU.n_file ? bsearch(iid, CSU.v, CSU.n_file, sizeof(CsuEnt), csu_cmp) : NULL;
 }
 
+// The input ids of the compute shaders a dispatch used in one of the last CSU_KEEP sessions, for the prebuild after a
+// driver change (vk_pipeline.c vk_pipeline_cold_warm). The caller frees *out.
+size_t gfx_shader_cs_used_iids(uint8_t (**out)[32]) {
+    *out = NULL;
+    paths();
+    if (!cache_dir[0]) return 0;
+    plat_mutex_lock(&CSU.m);
+    if (!CSU.loaded) csu_load();
+    size_t n = 0;
+    uint8_t (*v)[32] = malloc((CSU.n_file + 1) * 32);
+    for (size_t i = 0; v && i < CSU.n_file; i++)
+        if (CSU.v[i].session + CSU_KEEP > CSU.session) memcpy(v[n++], CSU.v[i].iid, 32);
+    plat_mutex_unlock(&CSU.m);
+    *out = v;
+    return n;
+}
+
 // A dispatch used cs (vk_exec_draw.c shader_for): its input enters this session's list once.
 void gfx_shader_note_cs_used(const GfxShader *cs) {
     if (!cs || cs->stage != GFX_STAGE_CS || cs->used_noted) return;
@@ -4305,7 +4322,7 @@ static void pf_worker(void *arg) {
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
     paths();
     plat_mutex_lock(&CSU.m);
-    if (cache_dir[0]) csu_load();
+    if (cache_dir[0] && !CSU.loaded) csu_load();   // the cold-driver prebuild may have loaded it (gfx_shader_cs_used_iids)
     plat_mutex_unlock(&CSU.m);
     if (cache_dir[0]) pf_index();
     for (;;) {

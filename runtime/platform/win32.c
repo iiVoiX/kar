@@ -1687,13 +1687,16 @@ void plat_thread_cpu_report(void (*log)(const char *line)) {
 
 // Native text for the boot screen (boot_screen.c): utf8 drawn with the system's UI font (GDI, antialiased) into an
 // RGBA buffer, blended in the colour rgb (0xRRGGBB). x is the left edge, or the centre when center is set; y the top.
+int plat_text_heavy;
+
 void plat_text_draw(uint8_t *rgba, int w, int h, int x, int y, int px, uint32_t rgb, const char *utf8, int center) {
     wchar_t text[256];
     int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, text, 256);
     if (n <= 1) return;
     HDC dc = CreateCompatibleDC(NULL);
-    HFONT font = CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    HFONT font = CreateFontW(-px, 0, 0, 0, plat_text_heavy ? FW_BLACK : FW_SEMIBOLD, plat_text_heavy, 0, 0,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH,
+                             plat_text_heavy ? L"Segoe UI Black" : L"Segoe UI");
     HGDIOBJ oldf = SelectObject(dc, font);
     SIZE sz;
     GetTextExtentPoint32W(dc, text, n - 1, &sz);

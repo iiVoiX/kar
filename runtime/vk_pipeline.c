@@ -4722,3 +4722,92 @@ void vk_pipeline_prewarm_progress(uint32_t *done, uint32_t *total) {
     *total = prewarm_queued;
     *done = K.built + K.failed;
 }
+
+// ---- prebuild after a driver change (RELEASE_PLAN 13.3)
+// With a cold driver cache (a first start, or the first after a driver update) every compute pipeline takes the
+// NVIDIA compiler 1-16 s (the lowered programs are ~1 MB of SPIR-V each, and their form does not change that), and one
+// frame needs many of them: single frames stood for minutes. So when the driver differs from the one driver-warm.bin
+// (beside the exe) names, the boot builds every compute shader of the used list (gfx_shader_cs_used_iids) before the
+// guest starts, under the boot screen (gfx_present.c), on several threads, and destroys each pipeline again: only the
+// driver's disk cache is filled, a dispatch later builds it again from that cache at little cost, and no driver memory
+// stays held. driver-warm.bin is written when all are done, so a start that was closed halfway continues (the built
+// ones are cache hits by then). KAR_CS_COLD=1 builds regardless, =0 never; KAR_CS_COLD_THREADS sets the threads.
+typedef struct { uint32_t magic, vendor, device, driver; uint8_t uuid[VK_UUID_SIZE]; } CwMark;
+static struct { uint8_t (*iids)[32]; size_t n; volatile int64_t next; volatile int32_t done, built; int32_t total; } CW;
+
+void vk_pipeline_cold_progress(uint32_t *done, uint32_t *total) {
+    *done = (uint32_t)__atomic_load_n(&CW.done, __ATOMIC_RELAXED);
+    *total = (uint32_t)CW.total;
+}
+
+static int cw_path(char *p, size_t cap) {
+    int n = plat_exe_path(p, cap);
+    if (!n || (size_t)n >= cap) return 0;
+    char *cut = plat_last_sep(p);
+    if (!cut) return 0;
+    *cut = 0;
+    return snprintf(cut, cap - (size_t)(cut - p), "/driver-warm.bin") < (int)(cap - (size_t)(cut - p));
+}
+
+static void cw_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        size_t i = (size_t)plat_inc64(&CW.next) - 1;
+        if (i >= CW.n) return;
+        const GfxShader *cs = gfx_shader_load_input(CW.iids[i], 1);
+        if (cs && gfx_shader_stage(cs) == GFX_STAGE_CS) {
+            Bindings B = {0};
+            const char *why = NULL;
+            plat_mutex_lock(&P.lock);
+            Layout *l = compute_layout(cs, &B, &why);
+            plat_mutex_unlock(&P.lock);
+            if (l && !why) {
+                VkPipeline pipe = compute_create(cs, l);
+                if (pipe) vkDestroyPipeline(P.device, pipe, NULL), plat_inc32(&CW.built);
+            }
+            gfx_shader_drop_spirv(cs);   // loaded again from disk when a dispatch needs it
+        }
+        plat_inc32(&CW.done);
+    }
+}
+
+void vk_pipeline_cold_warm(void) {
+    const char *e = getenv("KAR_CS_COLD");
+    if (e && e[0] == '0') return;
+    if (!ensure_init()) return;
+    VkCtx *c = vk_ctx();
+    CwMark want = {.magic = 0x4d57434bu, .vendor = c->props.vendorID, .device = c->props.deviceID,
+                   .driver = c->props.driverVersion};
+    memcpy(want.uuid, c->props.pipelineCacheUUID, VK_UUID_SIZE);
+    char path[PLAT_PATH_MAX * 2];
+    if (!cw_path(path, sizeof path)) return;
+    uint64_t sz = 0;
+    uint8_t *have = plat_file_read(path, &sz);
+    int same = have && sz == sizeof want && !memcmp(have, &want, sizeof want);
+    free(have);
+    if (same && !(e && e[0] == '1')) return;
+    CW.n = gfx_shader_cs_used_iids(&CW.iids);
+    if (!CW.n) {   // nothing known yet (a first start without lists): nothing to build, the marker waits for one
+        free(CW.iids);
+        return;
+    }
+    CW.total = (int32_t)CW.n;
+    const char *te = getenv("KAR_CS_COLD_THREADS");
+    int cpus = (int)plat_cpu_usable(), nt = te ? atoi(te) : cpus / 2;
+    nt = nt < 1 ? 1 : nt > 8 ? 8 : nt;   // the driver's compiler holds ~1 GB a thread with these shaders (16.10)
+    rt_log("vk_pipeline: new driver (%#x) or first start: building %zu compute shaders of the used list on %d threads "
+           "before the game starts (driver cache only)", want.driver, CW.n, nt);
+    uint64_t t0 = plat_now_ms();
+    PlatThread *t[8];
+    int k = 0;
+    for (int i = 0; i < nt; i++)
+        if ((t[k] = plat_thread_new(cw_worker, NULL, "vk cold prebuild"))) k++;
+    if (!k) cw_worker(NULL);
+    for (int i = 0; i < k; i++) plat_thread_join(t[i]);
+    rt_log("vk_pipeline: cold prebuild: %d of %zu compute pipelines built in %llu s", CW.built, CW.n,
+           (unsigned long long)((plat_now_ms() - t0) / 1000));
+    free(CW.iids), CW.iids = NULL;
+    FILE *f = fopen(path, "wb");
+    if (f) fwrite(&want, sizeof want, 1, f), fclose(f);
+}
+

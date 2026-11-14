@@ -856,11 +856,14 @@ void gfx_window_start(void) {
 
 // ---- boot screen
 // Boot screen: while the boot prewarm loads shaders and builds pipelines (boot.c boot_main, before the guest starts),
-// a thread draws a native screen (no UI library): a gradient, the title, what is being prepared and a progress bar,
-// rendered on the CPU into an RGBA image (text through plat_text_draw), uploaded and shown with vk_present_image.
-// On a warm driver cache it shows for about a second; on a first start or after a driver update the prewarm compiles
-// for minutes, and without it the window stayed black. TOTK_BOOT_SCREEN=0 turns it off.
+// a thread draws a native screen (no UI library) in the look of the game's own menus (RELEASE_PLAN 13.3): a red
+// sunburst turning slowly behind a warm glow, slanted black title bands with white black-italic type, a slanted
+// yellow progress bar with a Warp Star riding its head, and a few twinkling stars. It is rendered on the CPU into an
+// RGBA image (shapes by bs_poly, text through plat_text_draw), uploaded and shown with vk_present_image. On a warm
+// driver cache it shows for about a second; after a driver change the compute prebuild (vk_pipeline_cold_warm) keeps
+// it up for minutes, and it says so. TOTK_BOOT_SCREEN=0 turns it off; KAR_BOOT_SHOT=<png> writes its first frame.
 void vk_pipeline_prewarm_progress(uint32_t *done, uint32_t *total);
+void vk_pipeline_cold_progress(uint32_t *done, uint32_t *total);
 void gfx_shader_prewarm_progress(uint64_t *done, uint64_t *total);
 
 #define BS_W 1280
@@ -869,20 +872,86 @@ void gfx_shader_prewarm_progress(uint64_t *done, uint64_t *total);
 static volatile int32_t bs_run;
 static PlatThread *bs_thread;
 
-static void fill_rect(uint8_t *px, int x0, int y0, int x1, int y1, uint32_t rgb) {
-    for (int y = y0 < 0 ? 0 : y0; y < y1 && y < BS_H; y++)
-        for (int x = x0 < 0 ? 0 : x0; x < x1 && x < BS_W; x++) {
-            uint8_t *d = px + ((size_t)y * BS_W + x) * 4;
-            d[0] = (uint8_t)(rgb >> 16), d[1] = (uint8_t)(rgb >> 8), d[2] = (uint8_t)rgb, d[3] = 255;
-        }
+static void blend_px(uint8_t *px, int x, int y, uint32_t rgb, unsigned a) {   // a: 0..255 coverage
+    if (x < 0 || y < 0 || x >= BS_W || y >= BS_H || !a) return;
+    uint8_t *d = px + ((size_t)y * BS_W + x) * 4;
+    d[0] = (uint8_t)((d[0] * (255 - a) + (rgb >> 16 & 255) * a) / 255);
+    d[1] = (uint8_t)((d[1] * (255 - a) + (rgb >> 8 & 255) * a) / 255);
+    d[2] = (uint8_t)((d[2] * (255 - a) + (rgb & 255) * a) / 255);
+    d[3] = 255;
 }
 
-// Progress 0..1 and the line saying what is prepared: the shaders first, then the pipelines.
-static double progress(const char **what) {
+// A filled polygon (even-odd, any shape), anti-aliased with 4 sub-rows and fractional span ends.
+static void bs_poly(uint8_t *px, const double *xy, int n, uint32_t rgb, unsigned alpha) {
+    double y0 = 1e9, y1 = -1e9;
+    for (int i = 0; i < n; i++) y0 = xy[2 * i + 1] < y0 ? xy[2 * i + 1] : y0, y1 = xy[2 * i + 1] > y1 ? xy[2 * i + 1] : y1;
+    int ya = (int)floor(y0) < 0 ? 0 : (int)floor(y0), yb = (int)ceil(y1) > BS_H ? BS_H : (int)ceil(y1);
+    static float cov[BS_W + 2];
+    for (int y = ya; y < yb; y++) {
+        memset(cov, 0, sizeof cov);
+        int lo = BS_W, hi = 0;
+        for (int sub = 0; sub < 4; sub++) {
+            double sy = y + (sub + 0.5) / 4, xs[32];
+            int k = 0;
+            for (int i = 0; i < n && k < 32; i++) {
+                double ax = xy[2 * i], ay = xy[2 * i + 1], bx = xy[2 * ((i + 1) % n)], by = xy[2 * ((i + 1) % n) + 1];
+                if ((ay <= sy) != (by <= sy)) xs[k++] = ax + (sy - ay) / (by - ay) * (bx - ax);
+            }
+            for (int i = 1; i < k; i++)
+                for (int j = i; j > 0 && xs[j - 1] > xs[j]; j--) { double tt = xs[j]; xs[j] = xs[j - 1], xs[j - 1] = tt; }
+            for (int i = 0; i + 1 < k; i += 2) {
+                double l = xs[i] < 0 ? 0 : xs[i], r = xs[i + 1] > BS_W ? BS_W : xs[i + 1];
+                if (r <= l) continue;
+                int li = (int)l, ri = (int)r;
+                lo = li < lo ? li : lo, hi = ri + 1 > hi ? ri + 1 : hi;
+                if (li == ri) { cov[li] += (float)(r - l) / 4; continue; }
+                cov[li] += (float)(li + 1 - l) / 4;
+                for (int x = li + 1; x < ri; x++) cov[x] += 0.25f;
+                if (ri < BS_W) cov[ri] += (float)(r - ri) / 4;
+            }
+        }
+        for (int x = lo; x < hi && x < BS_W; x++)
+            if (cov[x] > 0) blend_px(px, x, y, rgb, (unsigned)((cov[x] > 1 ? 1 : cov[x]) * alpha));
+    }
+}
+
+static void bs_quad(uint8_t *px, double x0, double y0, double x1, double y1, double slant, uint32_t rgb, unsigned a) {
+    double q[8] = {x0 + slant, y0, x1 + slant, y0, x1, y1, x0, y1};   // a parallelogram leaning right, like the menus
+    bs_poly(px, q, 4, rgb, a);
+}
+
+static void bs_star(uint8_t *px, double cx, double cy, double r, double rot, uint32_t rgb, unsigned a) {
+    double v[20];
+    for (int i = 0; i < 10; i++) {
+        double ang = rot - M_PI / 2 + i * M_PI / 5, rr = i & 1 ? r * 0.45 : r;
+        v[2 * i] = cx + cos(ang) * rr, v[2 * i + 1] = cy + sin(ang) * rr;
+    }
+    bs_poly(px, v, 10, rgb, a);
+}
+
+static void bs_text(uint8_t *px, int x, int y, int size, uint32_t rgb, const char *t, int center, int heavy) {
+    plat_text_heavy = heavy;
+    plat_text_draw(px, BS_W, BS_H, x + 3, y + 3, size, 0x000000, t, center);   // hard drop shadow, as in the menus
+    plat_text_draw(px, BS_W, BS_H, x, y, size, rgb, t, center);
+    plat_text_heavy = 0;
+}
+
+// Progress 0..1, the line saying what is prepared, and a second line (counts, the one-off note) or "".
+static double progress(const char **what, char *detail, size_t cap) {
     uint64_t sd, st;
-    uint32_t pd, pt;
+    uint32_t pd, pt, cd, ct;
     gfx_shader_prewarm_progress(&sd, &st);
     vk_pipeline_prewarm_progress(&pd, &pt);
+    vk_pipeline_cold_progress(&cd, &ct);
+    detail[0] = 0;
+    const char *demo = getenv("KAR_BOOT_DEMO");   // design check: a fixed cold-prebuild state
+    if (demo && *demo) cd = 431, ct = 1164;
+    if (ct) {
+        *what = "Shader werden f\xc3\xbcr deinen Grafiktreiber gebaut";
+        snprintf(detail, cap, "%u von %u  \xc2\xb7  einmalig nach einem Treiber-Update, das dauert einige Minuten",
+                 cd < ct ? cd : ct, ct);
+        return (double)(cd < ct ? cd : ct) / ct;
+    }
     if (pt) { *what = "Pipelines werden vorbereitet"; return 0.5 + 0.5 * (pd < pt ? pd : pt) / pt; }
     if (st) { *what = "Shader-Cache wird geladen"; return 0.5 * (sd < st ? sd : st) / st; }
     *what = "Wird gestartet";
@@ -890,26 +959,58 @@ static double progress(const char **what) {
 }
 
 static void render(uint8_t *px, uint64_t t_ms) {
-    for (int y = 0; y < BS_H; y++) {   // vertical gradient, pink to deep rose
-        double f = (double)y / BS_H;
-        uint32_t r = (uint32_t)(0xf7 + (0xc8 - 0xf7) * f), g = (uint32_t)(0xa8 + (0x5a - 0xa8) * f),
-                 b = (uint32_t)(0xc8 + (0x8c - 0xc8) * f);
-        fill_rect(px, 0, y, BS_W, y + 1, r << 16 | g << 8 | b);
+    double t = t_ms / 1000.0, cx = BS_W * 0.62, cy = BS_H * 0.40;
+    // Sunburst: 18 ray pairs turning slowly, two reds, brighter toward the glow.
+    for (int y = 0; y < BS_H; y++)
+        for (int x = 0; x < BS_W; x++) {
+            double dx = x - cx, dy = y - cy, ang = atan2(dy, dx) + t * 0.08, d = sqrt(dx * dx + dy * dy);
+            int ray = (int)floor(ang / (M_PI / 18) + 36) & 1;
+            double g = 1.0 - d / 900.0;
+            g = g < 0 ? 0 : g;
+            double r = ray ? 0xd8 : 0xc0, gg = ray ? 0x1c : 0x10, b = ray ? 0x22 : 0x18;
+            r += (255 - r) * g * 0.35, gg += (0xb0 - gg) * g * g * 0.8, b += (0x30 - b) * g * 0.3;
+            uint8_t *q = px + ((size_t)y * BS_W + x) * 4;
+            q[0] = (uint8_t)r, q[1] = (uint8_t)gg, q[2] = (uint8_t)b, q[3] = 255;
+        }
+    for (int i = 6; i >= 1; i--) {   // the warm glow
+        double v[64], rr = 40.0 * i;
+        for (int k = 0; k < 32; k++) v[2 * k] = cx + cos(k * M_PI / 16) * rr, v[2 * k + 1] = cy + sin(k * M_PI / 16) * rr;
+        bs_poly(px, v, 32, 0xffd860, 22);
     }
+    // Twinkling stars.
+    static const double sp[][3] = {{120, 120, 18}, {1180, 90, 14}, {1040, 660, 22}, {1200, 470, 12}, {640, 70, 10},
+                                   {900, 250, 9}, {420, 380, 8}, {1220, 260, 11}};
+    for (size_t i = 0; i < sizeof sp / sizeof sp[0]; i++) {
+        double tw = 0.6 + 0.4 * sin(t * 2.2 + i * 1.7);
+        bs_star(px, sp[i][0], sp[i][1] + 4 * sin(t * 1.3 + i), sp[i][2] * tw, t * 0.6 + i, 0xfff3a0, (unsigned)(200 * tw));
+    }
+    // Title: a black slanted band from the left edge with a yellow edge and white black-italic type.
+    bs_quad(px, -40, 150, 760, 250, 26, 0x111111, 235);
+    bs_quad(px, -40, 250, 760, 258, 26, 0xffd400, 255);
+    bs_text(px, 70, 160, 64, 0xffffff, "KIRBY AIR RIDERS", 0, 1);
+    // Status band, the bar and its percent tag.
     const char *what;
-    double p = progress(&what);
-    plat_text_draw(px, BS_W, BS_H, BS_W / 2, 230, 64, 0xffffff, "Kirby Air Riders", 1);
-    plat_text_draw(px, BS_W, BS_H, BS_W / 2, 310, 24, 0xfff0f6, "PC-Port", 1);
-    int bx0 = BS_W / 5, bx1 = BS_W - BS_W / 5, by0 = 470, by1 = 494;
-    fill_rect(px, bx0 - 2, by0 - 2, bx1 + 2, by1 + 2, 0xffffff);   // frame
-    fill_rect(px, bx0, by0, bx1, by1, 0xb04a7c);                   // track
-    fill_rect(px, bx0, by0, bx0 + (int)((bx1 - bx0) * p), by1, 0xffffff);
+    char detail[160];
+    double p = progress(&what, detail, sizeof detail);
+    bs_quad(px, -40, 470, 980, 520, 18, 0x111111, 220);
+    char line[128];
+    snprintf(line, sizeof line, "%s%.*s", what, (int)(t_ms / 400 % 4), "...");
+    bs_text(px, 70, 476, 30, 0xffffff, line, 0, 1);
+    double bx0 = 90, bx1 = 1060, by0 = 560, by1 = 596, sl = 14;
+    bs_quad(px, bx0 - 6, by0 - 6, bx1 + 6, by1 + 6, sl, 0xffffff, 255);   // frame
+    bs_quad(px, bx0, by0, bx1, by1, sl, 0x2a2a2a, 255);                   // track
+    double fx = bx0 + (bx1 - bx0) * p;
+    if (fx > bx0) bs_quad(px, bx0, by0, fx, by1, sl, 0xffd400, 255);
+    if (fx > bx0 + 4) bs_quad(px, bx0, by0, fx, by0 + 9, sl * 0.25, 0xfff2a0, 255);   // highlight
+    bs_star(px, fx + 10, (by0 + by1) / 2 - 2, 30, t * 2.5, 0x6b3a00, 255);           // Warp Star: outline
+    bs_star(px, fx + 10, (by0 + by1) / 2 - 2, 25, t * 2.5, 0xffe14a, 255);
     char pct[16];
     snprintf(pct, sizeof pct, "%d%%", (int)(p * 100 + 0.5));
-    plat_text_draw(px, BS_W, BS_H, BS_W / 2, by1 + 14, 22, 0xffffff, pct, 1);
-    char line[96];
-    snprintf(line, sizeof line, "%s%.*s", what, (int)(t_ms / 400 % 4), "...");
-    plat_text_draw(px, BS_W, BS_H, bx0, by0 - 44, 26, 0xffffff, line, 0);
+    bs_quad(px, 1090, 556, 1230, 600, 14, 0xffd400, 255);
+    plat_text_heavy = 1;
+    plat_text_draw(px, BS_W, BS_H, 1166, 559, 30, 0x111111, pct, 1);
+    plat_text_heavy = 0;
+    if (detail[0]) bs_text(px, 92, 616, 22, 0xffffff, detail, 0, 0);
 }
 
 static void bs_main(void *arg) {

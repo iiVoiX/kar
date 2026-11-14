@@ -1664,6 +1664,8 @@ long plat_child_read(PlatChild *c, void *buf, size_t cap) {
 }
 
 // Native text for the boot screen (boot_screen.c): not drawn on this OS yet; the screen shows its bar alone.
+int plat_text_heavy;
+
 void plat_text_draw(uint8_t *rgba, int w, int h, int x, int y, int px, uint32_t rgb, const char *utf8, int center) {
     (void)rgba, (void)w, (void)h, (void)x, (void)y, (void)px, (void)rgb, (void)utf8, (void)center;
 }

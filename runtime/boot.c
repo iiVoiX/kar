@@ -340,11 +340,13 @@ static void guest_main(Cpu *c) {
 }
 
 void boot_screen_start(void);
+void vk_pipeline_cold_warm(void);
 void boot_screen_stop(void);
 
 static void prewarm_main(void *arg) {
     (void)arg;
     vk_pipeline_prewarm();
+    vk_pipeline_cold_warm();   // after a driver change: the used compute shaders, under the boot screen (13.3)
     const char *prep = cfg_get("TOTK_TEST_PREPARE_SHADERS");   // Task 2.3 test hook; Task 2.6 builds the preparation
     if (prep && !strcmp(prep, "1")) {
         int cpus = (int)plat_cpu_usable();
