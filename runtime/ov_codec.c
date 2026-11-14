@@ -251,19 +251,31 @@ static void ov_calc_size(Cpu *c) {
     ret_x(c, 0);
 }
 
+static void clear_event(Cpu *c, uint64_t ev);
+
 // A guest SystemEventType (manual clear) standing for the game object at `key`: the same one for the same object, so
 // movie after movie reuses the events instead of filling the kernel's table of bound events. Guest thread only.
 // ponytail: 64 objects, linear scan; the player has one decoder and 15 sync point events.
 static uint64_t event_for(Cpu *c, uint64_t key) {
     static struct { uint64_t key, ev; } tab[64];
-    static int n;
+    static int n, victim;
     static PlatMutex tlock = PLAT_MUTEX_INIT;
     plat_mutex_lock(&tlock);
     uint64_t ev = 0;
     for (int i = 0; i < n && !ev; i++)
         if (tab[i].key == key) ev = tab[i].ev;
     if (!ev) {
-        if (n == 64) rt_fatal("codec: more than 64 decoder and sync point objects");
+        if (n == 64) {
+            // The player allocates a new decoder and 15 new sync point events for every movie, at new addresses (the
+            // Online-Match notice loops a background movie): the oldest object's event is handed to this one, already
+            // bound, and cleared (RELEASE_PLAN 7.2: this was a FATAL after a few minutes in the notice).
+            ev = tab[victim].ev;
+            tab[victim].key = key;
+            victim = (victim + 1) % 64;
+            plat_mutex_unlock(&tlock);
+            clear_event(c, ev);
+            return ev;
+        }
         ev = (uint64_t)(uintptr_t)mem_kernel_alloc(0x100, 16);
         tab[n].key = key, tab[n++].ev = ev;
     }

@@ -142,7 +142,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 | # | Punkt | Art | Status |
 |---|---|---|---|
 | 7.1 | Lokaler Splitscreen (2–4 Spieler): mehrere Ansichten, mehrere Controller | SPIEL | ⬜ |
-| 7.2 | Online/LAN abschalten bzw. sauber als „nicht verfügbar“ melden (kein Absturz beim Öffnen) | OHNE + SPIEL | ⬜ |
+| 7.2 | Online/LAN abschalten bzw. sauber als „nicht verfügbar“ melden (kein Absturz beim Öffnen) | OHNE + SPIEL | 🔧 **2026-11-14:** Online-Match im Air-Ride-Menü öffnet den Hinweis „Instabile Kommunikationsumgebungen“. **Absturz gefunden und behoben:** das Spiel spielt im Menü Vorschaufilme in Schleife und legt je Film einen neuen VP9-Decoder samt 15 Sync-Events an neuen Adressen an; `ov_codec.c event_for` brach bei 64 Objekten mit FATAL ab (nach ~5 min) → jetzt wird das älteste Event wiederverwendet (103 Decoder in einem 12-min-Lauf ohne Fehler). **Ungeprüft:** was nach „OK“ im Hinweis passiert (Verbindungsversuch/Fehlermeldung); der Hinweis reagierte im Lauf nicht auf A (evtl. erst nach Scrollen). |
 | 7.3 | City Trial: Stadt mit vielen Objekten (Performance, fehlende Effekte) | SPIEL | ⬜ |
 | 7.4 | Top Ride (Draufsicht-Modus) und Road Trip (Story) einmal komplett | SPIEL | ⬜ |
 | 7.5 | Zwischensequenzen und Videos (Film-Decoder `ov_movie2.c`) in allen Modi | SPIEL | ⬜ |
