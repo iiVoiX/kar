@@ -754,6 +754,94 @@ int vk_mem_bda_table(const VkBdaEntry **out, uint64_t *gen) {
     return bda_n;
 }
 
+// ---- BDA descriptor set (set 3): a single SSBO holding the sorted BDA lookup table.
+// Created lazily on first call; the SSBO is updated when bda_gen changes.
+static struct {
+    VkDescriptorSetLayout layout;
+    VkDescriptorPool pool;
+    VkDescriptorSet set;
+    VkBuffer buf;
+    VmaAllocation alloc;
+    uint64_t gen;       // bda_gen when the buffer was last uploaded
+    uint32_t cap;       // current buffer capacity in entries
+} bda_gpu;
+
+VkDescriptorSetLayout vk_bda_layout(void) {
+    VkCtx *c = vk_ctx();
+    if (!c->has_buffer_device_address) return VK_NULL_HANDLE;
+    if (bda_gpu.layout) return bda_gpu.layout;
+    VkDescriptorSetLayoutBinding b = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                      .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL};
+    VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                          .bindingCount = 1, .pBindings = &b};
+    if (vkCreateDescriptorSetLayout(c->device, &ci, NULL, &bda_gpu.layout) != VK_SUCCESS)
+        bda_gpu.layout = VK_NULL_HANDLE;
+    return bda_gpu.layout;
+}
+
+static void bda_gpu_ensure_buffer(VkCtx *c, int n) {
+    uint32_t need = n > 0 ? (uint32_t)n : 1;
+    if (bda_gpu.cap >= need) return;
+    if (bda_gpu.buf) vmaDestroyBuffer(c->vma, bda_gpu.buf, bda_gpu.alloc);
+    uint32_t cap = bda_gpu.cap ? bda_gpu.cap : 64;
+    while (cap < need) cap *= 2;
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                             .size = (VkDeviceSize)cap * sizeof(VkBdaEntry) + sizeof(uint32_t),
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_CPU_TO_GPU};
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &bda_gpu.buf, &bda_gpu.alloc, NULL) != VK_SUCCESS) {
+        bda_gpu.buf = VK_NULL_HANDLE;
+        bda_gpu.cap = 0;
+        return;
+    }
+    bda_gpu.cap = cap;
+    bda_gpu.gen = 0;
+}
+
+VkDescriptorSet vk_bda_set(void) {
+    VkCtx *c = vk_ctx();
+    if (!c->has_buffer_device_address) return VK_NULL_HANDLE;
+    if (!vk_bda_layout()) return VK_NULL_HANDLE;
+
+    uint64_t gen = bda_gen;
+    if (bda_gpu.set && bda_gpu.gen == gen) return bda_gpu.set;
+
+    bda_gpu_ensure_buffer(c, bda_n);
+    if (!bda_gpu.buf) return VK_NULL_HANDLE;
+
+    if (!bda_gpu.set) {
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1,
+                                         .poolSizeCount = 1, .pPoolSizes = &ps};
+        if (vkCreateDescriptorPool(c->device, &pi, NULL, &bda_gpu.pool) != VK_SUCCESS) return VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo da = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                          .descriptorPool = bda_gpu.pool, .descriptorSetCount = 1,
+                                          .pSetLayouts = &bda_gpu.layout};
+        if (vkAllocateDescriptorSets(c->device, &da, &bda_gpu.set) != VK_SUCCESS) {
+            bda_gpu.set = VK_NULL_HANDLE;
+            return VK_NULL_HANDLE;
+        }
+    }
+
+    void *mapped;
+    if (vmaMapMemory(c->vma, bda_gpu.alloc, &mapped) == VK_SUCCESS) {
+        uint32_t *head = mapped;
+        *head = (uint32_t)bda_n;
+        memcpy(head + 1, bda_table, (size_t)bda_n * sizeof(VkBdaEntry));
+        vmaUnmapMemory(c->vma, bda_gpu.alloc);
+        vmaFlushAllocation(c->vma, bda_gpu.alloc, 0, VK_WHOLE_SIZE);
+    }
+
+    VkDescriptorBufferInfo di = {.buffer = bda_gpu.buf, .offset = 0,
+                                 .range = sizeof(uint32_t) + (VkDeviceSize)bda_n * sizeof(VkBdaEntry)};
+    VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = bda_gpu.set,
+                              .dstBinding = 0, .descriptorCount = 1,
+                              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &di};
+    vkUpdateDescriptorSets(c->device, 1, &w, 0, NULL);
+    bda_gpu.gen = gen;
+    return bda_gpu.set;
+}
+
 int vk_mem_class_of(uint64_t addr) {
     VkMemSpan m;
     return vk_mem_resolve(addr, 1, &m) ? m.cls : VK_MCLS_NONE;

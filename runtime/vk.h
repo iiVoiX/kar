@@ -81,6 +81,10 @@ void vk_bindless_put_image(int kind, uint32_t id, VkImageView view, VkImageLayou
 void vk_bindless_put_sampler(uint32_t id, VkSampler s);
 void vk_bindless_flush(void);                                  // pending writes, before a submission that reads the set
 uint64_t vk_bindless_writes(void);                        // NULL until vk_init() succeeded
+// ---- BDA lookup table (vk_memory.c, RELEASE_PLAN 16.3): a global SSBO at set 3 holding the sorted
+// {guest_lo, guest_hi, device_address} table for PhysicalStorageBuffer lookups in translated shaders.
+VkDescriptorSetLayout vk_bda_layout(void);                     // VK_NULL_HANDLE when BDA is off
+VkDescriptorSet vk_bda_set(void);                              // the set with the current BDA table; updates lazily
 int vk_init(void);                          // idempotent; 1 on success, 0 on failure (reason logged with rt_log)
 void vk_shutdown(void);
 int vk_selftest(void);                      // 0 on success

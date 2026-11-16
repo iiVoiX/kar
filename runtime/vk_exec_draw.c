@@ -3123,6 +3123,17 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             ex->recorded++;
         }
     }
+    {   // BDA lookup table (vk_memory.c, 16.3): the sorted table as set 3, bound like the bindless set
+        static VkCommandBuffer bda_cb[2];
+        static VkPipelineLayout bda_layout[2];
+        int k = !gfx;
+        VkDescriptorSet bdas = vk_bda_set();
+        if (bdas && (bda_cb[k] != ex->cb || bda_layout[k] != info->layout)) {
+            vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 3, 1, &bdas, 0, NULL);
+            bda_cb[k] = ex->cb, bda_layout[k] = info->layout;
+            ex->recorded++;
+        }
+    }
     for (uint32_t k = 0; k < n_sets; k++) {
         uint32_t s = set1_first ? 1 - k : k, i0 = lo[s], i1 = hi[s];
         const VkDescSlot *ds = &d[d0[s]];
