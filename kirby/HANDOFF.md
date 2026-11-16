@@ -16,7 +16,7 @@ Kept short on purpose (token use). Full history: `HANDOFF_ARCHIV.md`; plan and s
 (from dkb-pc-recomp; ~1 min for runtime changes). FidelityFX SDK: `tools/build_ffx.py` (only when its patches change;
 afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 
-## Testing (needs the user's OK to start the game)
+## Testing (test runs need no OK, standing permission 2026-11-14; never while WardogsClient runs)
 - Never while `WardogsClient*` runs (`tasklist | grep -i wardogs`); the test script refuses then.
 - Race: profile `build/profile-kar-fresh` (delete its save/, save-backup/, cache/ first), script
   `kirby/scripts/fresh_race.txt`, `TOTK_FPS_LIMIT=60`, race from frame ~3600:
@@ -40,12 +40,14 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   `ffxFrameInterpolationPrepare` in vk_fg.cpp; then B3 HUD-less picture (DLSS stand-in output before the composite).
 - Test `KAR_POOL_BL=1` (menu_mail2.txt, bubble at 2300).
 
-## Stand 2026-11-17 (16.3 P3a ✅, P3b geplant)
+## Stand 2026-11-17 (16.3 P3a ✅, P3b Runtime ✅)
 - **P3a verifiziert:** Census Frame 1800 zeigt 14 BDA-Einträge bei 121 Import-Pools.
-- **P3b-Entwurf:** Neuer Patch 0027 für GlobalToStorage.cs: Fallback nach Kandidatensuche →
-  `GenerateBdaLookup()` (binäre Suche, `PhysicalStorageBuffer`-Zeiger, Bounds-Check). Runtime: persistenter
-  GPU-Puffer für BDA-Tabelle, Set 3 oder Ende von Set 0. Erst Fallback (0 Stubs aktuell), später optional
-  für alle LDG/STG. Voller Entwurf: RELEASE_PLAN_ARCHIV.md.
+- **⚠ P3b verliert in einem Rennlauf das Gerät (~12 s, siehe Plan 16.3) → hinter `KAR_BDA=1`, Standard aus.**
+- **P3b Runtime gebaut:** GPU-Puffer (VMA CPU_TO_GPU) mit uint32-Count-Prefix + sortierte Tabelle,
+  Deskriptor-Set 3 (eine SSBO-Bindung), Pipeline-Layouts auf 4 Sets erweitert, Bindung pro CB analog Bindless.
+  Testlauf der anderen Session (bis Frame 2400, Menü): kein Crash; im Rennlauf jedoch Geräteverlust (siehe oben).
+- **P3b Übersetzer offen:** Patch 0027 für GlobalToStorage.cs (BDA-Fallback + PhysicalStorageBuffer).
+  Dateien: vk.h, vk_memory.c (GPU-Puffer + Set), vk_pipeline.c (Layout), vk_exec_draw.c (Bindung).
 - Rücksprung: `git reset --hard pre-16.3-bda`.
 
 ## Stand 2026-11-14 (kurz)

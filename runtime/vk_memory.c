@@ -766,9 +766,18 @@ static struct {
     uint32_t cap;       // current buffer capacity in entries
 } bda_gpu;
 
+// KAR_BDA=1 turns the set on (16.3 P3b). Off by default: with it every pipeline layout has four sets, and a race run
+// lost the device about 12 s in (VK_ERROR_DEVICE_LOST at vkQueueSubmit2, fresh profile, no frame limit; 2 of 2 runs),
+// while P3a alone (the table, no set) ran clean. Four-set layouts also miss the driver's pipeline cache.
+static int bda_set_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_BDA") && *getenv("KAR_BDA") == '1';
+    return on;
+}
+
 VkDescriptorSetLayout vk_bda_layout(void) {
     VkCtx *c = vk_ctx();
-    if (!c->has_buffer_device_address) return VK_NULL_HANDLE;
+    if (!c->has_buffer_device_address || !bda_set_on()) return VK_NULL_HANDLE;
     if (bda_gpu.layout) return bda_gpu.layout;
     VkDescriptorSetLayoutBinding b = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                       .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL};
