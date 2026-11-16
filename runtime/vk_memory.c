@@ -44,6 +44,7 @@ typedef struct PoolRec {
     uint64_t lo, size;                 // GPU address range of the pool
     uint64_t import_lo, import_hi;     // POOL_IMPORT: the imported host range (aligned outwards)
     VkBuffer buf;
+    VkDeviceAddress bda;               // POOL_IMPORT with BDA: vkGetBufferDeviceAddress result (0 when unavailable)
     VkDeviceMemory mem;                // POOL_IMPORT
     VmaAllocation alloc;               // POOL_PHYS
     VPage *pt;                         // POOL_VIRT: size / 64 KiB entries
@@ -89,6 +90,7 @@ static PlatMutex pool_lock = PLAT_MUTEX_INIT;
 // stay valid while it is unchanged.
 static uint64_t pool_gen = 1;
 static uint64_t storage_serial;
+
 // Bumped when a buffer use may get another buffer for the same span (a mirror created, refused or forgotten) and at
 // every submission's start (mirror syncs are per submission). vk_mem_gen: both together.
 static uint64_t mirror_gen;
@@ -101,6 +103,27 @@ static PlatMutex lazy_lock = PLAT_MUTEX_INIT;   // one deferred import at a time
 static volatile int32_t n_lazy_imports;         // pools imported on their first GPU use instead of at nvnMemoryPoolInitialize
 static PFN_vkGetMemoryHostPointerPropertiesEXT p_host_props;
 
+// BDA lookup table: sorted by guest_lo, rebuilt under pool_lock when pools with device addresses are added or removed.
+// Shaders resolve a 64-bit guest address to a PhysicalStorageBuffer pointer by binary-searching this table.
+static VkBdaEntry *bda_table;
+static int bda_n, bda_cap;
+static uint64_t bda_gen;
+
+static void bda_rebuild_locked(void) {
+    bda_n = 0;
+    for (int i = 0; i < pool_index.n; i++) {
+        PoolRec *r = pool_index.e[i].buf;
+        if (!r || r->kind != POOL_IMPORT || !r->bda) continue;
+        if (bda_n == bda_cap) {
+            bda_cap = bda_cap ? bda_cap * 2 : 64;
+            bda_table = realloc(bda_table, (size_t)bda_cap * sizeof *bda_table);
+            if (!bda_table) rt_fatal("vk: out of memory for the BDA lookup table");
+        }
+        bda_table[bda_n++] = (VkBdaEntry){r->import_lo, r->import_hi, r->bda};
+    }
+    bda_gen++;
+}
+
 static VkBufferUsageFlags pool_usage(const VkCtx *c) {
     VkBufferUsageFlags u = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                            VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
@@ -110,6 +133,7 @@ static VkBufferUsageFlags pool_usage(const VkCtx *c) {
     if (c->has_transform_feedback)
         u |= VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT | VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT;
     if (c->has_conditional_rendering) u |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
+    if (c->has_buffer_device_address) u |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     return u;
 }
 
@@ -184,8 +208,11 @@ static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     VkImportMemoryHostPointerInfoEXT im = {.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
                                            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                            .pHostPointer = (void *)(uintptr_t)r->import_lo};
-    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &im, .allocationSize = n,
-                               .memoryTypeIndex = (uint32_t)type};
+    VkMemoryAllocateFlagsInfo af = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .pNext = &im};
+    if (c->has_buffer_device_address) af.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                               .pNext = c->has_buffer_device_address ? (void *)&af : (void *)&im,
+                               .allocationSize = n, .memoryTypeIndex = (uint32_t)type};
     static int32_t n_slow_alloc;
     uint64_t ta = qpc();
     res = vkAllocateMemory(c->device, &ai, NULL, &r->mem);
@@ -214,6 +241,10 @@ static int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
         r->buf = VK_NULL_HANDLE;
         r->mem = VK_NULL_HANDLE;
         return 0;
+    }
+    if (c->has_buffer_device_address) {
+        VkBufferDeviceAddressInfo bdai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = r->buf};
+        r->bda = vkGetBufferDeviceAddress(c->device, &bdai);
     }
     plat_inc32(&n_imports);
     return 1;
@@ -397,6 +428,7 @@ int vk_pool_init(pool_t *p) {
         }
         phys_list[nphys++] = r;
     }
+    if (r->kind == POOL_IMPORT && r->bda) bda_rebuild_locked();
     plat_mutex_unlock(&pool_lock);
     return 1;
 }
@@ -458,6 +490,7 @@ void vk_pool_fini(pool_t *p) {
                 if (v->pt[k].phys == r) v->pt[k].phys = NULL;
         }
     }
+    if (r && r->kind == POOL_IMPORT && r->bda) bda_rebuild_locked();
     plat_mutex_unlock(&pool_lock);
     if (!r) return;
     // Texture lock is acquired only after releasing pool_lock. Descriptor lookup takes them in the other direction
@@ -715,6 +748,12 @@ uint64_t vk_mem_gen(void) {
     return __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE) + __atomic_load_n(&mirror_gen, __ATOMIC_ACQUIRE);
 }
 
+int vk_mem_bda_table(const VkBdaEntry **out, uint64_t *gen) {
+    *out = bda_table;
+    *gen = bda_gen;
+    return bda_n;
+}
+
 int vk_mem_class_of(uint64_t addr) {
     VkMemSpan m;
     return vk_mem_resolve(addr, 1, &m) ? m.cls : VK_MCLS_NONE;
@@ -803,10 +842,10 @@ void vk_mem_census(uint64_t frame) {
     }
     plat_mutex_unlock_shared(&pool_lock);
     rt_log("mem: census at frame %llu: import %llu pools %.1f MiB (%d without a GPU buffer), physical %llu pools %.1f MiB, "
-           "virtual %llu pools %.1f MiB of address space",
+           "virtual %llu pools %.1f MiB of address space, BDA table %d entries",
            (unsigned long long)frame, (unsigned long long)count[POOL_IMPORT], total[POOL_IMPORT] / 1048576.0,
            n_import_failures, (unsigned long long)count[POOL_PHYS], total[POOL_PHYS] / 1048576.0,
-           (unsigned long long)count[POOL_VIRT], total[POOL_VIRT] / 1048576.0);
+           (unsigned long long)count[POOL_VIRT], total[POOL_VIRT] / 1048576.0, bda_n);
     {   // the whole process beside the pools: what Task Manager shows (private commit and RAM in use)
         uint64_t res, priv;
         plat_process_memory(&res, &priv);

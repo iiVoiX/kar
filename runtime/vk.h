@@ -306,6 +306,13 @@ int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when al
 // Changes whenever vk_mem_resolve plus VK_MEM_USE may give another span for an address: a pool added, finalized or
 // mapped, a mirror created, refused or forgotten, a submission started.
 uint64_t vk_mem_gen(void);
+
+// BDA lookup table (16.3 P3a): sorted entries {guest_lo, guest_hi, device_address} for every imported pool whose
+// buffer has a device address.  A shader resolves a 64-bit guest address by binary-searching this table.
+// The returned pointer and count are valid until the next pool init/fini under pool_lock; *gen changes on every rebuild.
+typedef struct { uint64_t guest_lo, guest_hi; uint64_t bda; } VkBdaEntry;
+int vk_mem_bda_table(const VkBdaEntry **out, uint64_t *gen);
+
 // Page write generations over guest memory (mem_written_pages plus vk_guest_written). Returns 1 when a page of the
 // range was written after generation `since`, 0 when not, -1 when the range is not write-watched (treat as written);
 // *now is the generation to pass next time.

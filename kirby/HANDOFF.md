@@ -40,6 +40,12 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   `ffxFrameInterpolationPrepare` in vk_fg.cpp; then B3 HUD-less picture (DLSS stand-in output before the composite).
 - Test `KAR_POOL_BL=1` (menu_mail2.txt, bubble at 2300).
 
+## Stand 2026-11-16 (16.3 P3a)
+- **BDA-Grundlage gebaut** (vk_memory.c): importierte Pool-Puffer haben `SHADER_DEVICE_ADDRESS_BIT`, Allokation mit
+  `DEVICE_ADDRESS_BIT`, PoolRec.bda = `vkGetBufferDeviceAddress`, sortierte Tabelle `{guest_lo, guest_hi, bda}`
+  (API `vk_mem_bda_table` in vk.h), Census loggt Tabellengröße. Noch nicht im Shader benutzt (P3b offen).
+- Rücksprung: `git reset --hard pre-16.3-bda`.
+
 ## Stand 2026-11-14 (kurz)
 - Testläufe von kar.exe ohne Nachfrage (Dauer-OK), nur nicht wenn WardogsClient läuft.
 - Bild-gezählte Skripte (menu_*, mode_*) brauchen `TOTK_FPS_LIMIT=60`; Hinweis-Dialoge aktivieren „OK“ erst nach Scrollen bis zum Ende.
