@@ -38,10 +38,44 @@ Gerät schon abgefragt (vk_device.c `has_buffer_device_address`, VMA mit BDA-Fla
 - P3a Laufzeit: jeder importierte Pool-Puffer bekommt `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT`; eine kleine
   Tabelle {Gastadresse Anfang, Ende, Gerätezeiger} (sortiert, max. einige hundert Pools) liegt in einem eigenen
   Storage-Puffer, der jedem Shader mit BDA-Zugriffen zusätzlich gebunden wird.
-- P3b Übersetzer (neuer Patch 0026, nur wenn die Altsuche keinen Kandidaten findet bzw. als Option für alle LDG/STG):
-  statt der Kandidaten-Hilfsfunktion eine Funktion `gaddr(lo, hi)` → binäre Suche in der Tabelle → `PhysicalStorageBuffer`
-  Zeiger + Versatz → Laden/Speichern/Atomics. SPIR-V: `SPV_KHR_physical_storage_buffer`, Adressierungsmodell
-  `PhysicalStorageBuffer64`, Fähigkeit `PhysicalStorageBufferAddresses`.
+- P3b Übersetzer + Runtime-Bindung (detaillierter Entwurf 2026-11-17):
+
+  **Ist-Zustand:** GlobalToStorage.cs Runtime-Kandidaten-Pfad (Patch 0015/0025): BFS über IR findet alle cbuf-Slots,
+  erzeugt Guarded-Helper der zur Laufzeit jeden Kandidaten prüft. Wenn kein Kandidat: **throw** (runtime-Pfad) bzw.
+  Load→0 / Store gelöscht (statischer Pfad). PhysicalStorageBuffer existiert nirgends im Übersetzer; SPIR-V Backend
+  nutzt `AddressingModel.Logical` + `MemoryModel.GLSL450`.
+
+  **Übersetzer (neuer Patch 0027-buffer-device-address.patch):**
+  1. `SpirvGenerator.cs`: Adressierungsmodell bleibt `Logical` (Mischbetrieb mit bestehenden SSBOs); hinzu kommen
+     `Capability.PhysicalStorageBufferAddresses` und Extension `SPV_KHR_physical_storage_buffer`.
+  2. `GlobalToStorage.cs RunPass()`: neuer Fallback-Pfad **nach** dem Kandidaten-Versuch. Wenn kein Kandidat gefunden
+     und `QueryHostSupportsBDA()` (neue Accessor-Methode, Job-Feld `"bda": true`): statt throw/Load→0 wird
+     `GenerateBdaLookup()` aufgerufen.
+  3. `GenerateBdaLookup(node, globalAddr_lo, globalAddr_hi)`: emittiert SPIR-V-IR für:
+     - Lese `bda_count` (uint) aus dem BDA-SSBO (Binding = letzte Bindung + 1, Set 0 oder eigenes Set)
+     - Binäre Suche: `lo=0, hi=bda_count`, Schleife `while (lo < hi)` → `mid = (lo+hi)/2`,
+       `if (guest_hi < table[mid].guest_hi || (guest_hi == table[mid].guest_hi && guest_lo < table[mid].guest_lo)) hi=mid else lo=mid+1`
+     - Ergebnis: `table[lo-1].bda + (globalAddr - table[lo-1].guest_lo)` → `OpConvertUToPtr` StorageClass PhysicalStorageBuffer
+     - Load: `OpLoad` mit PhysicalStorageBuffer-Zeiger; Store: `OpStore`; Atomics: `OpAtomicIAdd` etc.
+     - Bounds-Check: `if (lo == 0 || globalAddr >= table[lo-1].guest_hi)` → Load: return 0, Store: discard
+  4. Neues IR-Konzept: `StorageKind.PhysicalBuffer` oder Wiederverwendung der bestehenden GlobalMemory-Knoten mit
+     einem Flag; der SPIR-V-Emitter erkennt das Flag und erzeugt PhysicalStorageBuffer-Zugriffe statt SSBO.
+  5. Metadaten: Shader-Info bekommt `uses_bda: true`, damit die Runtime weiß, dass der BDA-SSBO gebunden werden muss.
+
+  **Runtime-Bindung (vk_exec_draw.c, vk_pipeline.c):**
+  1. Persistenter GPU-Puffer für die BDA-Tabelle (VkBuffer, `VK_BUFFER_USAGE_STORAGE_BUFFER_BIT`), aktualisiert wenn
+     `bda_gen` sich ändert (Vergleich beim ersten Draw jedes Frames).
+  2. Deskriptor-Layout: **Set 3** mit einer SSBO-Bindung (die BDA-Tabelle), analog zu Set 2 (Bindless).
+     Pipeline-Layout erweitern um Set 3. Alternativ: Bindung am Ende von Set 0 (einfacher, kein neues Set).
+  3. Bindung: einmal pro Command Buffer / Layout-Wechsel, wie das Bindless-Set (Zeile 3111–3124 in vk_exec_draw.c).
+     Nur für Shader mit `uses_bda == true` im ShaderInfo.
+  4. Upload-Pfad: `memcpy` der sortierten `VkBdaEntry`-Tabelle aus `vk_mem_bda_table()` in den GPU-Puffer.
+     Tabelle ist klein (aktuell 14 Einträge × 24 Bytes = 336 Bytes), kein Staging nötig.
+
+  **Entscheidung: BDA als Fallback vs. für alle LDG/STG:**
+  Erster Schritt: **nur Fallback** (wenn Kandidatensuche scheitert). stubscan zeigt 0 Stubs → aktuell scheitert
+  kein Zugriff. BDA wird also zunächst Sicherheitsnetz. Später optional für alle Zugriffe (spart die
+  Kandidaten-Auflösung zur Laufzeit, ~3,4 ms bind_resources).
 - P3c Synchronisation: BDA-Schreiben gehen direkt in den importierten Speicher (wie heute im Modus `import`); im
   Spiegelmodus (`mirror`, Standard bei dedizierter GPU) braucht es entweder `import` für diese Pools oder das
   Rückschreiben wie bei SSBO-Schreibern (vk_mem_gpu_wrote). Erster Schritt: BDA nur im Modus `import` erlauben.

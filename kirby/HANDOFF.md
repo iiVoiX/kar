@@ -40,11 +40,12 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   `ffxFrameInterpolationPrepare` in vk_fg.cpp; then B3 HUD-less picture (DLSS stand-in output before the composite).
 - Test `KAR_POOL_BL=1` (menu_mail2.txt, bubble at 2300).
 
-## Stand 2026-11-16 (16.3 P3a ✅)
-- **BDA-Grundlage gebaut + verifiziert** (vk_memory.c): importierte Pool-Puffer haben `SHADER_DEVICE_ADDRESS_BIT`,
-  Allokation mit `DEVICE_ADDRESS_BIT`, PoolRec.bda = `vkGetBufferDeviceAddress`, sortierte Tabelle
-  `{guest_lo, guest_hi, bda}` (API `vk_mem_bda_table` in vk.h), Census loggt Tabellengröße.
-  Testlauf: Frame 1800 zeigt 14 BDA-Einträge bei 121 Import-Pools. Noch nicht im Shader benutzt (P3b offen).
+## Stand 2026-11-17 (16.3 P3a ✅, P3b geplant)
+- **P3a verifiziert:** Census Frame 1800 zeigt 14 BDA-Einträge bei 121 Import-Pools.
+- **P3b-Entwurf:** Neuer Patch 0027 für GlobalToStorage.cs: Fallback nach Kandidatensuche →
+  `GenerateBdaLookup()` (binäre Suche, `PhysicalStorageBuffer`-Zeiger, Bounds-Check). Runtime: persistenter
+  GPU-Puffer für BDA-Tabelle, Set 3 oder Ende von Set 0. Erst Fallback (0 Stubs aktuell), später optional
+  für alle LDG/STG. Voller Entwurf: RELEASE_PLAN_ARCHIV.md.
 - Rücksprung: `git reset --hard pre-16.3-bda`.
 
 ## Stand 2026-11-14 (kurz)
