@@ -182,9 +182,12 @@ static struct {
     int orig, entered, applied, bound;   // the game's index, the index PC mode started with, the index last given to
                                          // the setting, bound this time (not set by the environment)
 } pc_rows[] = {
-    {0, "TOTK_FULLSCREEN", "Mnu_Opt_Disp_TextSize", "Vollbild",
-     {{"Mnu_Opt_Disp_Hud_List_TextSize_Normal", "0", "Aus"}, {"Mnu_Opt_Disp_Hud_List_TextSize_Large", "1", "Ein"}},
-     "Mnu_Opt_Disp_TextSize_Help", "Zeigt das Spiel im Fenster oder im Vollbild."},
+    // Fullscreen sits on the checklist-tips row: moving a value with LEFT/RIGHT also runs the game's own change
+    // callback (selector +0x2a0), and on the text-size row that made the menu text large until the page closed (pv1).
+    {2, "TOTK_FULLSCREEN", "Mnu_Opt_Disp_Checker", "Vollbild",
+     {{"Mnu_Opt_Disp_Checker_Off", "0", "Aus", "Mnu_Opt_Disp_Checker_Off_Help", "Zeigt das Spiel in einem Fenster."},
+      {"Mnu_Opt_Disp_Checker_On", "1", "Ein", "Mnu_Opt_Disp_Checker_On_Help", "Zeigt das Spiel im Vollbild."}},
+     "Mnu_Opt_Disp_Checker_Help", "Zeigt das Spiel im Fenster oder im Vollbild."},
     {1, "TOTK_HUD_POSITION", "Mnu_Opt_Disp_NoviceGuide", "HUD-Position",
      {{"Mnu_Opt_Disp_NoviceGuide_Off", "centered", "Mitte", "Mnu_Opt_Disp_NoviceGuide_Off_Help",
        "Zeigt die Rennanzeigen im mittleren 16:9-Bereich."},
