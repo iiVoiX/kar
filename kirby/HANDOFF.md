@@ -63,3 +63,8 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Weg ohne Wirkung: +0xc zuerst schreiben, dann Setter `f_7002df08c0(Wähler, idx)` (row_show). Weg mit Wirkung (Spieloption live): Setter ohne Vorab-Schreiben, dann `f_7002df110c(Wähler,1)` (row_effect).
 - Sonde für Live-Wirkung: Vollbild lokal auf Zeile 0 (Schriftgröße) legen (scratchpad probe0.py), kein Commit.
 - Testskripte: Eingaben zählen Ticks, Shots zählen Frames; bei >60 fps laufen Frames schneller. Lauf endet nach letztem Shot.
+
+## Performance messen (2026-11-17)
+- Rennlauf: `kar_race_test.ps1 -Script kirby/scripts/fresh_race_ms.txt -Profile <Ordner nur mit account.uid aus build/profile-kar-fresh>` (Limit aus ini, 144), Shot bei Frame 17000 als Rennbeleg; `frametime: period`-Zeilen (Minute 2 = Rennen).
+- Listen/Caches liegen neben der exe (`build/kar458752/shader-cache/cs-used.bin`, `pipeline-cache.bin`), nicht im Profil. `cs-used.bin` vor Experimenten sichern und danach zurück.
+- Diagnosen: `KAR_REPLAY_PROF=1` (+ `KAR_REPLAY_PROF_MS=25`), `KAR_FT_SLOW_MS=25`; „compute not indexed“ = Shader nicht im Prefetch-Index.
