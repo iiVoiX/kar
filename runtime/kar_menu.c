@@ -27,6 +27,7 @@
 #define SET_STATIC 0x70011333c0ull  // f_70011333c0(label string, text field): a prefab text (fixed label)
 #define TEXTS 0x400
 #define TITLE_CTX 0xf00                // a resolver context for f_7004d01668 in the patch page (0x50 bytes)
+#define SEL_SET 0x7002df08c0ull   // f_7002df08c0(selector, index): what LEFT/RIGHT call after +0x260 = index
 #define TITLE_UPDATE 0x7004d01668ull   // f_7004d01668(component, context): looks the label (+0x70) up again
 #define TITLE_CALLER 0x7004d016d8ull   // where f_7004d01668 calls the prefab text function
 
@@ -181,11 +182,9 @@ static struct {
     int orig, entered, applied, bound;   // the game's index, the index PC mode started with, the index last given to
                                          // the setting, bound this time (not set by the environment)
 } pc_rows[] = {
-    // Row 0 as fullscreen waits for the selector's own setter (r0b: the row's selector keeps its own index, so writing
-    // +0xc alone left LEFT/RIGHT without effect when the setting and the game's value differ):
-    // {0, "TOTK_FULLSCREEN", "Mnu_Opt_Disp_TextSize", "Vollbild",
-    //  {{"Mnu_Opt_Disp_Hud_List_TextSize_Normal", "0", "Aus"}, {"Mnu_Opt_Disp_Hud_List_TextSize_Large", "1", "Ein"}},
-    //  "Mnu_Opt_Disp_TextSize_Help", "Zeigt das Spiel im Fenster oder im Vollbild."},
+    {0, "TOTK_FULLSCREEN", "Mnu_Opt_Disp_TextSize", "Vollbild",
+     {{"Mnu_Opt_Disp_Hud_List_TextSize_Normal", "0", "Aus"}, {"Mnu_Opt_Disp_Hud_List_TextSize_Large", "1", "Ein"}},
+     "Mnu_Opt_Disp_TextSize_Help", "Zeigt das Spiel im Fenster oder im Vollbild."},
     {1, "TOTK_HUD_POSITION", "Mnu_Opt_Disp_NoviceGuide", "HUD-Position",
      {{"Mnu_Opt_Disp_NoviceGuide_Off", "centered", "Mitte", "Mnu_Opt_Disp_NoviceGuide_Off_Help",
        "Zeigt die Rennanzeigen im mittleren 16:9-Bereich."},
@@ -244,10 +243,17 @@ static void value_hook(Cpu *c) {   // diagnostic only (KAR_MENU_LOG): rows_leave
 // Sets row's value index and points the recorded value text field of that row at the label of idx; the text loop
 // in menu_tick sets every recorded field right after, through text_lookup (our text in PC mode, the game's after).
 static void row_show(Cpu *c, int row, int idx) {
-    (void)c;
     const char *want = row_label(row, idx);
     if (!want) return;
     *(int32_t *)(row_at(row) + 0xc) = idx;
+    // The page has one selector (+0xb90) for the focused row; focusing a row loads it from the row's +0xc
+    // (f_700300c5f4), so only the focused row needs it set, the way LEFT/RIGHT do (+0x260, then the setter).
+    if (*(const int32_t *)(uintptr_t)(page_obj + 0xe90) == row) {
+        *(int32_t *)(uintptr_t)(page_obj + 0xb90 + 0x260) = idx;
+        *(int32_t *)(uintptr_t)(page_obj + 0xb90 + 0x1f4) = idx;
+        rt_call(c, SEL_SET, 2, page_obj + 0xb90, (uint64_t)(uint32_t)idx);
+        if (log_match) fprintf(stderr, "kar_menu: f%llu row %d selector set %d, %d texts\n", (unsigned long long)frame_now(), row, idx, nrec);
+    }
     for (size_t r = 0; r < NROWS; r++)
         if (pc_rows[r].row == row) pc_rows[r].applied = idx;   // our own setting, not the player's
     for (int i = 0; i < nrec; i++)
