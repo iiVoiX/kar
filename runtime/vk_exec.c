@@ -665,10 +665,20 @@ static void hud_cols_done(void *arg) {
     // A screen of its own (the results) lies on three or four cuts at once; in the race a tip box or a rider's
     // marker lies on one or two now and then, and that must not send the whole HUD to the middle.
     int many = __builtin_popcount((unsigned)mask) >= 3 || (mask & 5) == 5 || (mask & 10) == 10;   // 3 cuts, or one side in both halves (the pause panel)
-    if (many) HC.cross_n++, HC.clear_n = 0; else HC.clear_n++, HC.cross_n = 0;
+    // A banner across the middle ("LETZTE RUNDE") lies on both cuts of one half: the cuts would split its letters
+    // while it flies in, so it centres the layer at the first read, and the layer stays there until the cuts have
+    // been clear for HC_HOLD reads (17.3b, 2026-11-17).
+    int banner = (mask & 3) == 3 || (mask & 12) == 12;
+    if (many || banner) HC.cross_n++, HC.clear_n = 0; else HC.clear_n++, HC.cross_n = 0;
     HC.nmany += many;
-    if (!HC.blocked && HC.cross_n >= HC_HOLD) __atomic_store_n(&HC.blocked, 1, __ATOMIC_RELAXED);
-    if (HC.blocked && HC.clear_n >= HC_HOLD) __atomic_store_n(&HC.blocked, 0, __ATOMIC_RELAXED);
+    if (!HC.blocked && (HC.cross_n >= HC_HOLD || banner)) {
+        __atomic_store_n(&HC.blocked, 1, __ATOMIC_RELAXED);
+        if (HC.log) rt_log("hud edges: centred (%s, cuts %d%d%d%d)", banner ? "banner" : "3+ cuts", mask & 1, mask >> 1 & 1, mask >> 2 & 1, mask >> 3 & 1);
+    }
+    if (HC.blocked && HC.clear_n >= HC_HOLD) {
+        __atomic_store_n(&HC.blocked, 0, __ATOMIC_RELAXED);
+        if (HC.log) rt_log("hud edges: back to the edges");
+    }
     HC.crossed_mask |= mask, HC.n++, HC.nblocked += HC.blocked;
     uint64_t now = plat_now_ns();
     if (!HC.t0) HC.t0 = now;
