@@ -27,6 +27,7 @@
 #define SET_STATIC 0x70011333c0ull  // f_70011333c0(label string, text field): a prefab text (fixed label)
 #define TEXTS 0x400
 #define TITLE_CTX 0xf00                // a resolver context for f_7004d01668 in the patch page (0x50 bytes)
+#define SEL_MOVED 0x7002df110cull   // f_7002df110c(selector, 1): what LEFT/RIGHT call right after SEL_SET
 #define SEL_SET 0x7002df08c0ull   // f_7002df08c0(selector, index): what LEFT/RIGHT call after +0x260 = index
 #define TITLE_UPDATE 0x7004d01668ull   // f_7004d01668(component, context): looks the label (+0x70) up again
 #define TITLE_CALLER 0x7004d016d8ull   // where f_7004d01668 calls the prefab text function
@@ -248,15 +249,18 @@ static void value_hook(Cpu *c) {   // diagnostic only (KAR_MENU_LOG): rows_leave
 static void row_show(Cpu *c, int row, int idx) {
     const char *want = row_label(row, idx);
     if (!want) return;
-    *(int32_t *)(row_at(row) + 0xc) = idx;
     // The page has one selector (+0xb90) for the focused row; focusing a row loads it from the row's +0xc
     // (f_700300c5f4), so only the focused row needs it set, the way LEFT/RIGHT do (+0x260, then the setter).
     if (*(const int32_t *)(uintptr_t)(page_obj + 0xe90) == row) {
         *(int32_t *)(uintptr_t)(page_obj + 0xb90 + 0x260) = idx;
         *(int32_t *)(uintptr_t)(page_obj + 0xb90 + 0x1f4) = idx;
         rt_call(c, SEL_SET, 2, page_obj + 0xb90, (uint64_t)(uint32_t)idx);
-        if (log_match) fprintf(stderr, "kar_menu: f%llu row %d selector set %d, %d texts\n", (unsigned long long)frame_now(), row, idx, nrec);
+        int after_set = *(const int32_t *)(row_at(row) + 0xc);
+        rt_call(c, SEL_MOVED, 2, page_obj + 0xb90, (uint64_t)1);
+        if (log_match) fprintf(stderr, "kar_menu: f%llu row %d selector set %d, +0xc %d then %d, %d texts\n",
+                               (unsigned long long)frame_now(), row, idx, after_set, *(const int32_t *)(row_at(row) + 0xc), nrec);
     }
+    *(int32_t *)(row_at(row) + 0xc) = idx;
     for (size_t r = 0; r < NROWS; r++)
         if (pc_rows[r].row == row) pc_rows[r].applied = idx;   // our own setting, not the player's
     for (int i = 0; i < nrec; i++)
