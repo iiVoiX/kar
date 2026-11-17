@@ -246,21 +246,30 @@ static void value_hook(Cpu *c) {   // diagnostic only (KAR_MENU_LOG): rows_leave
 
 // Sets row's value index and points the recorded value text field of that row at the label of idx; the text loop
 // in menu_tick sets every recorded field right after, through text_lookup (our text in PC mode, the game's after).
+// The game's own option of the focused row back to idx, with its live effect (a larger menu text for the text
+// size): the selector setter with +0xc still on the old value, then f_7002df110c, the way LEFT/RIGHT do (pr1).
+static void row_effect(Cpu *c, int row, int idx) {
+    if (*(const int32_t *)(uintptr_t)(page_obj + 0xe90) != row) return;
+    *(int32_t *)(uintptr_t)(page_obj + 0xb90 + 0x260) = idx;
+    *(int32_t *)(uintptr_t)(page_obj + 0xb90 + 0x1f4) = idx;
+    rt_call(c, SEL_SET, 2, page_obj + 0xb90, (uint64_t)(uint32_t)idx);
+    rt_call(c, SEL_MOVED, 2, page_obj + 0xb90, (uint64_t)1);
+    if (log_match) fprintf(stderr, "kar_menu: f%llu row %d game value back to %d\n", (unsigned long long)frame_now(), row, idx);
+}
+
 static void row_show(Cpu *c, int row, int idx) {
     const char *want = row_label(row, idx);
     if (!want) return;
-    // The page has one selector (+0xb90) for the focused row; focusing a row loads it from the row's +0xc
-    // (f_700300c5f4), so only the focused row needs it set, the way LEFT/RIGHT do (+0x260, then the setter).
+    // +0xc first: the page then takes idx without the option's live effect (pr0), so PC mode never changes the
+    // game's option. The page has one selector (+0xb90) for the focused row; focusing a row loads it from the row's
+    // +0xc (f_700300c5f4), so only the focused row needs it set, the way LEFT/RIGHT do (+0x260, then the setter).
+    *(int32_t *)(row_at(row) + 0xc) = idx;
     if (*(const int32_t *)(uintptr_t)(page_obj + 0xe90) == row) {
         *(int32_t *)(uintptr_t)(page_obj + 0xb90 + 0x260) = idx;
         *(int32_t *)(uintptr_t)(page_obj + 0xb90 + 0x1f4) = idx;
         rt_call(c, SEL_SET, 2, page_obj + 0xb90, (uint64_t)(uint32_t)idx);
-        int after_set = *(const int32_t *)(row_at(row) + 0xc);
-        rt_call(c, SEL_MOVED, 2, page_obj + 0xb90, (uint64_t)1);
-        if (log_match) fprintf(stderr, "kar_menu: f%llu row %d selector set %d, +0xc %d then %d, %d texts\n",
-                               (unsigned long long)frame_now(), row, idx, after_set, *(const int32_t *)(row_at(row) + 0xc), nrec);
+        if (log_match) fprintf(stderr, "kar_menu: f%llu row %d selector set %d, %d texts\n", (unsigned long long)frame_now(), row, idx, nrec);
     }
-    *(int32_t *)(row_at(row) + 0xc) = idx;
     for (size_t r = 0; r < NROWS; r++)
         if (pc_rows[r].row == row) pc_rows[r].applied = idx;   // our own setting, not the player's
     for (int i = 0; i < nrec; i++)
@@ -404,6 +413,14 @@ static void menu_tick(Cpu *c) {
             if (v && strcmp(cfg_value(pc_rows[i].key), v->cfg_val)) cfg_set(pc_rows[i].key, v->cfg_val);
             if (log_match) fprintf(stderr, "kar_menu: f%llu row %d applied %d: %s = %s\n", (unsigned long long)frame_now(),
                                    pc_rows[i].row, cur, pc_rows[i].key, cfg_value(pc_rows[i].key));
+            // LEFT/RIGHT also applied the game's own option (its live effect): put that back on the game's value,
+            // then show cur again without the effect
+            Cpu save;
+            memcpy(save.x, c->x, sizeof save.x), memcpy(save.v, c->v, sizeof save.v), save.nzcv = c->nzcv;
+            row_effect(c, pc_rows[i].row, pc_rows[i].orig);
+            row_show(c, pc_rows[i].row, cur);
+            set_texts(c);
+            memcpy(c->x, save.x, sizeof save.x), memcpy(c->v, save.v, sizeof save.v), c->nzcv = save.nzcv;
         }
     }
     const uint64_t LEAVE = 1u << 0 | 1u << 1 | 1u << 2;   // A, B, X (X resets the page's values)
