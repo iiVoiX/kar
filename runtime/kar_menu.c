@@ -177,8 +177,15 @@ static struct {
     const char *key;                // the port setting
     const char *title_label, *title;   // the row's title label and what it shows in PC mode
     PcVal vals[4];
-    int orig, entered, bound;       // the game's index, the index PC mode started with, bound this time (not set by the environment)
+    const char *help_label, *help;  // a help text for the whole row (rows whose help does not change with the value)
+    int orig, entered, applied, bound;   // the game's index, the index PC mode started with, the index last given to
+                                         // the setting, bound this time (not set by the environment)
 } pc_rows[] = {
+    // Row 0 as fullscreen waits for the selector's own setter (r0b: the row's selector keeps its own index, so writing
+    // +0xc alone left LEFT/RIGHT without effect when the setting and the game's value differ):
+    // {0, "TOTK_FULLSCREEN", "Mnu_Opt_Disp_TextSize", "Vollbild",
+    //  {{"Mnu_Opt_Disp_Hud_List_TextSize_Normal", "0", "Aus"}, {"Mnu_Opt_Disp_Hud_List_TextSize_Large", "1", "Ein"}},
+    //  "Mnu_Opt_Disp_TextSize_Help", "Zeigt das Spiel im Fenster oder im Vollbild."},
     {1, "TOTK_HUD_POSITION", "Mnu_Opt_Disp_NoviceGuide", "HUD-Position",
      {{"Mnu_Opt_Disp_NoviceGuide_Off", "centered", "Mitte", "Mnu_Opt_Disp_NoviceGuide_Off_Help",
        "Zeigt die Rennanzeigen im mittleren 16:9-Bereich."},
@@ -241,6 +248,8 @@ static void row_show(Cpu *c, int row, int idx) {
     const char *want = row_label(row, idx);
     if (!want) return;
     *(int32_t *)(row_at(row) + 0xc) = idx;
+    for (size_t r = 0; r < NROWS; r++)
+        if (pc_rows[r].row == row) pc_rows[r].applied = idx;   // our own setting, not the player's
     for (int i = 0; i < nrec; i++)
         for (int k = 0; k < 8; k++)
             if (!rec[i].fixed && row_label(row, k) && rec[i].label == (uint64_t)(uintptr_t)row_label(row, k)) {
@@ -288,7 +297,7 @@ static void rows_enter(Cpu *c) {
             if (v && !strcmp(v->cfg_val, want)) idx = k;
         }
         if (idx < 0) idx = pc_rows[i].orig;
-        pc_rows[i].entered = idx;
+        pc_rows[i].entered = pc_rows[i].applied = idx;
         row_show(c, row, idx);
     }
 }
@@ -301,7 +310,10 @@ static void rows_leave(Cpu *c) {
         if (!pc_rows[i].bound) continue;
         int row = pc_rows[i].row, cur = *(int32_t *)(row_at(row) + 0xc);
         const PcVal *v = cur != pc_rows[i].entered ? val_of((int)i, row_label(row, cur)) : NULL;
-        if (v && strcmp(cfg_value(pc_rows[i].key), v->cfg_val)) cfg_set(pc_rows[i].key, v->cfg_val), cfg_save();
+        if (v) {
+            if (strcmp(cfg_value(pc_rows[i].key), v->cfg_val)) cfg_set(pc_rows[i].key, v->cfg_val);
+            cfg_save();
+        }
         if (log_match) fprintf(stderr, "kar_menu: row %d leaves at %d (entered %d): %s = %s\n", row, cur, pc_rows[i].entered,
                                pc_rows[i].key, cfg_value(pc_rows[i].key));
         row_show(c, row, pc_rows[i].orig);
@@ -364,13 +376,32 @@ static void menu_tick(Cpu *c) {
     if (log_match && (down & (1u << 0 | 1u << 1)))   // diagnostic: A/B with the state that decides what they do
         fprintf(stderr, "kar_menu: f%llu %s pc_mode %d nrec %d alive %d\n", (unsigned long long)frame_now(),
                 down & 1u ? "A" : "B", pc_mode, nrec, page_obj ? page_alive() : 0);
-    if (!(down & (1u << 0 | 1u << 1 | 1u << 6 | 1u << 7)) || !nrec || !page_alive()) return;
+    if (pc_mode) {
+        if (!page_alive()) {   // the page died without A/B/X: PC texts must not show anywhere else
+            pc_mode = 0;
+            if (log_match) fprintf(stderr, "kar_menu: f%llu pc mode 0 (page gone)\n", (unsigned long long)frame_now());
+            return;
+        }
+        for (size_t i = 0; i < NROWS; i++) {   // a value moved with LEFT/RIGHT: the setting follows at once
+            if (!pc_rows[i].bound) continue;
+            int cur = *(const int32_t *)(row_at(pc_rows[i].row) + 0xc);
+            if (cur == pc_rows[i].applied) continue;
+            pc_rows[i].applied = cur;
+            const PcVal *v = val_of((int)i, row_label(pc_rows[i].row, cur));
+            if (v && strcmp(cfg_value(pc_rows[i].key), v->cfg_val)) cfg_set(pc_rows[i].key, v->cfg_val);
+            if (log_match) fprintf(stderr, "kar_menu: f%llu row %d applied %d: %s = %s\n", (unsigned long long)frame_now(),
+                                   pc_rows[i].row, cur, pc_rows[i].key, cfg_value(pc_rows[i].key));
+        }
+    }
+    const uint64_t LEAVE = 1u << 0 | 1u << 1 | 1u << 2;   // A, B, X (X resets the page's values)
+    if (!(down & (LEAVE | 1u << 6 | 1u << 7)) || !page_alive()) return;
+    if (!pc_mode && !nrec) return;   // entering needs the page's value texts
     // A or B in PC mode: PC mode ends first. B leaves the page; A on a card opens a sub page, and the page does not
     // say whether a card or a row has the focus (+0xe90 stays on the last row, ms4), while A on a row does nothing.
-    if ((down & (1u << 0 | 1u << 1)) && !(down & (1u << 6 | 1u << 7)) && !pc_mode) return;
+    if ((down & LEAVE) && !(down & (1u << 6 | 1u << 7)) && !pc_mode) return;
     Cpu save;
     memcpy(save.x, c->x, sizeof save.x), memcpy(save.v, c->v, sizeof save.v), save.nzcv = c->nzcv;
-    if (down & (1u << 0 | 1u << 1) && !(down & (1u << 6 | 1u << 7))) {   // A or B: PC mode ends
+    if ((down & LEAVE) && !(down & (1u << 6 | 1u << 7))) {   // A, B or X: PC mode ends
         rows_leave(c);
         pc_mode = 0;
         set_texts(c);
@@ -394,6 +425,7 @@ void kar_menu_init(void) {
     pc_texts[NPC++] = (typeof(pc_texts[0])){"Mnu_Opt_Disp_OptMode_Cmn", "PC-Grafik", 0};
     for (size_t i = 0; i < NROWS; i++) {
         pc_texts[NPC++] = (typeof(pc_texts[0])){pc_rows[i].title_label, pc_rows[i].title, 0};
+        if (pc_rows[i].help_label) pc_texts[NPC++] = (typeof(pc_texts[0])){pc_rows[i].help_label, pc_rows[i].help, 0};
         for (int j = 0; j < 4 && pc_rows[i].vals[j].game_label; j++) {
             const PcVal *v = &pc_rows[i].vals[j];
             if (NPC + 2 > sizeof pc_texts / sizeof *pc_texts) rt_fatal("kar_menu: more PC texts than pc_texts holds");
