@@ -189,6 +189,13 @@ static struct {
      {{"Mnu_Opt_Disp_Checker_Off", "0", "Aus", "Mnu_Opt_Disp_Checker_Off_Help", "Zeigt das Spiel in einem Fenster."},
       {"Mnu_Opt_Disp_Checker_On", "1", "Ein", "Mnu_Opt_Disp_Checker_On_Help", "Zeigt das Spiel im Vollbild."}},
      "Mnu_Opt_Disp_Checker_Help", "Zeigt das Spiel im Fenster oder im Vollbild."},
+    // The frame limit on the colour-filter row (no live tint in the menu). 60 is the default and 144 is shown with
+    // game time = real time (16.11); a limit not in the table leaves the row on the game's index and unchanged.
+    {4, "TOTK_FPS_LIMIT", "Mnu_Opt_Disp_ColorFilter", "Bildrate",
+     {{"Mnu_Opt_Disp_ColorFilter_Off", "60", "60 fps", "Mnu_Opt_Disp_ColorFilter_Off_Help", "Begrenzt das Spiel auf 60 Bilder pro Sekunde."},
+      {"Mnu_Opt_Disp_ColorFilter_1", "120", "120 fps", "Mnu_Opt_Disp_ColorFilter_1_Help", "Begrenzt das Spiel auf 120 Bilder pro Sekunde."},
+      {"Mnu_Opt_Disp_ColorFilter_2", "144", "144 fps", "Mnu_Opt_Disp_ColorFilter_2_Help", "Begrenzt das Spiel auf 144 Bilder pro Sekunde."},
+      {"Mnu_Opt_Disp_ColorFilter_3", "display", "Bildschirm", "Mnu_Opt_Disp_ColorFilter_3_Help", "Folgt der Bildrate des Bildschirms."}}},
     {1, "TOTK_HUD_POSITION", "Mnu_Opt_Disp_NoviceGuide", "HUD-Position",
      {{"Mnu_Opt_Disp_NoviceGuide_Off", "centered", "Mitte", "Mnu_Opt_Disp_NoviceGuide_Off_Help",
        "Zeigt die Rennanzeigen im mittleren 16:9-Bereich."},
