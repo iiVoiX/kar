@@ -47,6 +47,7 @@
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "nvn_geometry_control.h"
 #include "platform/platform.h"
 
@@ -4140,12 +4141,14 @@ size_t gfx_shader_warm_list(GfxWarmEnt **out) {
 // whose answers differ from the stored ones loads its own shader as before. KAR_CS_PREFETCH=0 turns it off;
 // KAR_CS_PREFETCH_MB (default 128: the SPIR-V waiting for its pipeline) caps the SPIR-V it loads.
 // ---- compute used list (<cache>/cs-used.bin): which compute shaders dispatches used, per session
-// Prefetching every stored compute input built ~5000 pipelines, of which a race used ~100, at ~0.85 MB of driver
-// memory each (16.10). So the prefetch takes only the inputs a dispatch used in one of the last CSU_KEEP sessions; a
-// shader met for the first time loads at its dispatch as before and is in the list from then on. No file: nothing is
+// Prefetching every stored compute input built ~5000 pipelines, of which a race used ~1000, at ~0.85 MB of driver
+// memory each (16.10). So the prefetch takes only the inputs a dispatch used: the list keeps the CSU_MAX most recently
+// used ones (KAR_CS_USED_MAX), so starts that only visit menus do not push a race's shaders out (13.3 abB: with the
+// last eight sessions as the bound, a race after menu runs had 78 frames over 25 ms in its second minute, 12 with
+// them). A shader met for the first time loads at its dispatch as before and is in the list from then on. No file: nothing is
 // prefetched (KAR_CS_PREFETCH_ALL=1 takes every stored input). Layout: "KCSU", u32 version 1, u32 session, u32 count,
 // then count entries of an input id (32 bytes) and the u32 session that last used it.
-#define CSU_KEEP 8
+#define CSU_MAX 1500
 typedef struct { uint8_t iid[32]; uint32_t session; } CsuEnt;
 static struct {
     PlatMutex m;
@@ -4156,6 +4159,10 @@ static struct {
 } CSU;
 
 static int csu_cmp(const void *x, const void *y) { return memcmp(x, y, 32); }
+static int csu_cmp_recent(const void *x, const void *y) {   // the latest session first
+    uint32_t a = ((const CsuEnt *)x)->session, b = ((const CsuEnt *)y)->session;
+    return a < b ? 1 : a > b ? -1 : 0;
+}
 
 static void csu_path(char *p) { snprintf(p, PATH_CAP + 80, "%s/cs-used.bin", cache_dir); }
 
@@ -4184,7 +4191,7 @@ static CsuEnt *csu_find_file(const uint8_t iid[32]) {
     return CSU.n_file ? bsearch(iid, CSU.v, CSU.n_file, sizeof(CsuEnt), csu_cmp) : NULL;
 }
 
-// The input ids of the compute shaders a dispatch used in one of the last CSU_KEEP sessions, for the prebuild after a
+// The input ids of the compute shaders in the used list (the CSU_MAX most recently used), for the prebuild after a
 // driver change (vk_pipeline.c vk_pipeline_cold_warm). The caller frees *out.
 size_t gfx_shader_cs_used_iids(uint8_t (**out)[32]) {
     *out = NULL;
@@ -4195,7 +4202,7 @@ size_t gfx_shader_cs_used_iids(uint8_t (**out)[32]) {
     size_t n = 0;
     uint8_t (*v)[32] = malloc((CSU.n_file + 1) * 32);
     for (size_t i = 0; v && i < CSU.n_file; i++)
-        if (CSU.v[i].session + CSU_KEEP > CSU.session) memcpy(v[n++], CSU.v[i].iid, 32);
+        memcpy(v[n++], CSU.v[i].iid, 32);
     plat_mutex_unlock(&CSU.m);
     *out = v;
     return n;
@@ -4222,18 +4229,23 @@ void gfx_shader_note_cs_used(const GfxShader *cs) {
     plat_mutex_unlock(&CSU.m);
 }
 
-// Writes the list (entries used in the last CSU_KEEP sessions) when it changed. The prefetch thread calls it.
+// Writes the list (its CSU_MAX most recently used entries) when it changed. The prefetch thread calls it.
 static void csu_save(void) {
     plat_mutex_lock(&CSU.m);
     if (!CSU.dirty || !cache_dir[0]) { plat_mutex_unlock(&CSU.m); return; }
     CSU.dirty = 0;
     size_t keep = 0;
     CsuEnt *out = malloc((CSU.n + 1) * sizeof *out);
-    for (size_t i = 0; out && i < CSU.n; i++)
-        if (CSU.v[i].session + CSU_KEEP > CSU.session) out[keep++] = CSU.v[i];
+    for (size_t i = 0; out && i < CSU.n; i++) out[keep++] = CSU.v[i];
     uint32_t session = CSU.session;
     plat_mutex_unlock(&CSU.m);
     if (!out) return;
+    size_t max = getenv("KAR_CS_USED_MAX") ? strtoull(getenv("KAR_CS_USED_MAX"), NULL, 10) : CSU_MAX;
+    if (keep > max) {   // the most recently used stay; the file stays sorted by input id (csu_find_file)
+        qsort(out, keep, sizeof *out, csu_cmp_recent);
+        keep = max;
+        qsort(out, keep, sizeof *out, csu_cmp);
+    }
     size_t bytes = 16 + keep * sizeof *out;
     uint8_t *buf = malloc(bytes);
     if (buf) {
@@ -4273,6 +4285,10 @@ static int pf_cmp(const void *x, const void *y) {
     uint64_t a = ((const PfEnt *)x)->h, b = ((const PfEnt *)y)->h;
     return a < b ? -1 : a > b;
 }
+static int pf_cmp_full(const void *x, const void *y) {   // by hash (pf_cmp's order), then input id
+    int c = pf_cmp(x, y);
+    return c ? c : memcmp(((const PfEnt *)x)->iid, ((const PfEnt *)y)->iid, 32);
+}
 
 static int pf_collect(const char *file, void *ctx) {
     (void)ctx;
@@ -4286,7 +4302,7 @@ static int pf_collect(const char *file, void *ctx) {
     static int all = -1;
     if (all < 0) all = getenv("KAR_CS_PREFETCH_ALL") && *getenv("KAR_CS_PREFETCH_ALL") == '1';
     CsuEnt *u = all ? NULL : csu_find_file(iid);
-    if (in.stage == GFX_STAGE_CS && (all || (u && u->session + CSU_KEEP > CSU.session))) {
+    if (in.stage == GFX_STAGE_CS && (all || u)) {
         if (PF.n % 1024 == 0) {
             PfEnt *t = realloc(PF.ix, (PF.n + 1024) * sizeof *t);
             if (!t) return free(in.buf), 0;
@@ -4312,7 +4328,11 @@ static void pf_index(void) {
     }
     snprintf(dir, sizeof dir, "%s/in", cache_dir);
     plat_file_list(dir, ".in", pf_collect, NULL);
-    if (PF.n) qsort(PF.ix, PF.n, sizeof *PF.ix, pf_cmp);
+    if (PF.n) qsort(PF.ix, PF.n, sizeof *PF.ix, pf_cmp_full);
+    size_t w = 0;   // an input both in the pack and in in/ is indexed once (it would load twice)
+    for (size_t i = 0; i < PF.n; i++)
+        if (!w || pf_cmp_full(&PF.ix[w - 1], &PF.ix[i])) PF.ix[w++] = PF.ix[i];
+    PF.n = w;
     rt_log("gfx_shader: compute prefetch: %zu stored compute inputs indexed in %.0f ms (session %u, %zu in the used list)",
            PF.n, (plat_now_ns() - t0) / 1e6, CSU.session, CSU.n_file);
 }
@@ -4405,8 +4425,8 @@ static void pf_note_miss(const uint8_t *control, const uint8_t *code, uint32_t l
             const CsuEnt *u = csu_find_file(iid);
             long used = u ? (long)u->session : -1;
             plat_mutex_unlock(&CSU.m);
-            rt_log("gfx_shader: compute nostored: input %.16s stored %d used-list session %ld (now %u, keep %d)",
-                   hex, stored, used, CSU.session, CSU_KEEP);
+            rt_log("gfx_shader: compute not indexed: frame %llu input %.16s stored %d used-list session %ld (now %u)",
+                   (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), hex, stored, used, CSU.session);
         }
         return;
     }

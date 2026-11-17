@@ -1462,7 +1462,9 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
             memset(win_op, 0, sizeof win_op), memset(win_opn, 0, sizeof win_opn);
             win_ns = 0, win_f0 = f, win_bind0 = vk_rp_bind_ns;
         }
-        if (total > 100000000ull) {
+        static int64_t slow_ns = -1;   // KAR_REPLAY_PROF_MS: the submission time that logs its largest kinds (100)
+        if (slow_ns < 0) slow_ns = (getenv("KAR_REPLAY_PROF_MS") ? atoi(getenv("KAR_REPLAY_PROF_MS")) : 100) * 1000000ll;
+        if (total > (uint64_t)slow_ns) {
             int top[3] = {-1, -1, -1};
             for (int k = 0; k < OP_COUNT_ + 2; k++)
                 for (int j = 0; j < 3; j++)

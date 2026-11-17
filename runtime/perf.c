@@ -186,6 +186,13 @@ static uint64_t ft_frame(uint64_t frame, uint64_t now, uint64_t d) {
     if (d > 25000000ull) ft.over25++;
     if (d > 50000000ull) ft.over50++;
     if (d > 100000000ull) ft.over100++;
+    static int64_t slow_ms = -1;   // KAR_FT_SLOW_MS=<ms> (diagnostic): every frame over it, with its waits
+    if (slow_ms < 0) slow_ms = getenv("KAR_FT_SLOW_MS") ? atoi(getenv("KAR_FT_SLOW_MS")) : 0;
+    if (slow_ms > 0 && d > (uint64_t)slow_ms * 1000000ull)
+        rt_log("frametime: slow frame %llu: %.1f ms; shader translation %.1f, pipeline build %.1f, texture upload %.1f, "
+               "replay %.1f, fence/present wait %.1f, pacing %.1f", (unsigned long long)frame, d / 1e6,
+               frame_ns[PERF_XLATE] / 1e6, frame_ns[PERF_PIPE] / 1e6, frame_ns[PERF_TEX] / 1e6, rep / 1e6,
+               (frame_ns[PERF_FENCE] + frame_ns[PERF_DRAIN]) / 1e6, frame_ns[PERF_PACE] / 1e6);
     if (d > 25000000ull && (ft.nworst < FT_WORST || d > ft.worst[FT_WORST - 1].ns)) {
         int i = ft.nworst < FT_WORST ? ft.nworst++ : FT_WORST - 1;
         while (i > 0 && ft.worst[i - 1].ns < d) ft.worst[i] = ft.worst[i - 1], i--;
