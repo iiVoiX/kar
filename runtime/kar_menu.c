@@ -357,14 +357,20 @@ static void menu_tick(Cpu *c) {
             int32_t v = *(const int32_t *)(row_at(r) + 0xc);
             if (v != seen[r]) fprintf(stderr, "kar_menu: f%llu row %d index %d -> %d\n", (unsigned long long)frame_now(), r, seen[r], v), seen[r] = v;
         }
+        static int32_t focus_seen = -9;
+        int32_t f = *(const int32_t *)(uintptr_t)(page_obj + 0xe90);
+        if (f != focus_seen) fprintf(stderr, "kar_menu: f%llu focus %d -> %d\n", (unsigned long long)frame_now(), focus_seen, f), focus_seen = f;
     }
+    if (log_match && (down & (1u << 0 | 1u << 1)))   // diagnostic: A/B with the state that decides what they do
+        fprintf(stderr, "kar_menu: f%llu %s pc_mode %d nrec %d alive %d\n", (unsigned long long)frame_now(),
+                down & 1u ? "A" : "B", pc_mode, nrec, page_obj ? page_alive() : 0);
     if (!(down & (1u << 0 | 1u << 1 | 1u << 6 | 1u << 7)) || !nrec || !page_alive()) return;
-    // A on the cards (no row focused: +0xe90 is -1) opens a sub page: PC mode ends first, as with B
-    int a_card = (down & 1u << 0) && *(const int32_t *)(uintptr_t)(page_obj + 0xe90) < 0;
-    if ((down & (1u << 0 | 1u << 1)) && !(down & (1u << 6 | 1u << 7)) && (!pc_mode || ((down & 1u << 0) && !a_card))) return;
+    // A or B in PC mode: PC mode ends first. B leaves the page; A on a card opens a sub page, and the page does not
+    // say whether a card or a row has the focus (+0xe90 stays on the last row, ms4), while A on a row does nothing.
+    if ((down & (1u << 0 | 1u << 1)) && !(down & (1u << 6 | 1u << 7)) && !pc_mode) return;
     Cpu save;
     memcpy(save.x, c->x, sizeof save.x), memcpy(save.v, c->v, sizeof save.v), save.nzcv = c->nzcv;
-    if (down & (1u << 0 | 1u << 1) && !(down & (1u << 6 | 1u << 7))) {   // B or A on a card: the player leaves the page
+    if (down & (1u << 0 | 1u << 1) && !(down & (1u << 6 | 1u << 7))) {   // A or B: PC mode ends
         rows_leave(c);
         pc_mode = 0;
         set_texts(c);
