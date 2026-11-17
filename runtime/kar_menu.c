@@ -439,14 +439,14 @@ static void menu_tick(Cpu *c) {
     Cpu save;
     memcpy(save.x, c->x, sizeof save.x), memcpy(save.v, c->v, sizeof save.v), save.nzcv = c->nzcv;
     if ((down & LEAVE) && !(down & (1u << 6 | 1u << 7))) {   // A, B or X: PC mode ends
+        pc_mode = 0;   // before rows_leave: the selector setter looks the help text up again, the game's one now
         rows_leave(c);
-        pc_mode = 0;
         set_texts(c);
         titles_refresh(c);
         if (log_match) fprintf(stderr, "kar_menu: f%llu pc mode 0 (leaving the page)\n", (unsigned long long)frame_now());
     } else {   // L or R
-        if (pc_mode) rows_leave(c);
-        pc_mode = !pc_mode;
+        pc_mode = !pc_mode;   // before rows_leave/rows_enter: the selector setter looks the help text up in this mode
+        if (!pc_mode) rows_leave(c);
         if (pc_mode) rows_enter(c);
         set_texts(c);
         titles_refresh(c);

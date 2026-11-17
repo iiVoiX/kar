@@ -56,3 +56,10 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Neu standardmäßig an: karpace (16.6a), HUD am Rand (17.3b, `hud_position`/`KAR_HUD_EDGES`/`KAR_HUD_CUTS`), Compute-Vorbau nach Treiberwechsel mit Ladebildschirm (13.3, `KAR_CS_COLD`), Codec-Event-Wiederverwendung (7.2).
 - Diagnose-Schalter: `KAR_SLEEP_LOG`, `KAR_HUD_COLS`, `KAR_UBO_LOG`/`KAR_UBO_PROG`, `KAR_MUTEX_LOG` (an), `KAR_BOOT_DEMO`/`KAR_BOOT_SHOT`.
 - Nächste Schritte (advisor): Dauerlauf inkl. Menü-Leerlauf und Wiederholung (3.4/12.5), Validation-Lauf (12.3, beantwortet 2.6), HUD-Schalter ins Spielmenü (15.x).
+
+
+## 15.4 PC-Menü Mechanik (2026-11-17)
+- Anzeige-Seite hat EINEN Wähler bei Seite+0xb90 (Index +0x260 = Seite+0xdf0); Fokus lädt ihn aus Zeile+0xc (`f_700300c5f4`).
+- Weg ohne Wirkung: +0xc zuerst schreiben, dann Setter `f_7002df08c0(Wähler, idx)` (row_show). Weg mit Wirkung (Spieloption live): Setter ohne Vorab-Schreiben, dann `f_7002df110c(Wähler,1)` (row_effect).
+- Sonde für Live-Wirkung: Vollbild lokal auf Zeile 0 (Schriftgröße) legen (scratchpad probe0.py), kein Commit.
+- Testskripte: Eingaben zählen Ticks, Shots zählen Frames; bei >60 fps laufen Frames schneller. Lauf endet nach letztem Shot.
