@@ -4392,7 +4392,24 @@ static void pf_note_miss(const uint8_t *control, const uint8_t *code, uint32_t l
     if (!PF.started || !PF.n) return;
     PfEnt k = {.h = pf_hash(control, code, length)};
     PfEnt *e = bsearch(&k, PF.ix, PF.n, sizeof k, pf_cmp);
-    if (!e) { gfx_pf_why[0]++; return; }
+    if (!e) {
+        gfx_pf_why[0]++;
+        static int told_ns;
+        if (told_ns++ < 40) {   // why the prefetch index lacks it: no stored input, or not in the recent used list
+            char hex[68];
+            key_hex(iid, hex);
+            Inputs in;
+            int stored = in_load(iid, &in);
+            if (stored) free(in.buf);
+            plat_mutex_lock(&CSU.m);
+            const CsuEnt *u = csu_find_file(iid);
+            long used = u ? (long)u->session : -1;
+            plat_mutex_unlock(&CSU.m);
+            rt_log("gfx_shader: compute nostored: input %.16s stored %d used-list session %ld (now %u, keep %d)",
+                   hex, stored, used, CSU.session, CSU_KEEP);
+        }
+        return;
+    }
     plat_mutex_lock(&PF.m);
     int queued = 0;
     for (uint32_t i = PF.head; i != PF.tail && !queued; i++) queued = PF.q[i][1] == code;
