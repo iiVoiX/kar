@@ -877,8 +877,21 @@ static uint32_t ui_full_flat(VkExec *ex) {
         return 0;
     const float *f = (const float *)(uintptr_t)ui_block;
     if (f[0] != 1920.0f || f[3] != 0.0f || f[5] != -1080.0f || f[7] != 0.0f) return 0;
-    uint64_t t = ui_frag_tex(ex);
-    return t >> 32 == 1 && (t >> 8 & 0xffffff) == 1 ? ex->color[0].width : 0;
+    // flat only if every bound fragment texture is 1x1: a stale large binding the program never samples then makes it
+    // a miss (stays as drawn), never a stretched picture
+    int bound = 0;
+    vk_texture_lock();
+    for (int sl = 0; sl < 16; sl++) {
+        uint64_t th = ex->tex[1][sl];
+        if (!th) continue;
+        view_t v;
+        int hv;
+        const VkTexImage *ti = vk_texture_by_id_locked(&ex->tex_pool, (int)(th & 0xfffff), &v, &hv);
+        if (!ti || ti->width != 1 || ti->height != 1) { vk_texture_unlock(); return 0; }
+        bound++;
+    }
+    vk_texture_unlock();
+    return bound ? ex->color[0].width : 0;
 }
 static void ui_full_log(VkExec *ex, int op, const void *a) {
     static int on = -1;
