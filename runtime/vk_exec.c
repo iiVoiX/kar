@@ -1093,10 +1093,9 @@ static void ui_layer_shift(VkExec *ex) {
         // HUD at the edges: the left band to the left edge, the middle centred, the right band to the right edge, and
         // the two gaps this opens filled with the cleared colour from the undrawn right part (hud_cols_done).
         int mode = hud_edges_mode();
-        // The race: the race HUD's anchor program drew into the layer in this frame or the one before (ui_anchor).
-        // The game's frame limiter (kar_pace.c) cannot tell: it is off in the menus as well.
-        uint64_t rf = __atomic_load_n(&ui_race_fr, __ATOMIC_RELAXED);
-        int race = rf != ~0ull && rf + 1 >= fr;
+        // The race: the race HUD's anchor program drew into the layer in this frame (ui_anchor; the layer's draws
+        // come before this copy). The game's frame limiter (kar_pace.c) cannot tell: it is off in the menus as well.
+        int race = __atomic_load_n(&ui_race_fr, __ATOMIC_RELAXED) == fr;
         if (race != __atomic_load_n(&ui_race_now, __ATOMIC_RELAXED)) {
             __atomic_store_n(&ui_race_now, race, __ATOMIC_RELAXED);
             if (HC.log) rt_log("hud edges: frame %llu race %d", (unsigned long long)fr, race);

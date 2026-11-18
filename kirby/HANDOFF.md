@@ -82,11 +82,13 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Ungespeicherte Änderung der anderen KI in `runtime/vk_exec_draw.c` (cur-Reset) nicht angefasst.
 - Nächstes: 17.3c nur im Rennen (Advisor): Banner/Pause/Ergebnis per `KAR_UI_DUMP` klassifizieren, dann Gate
   `race && top_on && !blocked`, einmal pro Bild festgelegt, `hud_cols_read` aus während Elementweg.
-- 17.3c Diagnose: `KAR_UI_DUMP_AUTO=<n>` dumpt das Bild nach den ersten n Zentrierungen des Wächters (jede, auch
-  Überblendungen vor dem Rennen). `KAR_UI_ANCHOR=<key>,…` loggt, wann ein Programm (ui_prog_key, über Neustarts
+- 17.3c Diagnose: `KAR_UI_DUMP_AUTO=<n>` dumpt das Bild nach den ersten n Zentrierungen des Wächters im Rennen
+  (Anker gezeichnet). `KAR_UI_ANCHOR=<key>,…` loggt, wann ein Programm (ui_prog_key, über Neustarts
   stabil) ins UI-Layer zeichnet oder aufhört – Suche nach einem Renn-Signal.
 - **Befund:** `race` in ui_layer_shift ist im ganzen Lauf 1: der karpace-Hook (kar_pace.c) zählt nie (pace 0, auch
-  bei Limit 60 im Menü); der Begrenzer des Spiels ist in diesen Menüs aus. Das 17.3b-Gate ist damit nur
-  `top_on && !blocked`.
+  bei Limit 60 im Menü); der Begrenzer des Spiels ist in diesen Menüs aus. Ersetzt durch den Anker (997de56).
+- Offen: Streifen Streckenbild oben links im 16:9-Bereich in Menü-/Ergebnis-Shots (schon vor 997de56).
+- 17.3c Klassen im Rennen: Runden-Banner und Flug-Hinweis unten (Key 1d9d…, 1120×528) sind normal (Klasse 0) →
+  bleiben im Elementweg ganz; Ziel ohne Block → Mitte; Pause → Anker aus → Mitte-Kopie. Unter-Layer: 2a63…, e363….
 - 17.3b-Gate nutzt jetzt den Anker (`ui_race_fr`, Key `KAR_RACE_KEY`, Standard 57d04d70800e9af4); Testskript mit Pause:
   `kirby/scripts/fresh_race_pause_ms.txt` (PLUS bei 128 s und 134 s).
