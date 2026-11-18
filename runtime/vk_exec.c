@@ -781,8 +781,9 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
     const uint32_t *w = u ? (const uint32_t *)(uintptr_t)u->addr : NULL;
     float f[8] = {0};
     if (w) memcpy(f, w, sizeof f);
-    rt_log("ui dump: frame %llu draw %d prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
-           (unsigned long long)fr, idx++, (unsigned long long)(ex->prog ? ex->prog->serial : 0),
+    rt_log("ui dump: frame %llu draw %d target %llx %ux%u prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+           (unsigned long long)fr, idx++, (unsigned long long)(uintptr_t)ex->color[0].image, ex->color[0].width,
+           ex->color[0].height, (unsigned long long)(ex->prog ? ex->prog->serial : 0),
            (unsigned long long)ex->tex[4][0], count, ex->vp[0][0], ex->vp[0][1], ex->vp[0][2], ex->vp[0][3],
            ex->has_scissor ? ex->scissor.x : -1, ex->has_scissor ? ex->scissor.y : -1, ex->scissor.w, ex->scissor.h,
            f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
@@ -794,6 +795,39 @@ static uint64_t ui_block;  // the last storage buffer at stage 0 index 1: an int
 // KAR_UI_SKIP=<frame>:<class>,... (diagnostic, 17.3c): leaves out the interface draws of one class within 8 frames of
 // <frame>: 1 = blocks holding the identity (a whole-layout rectangle), 2 = other blocks with a width under 2 (another
 // projection). Shows which draws carry the rank, the speedometer and the lap counter.
+// KAR_UI_PROBE=<frame>:<mode>,... (diagnostic, 17.3c): within 8 frames of <frame> every draw into the interface
+// layer goes straight to its place in the wide layer, and the copy to the middle is left out. Mode 1: all at the
+// middle (off); mode 2: identity blocks at the left edge (0), other-projection blocks at the right edge (2 off), the
+// rest at the middle. Returns the x offset for this draw, -1 outside a probe window.
+static int ui_probe_mode(void) {
+    static uint64_t fr_at[8];
+    static int md[8], n = -1;
+    if (n < 0) {
+        n = 0;
+        const char *e = getenv("KAR_UI_PROBE");
+        while (e && *e && n < 8) {
+            fr_at[n] = strtoull(e, (char **)&e, 10);
+            md[n] = *e == ':' ? atoi(e + 1) : 0;
+            n++;
+            e = strchr(e, ',');
+            if (e) e++;
+        }
+    }
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    for (int i = 0; i < n; i++)
+        if (md[i] && fr + 8 >= fr_at[i] && fr <= fr_at[i] + 8) return md[i];
+    return 0;
+}
+static int ui_probe_offset(VkExec *ex) {
+    int mode = ui_probe_mode();
+    if (!mode || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return -1;
+    int off = ((int)ex->color[0].width - 1920) / 2;
+    if (mode == 1 || !ui_block) return off;
+    const float *f = (const float *)(uintptr_t)ui_block;
+    int c = f[0] == 1.0f && f[3] == 0.0f && f[5] == -1.0f ? 1 : (f[0] < 2.0f && f[0] > -2.0f) ? 2 : 0;
+    return c == 1 ? 0 : c == 2 ? 2 * off : off;
+}
+
 static int ui_skip(VkExec *ex) {
     static uint64_t fr_at[8];
     static int cls[8], n = -1;
@@ -913,6 +947,7 @@ static void ui_layer_shift(VkExec *ex) {
             return;
         }
         if (!kar_wide_output(t->width, t->height) || !UI.layer || UI.frame != fr || UI.shifted) continue;
+        if (ui_probe_mode()) { UI.shifted = 1; return; }   // KAR_UI_PROBE: the draws are in place already
         VkCtx *c = vk_ctx();
         if (!UI.spare) {
             VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
@@ -1516,6 +1551,19 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             if (h->op == OP_BIND_SSBO && ((const p_bind_buf *)a)->stage == 0 && ((const p_bind_buf *)a)->index == 1)
                 ui_block = ((const p_bind_buf *)a)->addr;
             if ((h->op == OP_DRAW || h->op == OP_DRAW_IDX) && ui_skip(ex)) break;
+            int ui_dx = (h->op == OP_DRAW || h->op == OP_DRAW_IDX) ? ui_probe_offset(ex) : -1;
+            if (ui_dx > 0) {   // KAR_UI_PROBE: this draw at its place in the wide layer
+                float vx = ex->vp[0][0];
+                p_scissor sc = ex->scissor;
+                int had = ex->has_scissor;
+                ex->vp[0][0] += (float)ui_dx;
+                if (had) ex->scissor.x += ui_dx; else ex->scissor = (p_scissor){ui_dx, 0, 1920, 1081}, ex->has_scissor = 1;
+                ex->dirty |= VK_EXEC_DIRTY_VIEWPORT | VK_EXEC_DIRTY_SCISSOR;
+                vk_exec_op_draw(ex, h->op, a);
+                ex->vp[0][0] = vx, ex->scissor = sc, ex->has_scissor = had;
+                ex->dirty |= VK_EXEC_DIRTY_VIEWPORT | VK_EXEC_DIRTY_SCISSOR;
+                break;
+            }
             vk_exec_op_draw(ex, h->op, a);
             break;
         case OP_COPY_B2B: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_CLEAR_TEX:
