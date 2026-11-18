@@ -847,6 +847,72 @@ static void ui_anchor(VkExec *ex) {
     if (k == race_key) __atomic_store_n(&ui_race_fr, fr, __ATOMIC_RELAXED);
     for (int i = 0; i < n; i++) if (k == key[i]) seen |= 1u << i;
 }
+// KAR_UI_FULL_LOG=1 (diagnostic, 17.18): draws into the interface layer whose plain block is the whole 16:9 layout
+// (1920 wide from x 0; height 1080 or another), each signature (program, fragment texture handle 0, vertex count)
+// when it starts and stops being drawn: the pause dimmer, fades and flashes against menu backgrounds.
+// The first fragment texture's size as width << 32 | height << 8 | format & 0xff, 1 for a handle that resolves to
+// nothing, 0 without one (NVN fragment stage 1, vk_exec_draw.c NVN_STAGE_FS).
+static uint64_t ui_frag_tex(VkExec *ex) {
+    for (int sl = 0; sl < 16; sl++) {
+        uint64_t th = ex->tex[1][sl];
+        if (!th) continue;
+        view_t v;
+        int hv;
+        uint64_t h = 1;
+        vk_texture_lock();
+        const VkTexImage *ti = vk_texture_by_id_locked(&ex->tex_pool, (int)(th & 0xfffff), &v, &hv);
+        if (ti) h = (uint64_t)ti->width << 32 | (uint64_t)ti->height << 8 | ((uint64_t)ti->format & 0xff);
+        vk_texture_unlock();
+        return h;
+    }
+    return 0;
+}
+// KAR_UI_FULL=1 (17.18, off by default): a draw into the interface layer whose block is the whole 16:9 layout and
+// whose fragment texture is 1x1 (a flat fade, flash or dimmer: KAR_UI_FULL_LOG showed the fades and flashes as such
+// quads and the menu backgrounds with 1920x1080 textures) is drawn over the whole layer width. Returns that width, or 0.
+static uint32_t ui_full_flat(VkExec *ex) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_UI_FULL") && *getenv("KAR_UI_FULL") == '1';
+    if (!on || !ui_block || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height))
+        return 0;
+    const float *f = (const float *)(uintptr_t)ui_block;
+    if (f[0] != 1920.0f || f[3] != 0.0f || f[5] != -1080.0f || f[7] != 0.0f) return 0;
+    uint64_t t = ui_frag_tex(ex);
+    return t >> 32 == 1 && (t >> 8 & 0xffffff) == 1 ? ex->color[0].width : 0;
+}
+static void ui_full_log(VkExec *ex, int op, const void *a) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_UI_FULL_LOG") && *getenv("KAR_UI_FULL_LOG") == '1';
+    if (!on) return;
+    static struct { uint64_t k, h; int cnt; float hgt; uint64_t last, first; } sig[64];
+    static int nsig;
+    static uint64_t fr_cur = ~0ull;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (fr != fr_cur) {
+        for (int i = 0; i < nsig; i++)
+            if (sig[i].last != ~0ull && sig[i].last + 1 < fr) {   // not drawn in the frame before: it ended
+                rt_log("ui full: key %016llx tex %ux%u fmt %u count %d h %.1f frames %llu-%llu", (unsigned long long)sig[i].k,
+                       (unsigned)(sig[i].h >> 32), (unsigned)(sig[i].h >> 8 & 0xffffff), (unsigned)(sig[i].h & 0xff), sig[i].cnt, sig[i].hgt, (unsigned long long)sig[i].first,
+                       (unsigned long long)sig[i].last);
+                sig[i].last = ~0ull;
+            }
+        fr_cur = fr;
+    }
+    if (!ui_block || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
+    const float *f = (const float *)(uintptr_t)ui_block;
+    if (f[0] != 1920.0f || f[3] != 0.0f) return;
+    int cnt = op == OP_DRAW ? ((const p_draw *)a)->count : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->count : -1;
+    uint64_t k = ui_cur_key(ex), h = ui_frag_tex(ex);
+    int i = 0;
+    while (i < nsig && !(sig[i].k == k && sig[i].h == h && sig[i].cnt == cnt && sig[i].hgt == f[5])) i++;
+    if (i == nsig) {
+        if (nsig == 64) return;
+        sig[i].k = k, sig[i].h = h, sig[i].cnt = cnt, sig[i].hgt = f[5], sig[i].last = ~0ull, nsig++;
+        __atomic_store_n(&ui_dump_auto_at, fr + 1, __ATOMIC_RELAXED);
+    }
+    if (sig[i].last == ~0ull) sig[i].first = fr;
+    sig[i].last = fr;
+}
 static int ui_dump_frame(void);
 static int ui_probe_offset(VkExec *ex);
 static void ui_draw_dump(VkExec *ex, int op, const void *a) {
@@ -1766,6 +1832,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
                 vk_exec_frame.draws_seen++, split_draws++;
                 ui_draw_dump(ex, h->op, a);
                 ui_anchor(ex);
+                ui_full_log(ex, h->op, a);
             }
             if (h->op == OP_DISPATCH || h->op == OP_DISPATCH_IND) vk_exec_frame.dispatches++, split_draws++;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
@@ -1776,6 +1843,19 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             if (h->op == OP_BIND_SSBO && ((const p_bind_buf *)a)->stage == 0 && ((const p_bind_buf *)a)->index == 1)
                 ui_block = ((const p_bind_buf *)a)->addr;
             if ((h->op == OP_DRAW || h->op == OP_DRAW_IDX) && ui_skip(ex)) break;
+            uint32_t ui_fw = (h->op == OP_DRAW || h->op == OP_DRAW_IDX) ? ui_full_flat(ex) : 0;
+            if (ui_fw) {   // KAR_UI_FULL: a flat full-layout overlay over the whole layer width
+                float v0 = ex->vp[0][0], v2 = ex->vp[0][2];
+                p_scissor sc = ex->scissor;
+                int had = ex->has_scissor;
+                ex->vp[0][0] = 0.0f, ex->vp[0][2] = (float)ui_fw;
+                ex->scissor = (p_scissor){0, 0, (int)ui_fw, 1081}, ex->has_scissor = 1;
+                ex->dirty |= VK_EXEC_DIRTY_VIEWPORT | VK_EXEC_DIRTY_SCISSOR;
+                vk_exec_op_draw(ex, h->op, a);
+                ex->vp[0][0] = v0, ex->vp[0][2] = v2, ex->scissor = sc, ex->has_scissor = had;
+                ex->dirty |= VK_EXEC_DIRTY_VIEWPORT | VK_EXEC_DIRTY_SCISSOR;
+                break;
+            }
             int ui_dx = (h->op == OP_DRAW || h->op == OP_DRAW_IDX) ? ui_probe_offset(ex) : -1;
             if (ui_dx > 0) {   // KAR_UI_PROBE: this draw at its place in the wide layer
                 float vx = ex->vp[0][0];

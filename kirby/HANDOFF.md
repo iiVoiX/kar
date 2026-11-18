@@ -105,3 +105,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   generisch (dasselbe zeichnet Platz oder Tacho) → Seite aus den Blockwörtern.
 - Anderes Seitenverhältnis testen: `KAR_DISPLAY_RES=<w>x<h>` (seit 17.17 jede Höhe, intern auf 1440 umgerechnet); TOTK_WINDOW_SIZE ändert das Render-Verhältnis nicht. Vorbau-Zähler: `KAR_CS_PF_LOG=1`.
 - 13.3 Diagnose: `KAR_CS_LOG=1` loggt jeden Compute-Build ≥ 600 KB (Zeiger, ms, Bild, Worker/sync, Warteschlange) und jede Dispatch-Wartezeit; `KAR_CS_USED_MAX` setzt die Gebrauchslisten-Grenze (1500).
+- 17.18: `KAR_UI_FULL_LOG=1` (Vollbild-Rechtecke mit Texturgröße), `KAR_UI_FULL=1` (flache Vollbild-Overlays über volle Breite, aus).
