@@ -248,10 +248,15 @@ static void cb_done(void *arg) {   // completion thread
         plat_mutex_unlock(&spare_lock);
         if (!kept) vk_destroy_gen_bump(), vmaDestroyBuffer(c->vma, r->chunks[i].buf, r->chunks[i].alloc);
     }
-    free(r->written), free(r->written_slot), free(r->pools), free(r->chunks), free(r);
+    free(r->written), free(r->written_slot), free(r->pools), free(r->chunks);
+    if (cur == r) cur = NULL, cur_fence = 0;
+    free(r);
 }
 
-void vk_exec_draw_new_cb(void) { memset(&B, 0, sizeof B); }
+void vk_exec_draw_new_cb(void) {
+    memset(&B, 0, sizeof B);
+    cur = NULL, cur_fence = 0;
+}
 
 static CbRes *cb_res(VkExec *ex) {
     if (cur && cur_fence == ex->fence) return cur;
@@ -310,7 +315,7 @@ static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *
 
 void vk_exec_draw_flush_scratch(void) {
     VkCtx *c = vk_ctx();
-    if (!c || !cur || !cur->nchunks) return;
+    if (!c || !cur) return;
     for (int i = 0; i < cur->nchunks; i++) {
         Chunk *ch = &cur->chunks[i];
         if (ch->used > ch->flushed) {
@@ -318,6 +323,7 @@ void vk_exec_draw_flush_scratch(void) {
             ch->flushed = ch->used;
         }
     }
+    cur = NULL, cur_fence = 0;
 }
 
 static uint32_t written_hash(uint64_t addr, uint64_t size) {
