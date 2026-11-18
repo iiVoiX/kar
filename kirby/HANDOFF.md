@@ -31,7 +31,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Frame generation (16.7): `KAR_FG=1` runs (runtime/vk_fg.cpp, FFX optical flow + interpolation, own pacing), but the
   interpolated picture is ~a blend: the game renders no motion vectors (its DLSS class is never built in 1.3.3) and
   optical flow is noise under the game's motion blur. Tools: `KAR_FG_DUMP=<n>` (+`KAR_FG_DUMP_DIR`), `KAR_FG_DEBUG=1`.
-- Open bugs: (Figuren-/Maschinenwahl im Breitbild 2026-11-18 wie 16:9, kein Anschnitt mehr gesehen); empty speech bubble 2.6 (`KAR_POOL_BL=1` 2026-11-18: kein Unterschied); Top Ride card garbage 1/10; City Trial: schwarzer Kirby in Lava-Höhlen (3.2).
+- Open bugs: Fahrerwahl im Breitbild 2026-11-18 wie 16:9 (ein Bildpaar); Maschinenwahl nicht verglichen; Streifen oben links im Menü offen; empty speech bubble 2.6 (`KAR_POOL_BL=1` 2026-11-18: kein Unterschied); Top Ride card garbage 1/10; City Trial: schwarzer Kirby in Lava-Höhlen (3.2).
 
 ## Next
 - 16.7 B2: camera motion vectors from depth + current/previous camera matrices (find the camera in game code; the
@@ -88,4 +88,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - **Diagnose-Schalter:** `KAR_UI_INV`, `KAR_UI_ANCHOR`, `KAR_UI_DUMP(_AUTO)`, `KAR_UI_SKIP=<f>:k<key>`, `KAR_UI_PROBE`,
   `KAR_UI_FULL_LOG`, `KAR_HUD_COLS`, `KAR_CS_LOG`, `KAR_CS_PF_LOG`, `KAR_CS_USED_MAX`.
 - **Validation (1.9, 2026-11-18):** VUID-08600 – Set 2 (Bindless) bei Draws/Dispatches nicht kompatibel gebunden, ab Menü (unabhängig von 4f37ae8). Gegenlauf KAR_BINDLESS=0 brach früh ab → wiederholen, Bind-Stellen lesen.
-- **Nächst:** schnelle Punkte (2.6 Sprechblase mit `KAR_POOL_BL=1`, dann weitere kurze Zeilen; je Punkt max. 2 Läufe). Geparkt: 18.9 (Bindless-Set Validation), 17.19, schwarzer Kirby (3.2). Module: `E:/kirby/backup/lack/`.
+- **Nächst (gestoppt 2026-11-18, auf Nutzer-Go warten):** 1) Compute-Shader > 4 MiB, die nie gebaut werden (max. 3 Läufe), 2) CPU-Profil 4.4 (2 Läufe, nur Messung), 3) 2.6 Sprechblase mit Zähl-Log (2 Läufe), 4) 17.19 Pause-Dimmer: Erzeuger der 1920×1080-Ziele (2 Läufe). Geparkt: schwarzer Kirby (3.2), 18.9 (vor 11.3/16.3). Module: `E:/kirby/backup/lack/`.
