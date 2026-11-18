@@ -611,7 +611,7 @@ uint64_t kar_wide_persp_all(void);
 #define HC_STEP 4    // rows read
 #define HC_HOLD 12   // reads in a row that switch the guard
 static struct { VkBuffer buf; VmaAllocation mem; void *map; uint32_t w, h, bpp, area, rows; int busy, log, blocked;
-                int cross_n, clear_n, crossed_mask, top_on, top_up, top_down; uint16_t col[2][4096]; uint64_t t0, n, nblocked, nmany, used_sum[2], fill_sum; } HC;
+                int cross_n, clear_n, crossed_mask, top_on, top_up, top_down; uint16_t col[2][4096]; uint64_t frame, t0, n, nblocked, nmany, used_sum[2], fill_sum; } HC;
 // The cuts, in columns of the 1920-wide layout: top left, top right, bottom left, bottom right
 // (KAR_HUD_CUTS=tl,tr,bl,br; default 400,1120,400,1500). The top right one lies left of the tip boxes, the bottom right
 // one left of the speedometer; the top right one between the timer (ends near 1050) and the tip boxes (from 1190).
@@ -665,19 +665,20 @@ static void hud_cols_done(void *arg) {
     // A screen of its own (the results) lies on three or four cuts at once; in the race a tip box or a rider's
     // marker lies on one or two now and then, and that must not send the whole HUD to the middle.
     int many = __builtin_popcount((unsigned)mask) >= 3 || (mask & 5) == 5 || (mask & 10) == 10;   // 3 cuts, or one side in both halves (the pause panel)
-    // A banner across the middle ("LETZTE RUNDE") lies on both cuts of one half: the cuts would split its letters
+    // A banner across the middle ("LETZTE RUNDE") lies on both cuts of the top half: the cuts would split its letters
     // while it flies in, so it centres the layer at the first read, and the layer stays there until the cuts have
     // been clear for HC_HOLD reads (17.3b, 2026-11-17).
-    int banner = (mask & 3) == 3 || (mask & 12) == 12;
+    int banner = (mask & 3) == 3;   // the top half only: the bottom pair fired mid-race in bn2 (cause unseen)
     if (many || banner) HC.cross_n++, HC.clear_n = 0; else HC.clear_n++, HC.cross_n = 0;
     HC.nmany += many;
     if (!HC.blocked && (HC.cross_n >= HC_HOLD || banner)) {
         __atomic_store_n(&HC.blocked, 1, __ATOMIC_RELAXED);
-        if (HC.log) rt_log("hud edges: centred (%s, cuts %d%d%d%d)", banner ? "banner" : "3+ cuts", mask & 1, mask >> 1 & 1, mask >> 2 & 1, mask >> 3 & 1);
+        if (HC.log) rt_log("hud edges: frame %llu centred (%s, cuts %d%d%d%d)", (unsigned long long)HC.frame,
+                           banner ? "banner" : "3+ cuts", mask & 1, mask >> 1 & 1, mask >> 2 & 1, mask >> 3 & 1);
     }
     if (HC.blocked && HC.clear_n >= HC_HOLD) {
         __atomic_store_n(&HC.blocked, 0, __ATOMIC_RELAXED);
-        if (HC.log) rt_log("hud edges: back to the edges");
+        if (HC.log) rt_log("hud edges: frame %llu back to the edges", (unsigned long long)HC.frame);
     }
     HC.crossed_mask |= mask, HC.n++, HC.nblocked += HC.blocked;
     uint64_t now = plat_now_ns();
@@ -709,6 +710,7 @@ static int hud_edges_mode(void) {   // read again when a setting changed (the in
 }
 static void hud_cols_read(VkExec *ex, uint64_t fr) {
     if (!hud_edges_mode() || __atomic_load_n(&HC.busy, __ATOMIC_ACQUIRE) || (fr & 3)) return;
+    HC.frame = fr;   // the frame of this read, for the guard's log lines
     uint32_t bpp = 0;
     switch (UI.fmt) {
     case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_UNORM:
