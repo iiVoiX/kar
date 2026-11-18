@@ -88,4 +88,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   `build_game.py --runtime … --out …` + `-Exe` (Junctions mit `cmd /c rmdir` entfernen).
 - **Diagnose-Schalter:** `KAR_UI_INV`, `KAR_UI_ANCHOR`, `KAR_UI_DUMP(_AUTO)`, `KAR_UI_SKIP=<f>:k<key>`, `KAR_UI_PROBE`,
   `KAR_UI_FULL_LOG`, `KAR_HUD_COLS`, `KAR_CS_LOG`, `KAR_CS_PF_LOG`, `KAR_CS_USED_MAX`.
-- **Nächst:** Ruckler im Rennen (16.6, `KAR_FT_SLOW_MS`), dann 17.18 per Reflexion.
+- **Nächst:** 17.18 per Reflexion (gelesene Fragment-Slots). 16.6-Ruckler = Erstnutzung; Grafik-Liste `PU_KEEP` 8 Sitzungen als Risiko offen. Sicherungen: `E:/kirby/backup/` (cs-used, pipeline-used, pipeline-keys).
