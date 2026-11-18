@@ -82,6 +82,13 @@ typedef struct {
     uint32_t aspect, level0, levels, layer0, layers, swz;
 } ViewKey;
 _Static_assert(sizeof(ViewKey) == 40, "ViewKey is hashed as bytes: no padding");
+typedef struct {
+    VkBuffer buffer;
+    VkFormat format;
+    uint32_t pad;
+    VkDeviceSize offset, range;
+} BufViewKey;
+_Static_assert(sizeof(BufViewKey) == 32, "BufViewKey is hashed as bytes: no padding");
 typedef struct { uint64_t addr, size; } Range;
 typedef struct {
     Chunk *chunks;
@@ -531,12 +538,32 @@ static void dummies_init(void) {
 
 static void twins_release(VkCtx *c);
 
+typedef struct BufViewNode { struct BufViewNode *next; BufViewKey k; VkBufferView view; } BufViewNode;
+static nvn_hmap buf_view_of;             // BufViewKey -> VkBufferView
+static nvn_hmap buf_views_by_buffer;     // VkBuffer -> its first BufViewNode
+
+static void buf_views_shutdown(VkDevice dev) {
+    vk_texture_lock();
+    for (uint32_t i = 0; i < buf_views_by_buffer.cap; i++) {
+        for (BufViewNode *n = buf_views_by_buffer.vals[i], *next; n; n = next) {
+            next = n->next;
+            if (n->view) vkDestroyBufferView(dev, n->view, NULL);
+            free(n);
+        }
+        buf_views_by_buffer.vals[i] = NULL;
+    }
+    buf_views_by_buffer.n = 0;
+    nvn_hm_clear(&buf_view_of, NULL);
+    vk_texture_unlock();
+}
+
 // Releases the stand-ins and the depth twins. The device must be idle; the game path leaves them to process exit like
 // the pipelines.
 void vk_exec_draw_shutdown(void) {
     VkCtx *c = vk_ctx();
     if (!c) return;
     twins_release(c);
+    buf_views_shutdown(c->device);
     for (int i = 0; Z.ready && i < DV_COUNT; i++) {
         if (Z.img[i].sview != Z.img[i].view) vkDestroyImageView(c->device, Z.img[i].sview, NULL);
         vkDestroyImageView(c->device, Z.img[i].view, NULL);
@@ -771,6 +798,48 @@ void vk_exec_image_gone(VkImage image) {
         next = n->next;
         nvn_hm_del(&view_of, &n->k);
         vk_defer_view(n->view);
+        free(n);
+    }
+}
+
+// Texture lock held. Returns VK_NULL_HANDLE on failure.
+static VkBufferView get_buf_view(VkBuffer buffer, VkFormat format, VkDeviceSize offset, VkDeviceSize range) {
+    BufViewKey k = {.buffer = buffer, .format = format, .pad = 0, .offset = offset, .range = range};
+    if (!buf_view_of.klen)
+        nvn_hm_init(&buf_view_of, sizeof(BufViewKey)), nvn_hm_init(&buf_views_by_buffer, sizeof(VkBuffer));
+    VkBufferView found = (VkBufferView)nvn_hm_get(&buf_view_of, &k);
+    if (found) return found;
+    VkBufferViewCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = buffer, .format = format,
+                                 .offset = offset, .range = range};
+    VkBufferView view = VK_NULL_HANDLE;
+    VkResult r = vkCreateBufferView(vk_ctx()->device, &bi, NULL, &view);
+    if (r != VK_SUCCESS) {
+        static int32_t n_bv_fail;
+        if (plat_inc32(&n_bv_fail) <= 16)
+            rt_log("vk: vkCreateBufferView (fmt %d, off %llu, range %llu) failed (%d)", (int)format,
+                   (unsigned long long)offset, (unsigned long long)range, (int)r);
+        return VK_NULL_HANDLE;
+    }
+    BufViewNode *n = malloc(sizeof *n);
+    if (!n) rt_fatal("vk: out of memory");
+    *n = (BufViewNode){nvn_hm_get(&buf_views_by_buffer, &buffer), k, view};
+    nvn_hm_put(&buf_views_by_buffer, &buffer, n);
+    nvn_hm_put(&buf_view_of, &k, (void *)view);
+    return view;
+}
+
+void vk_exec_buffer_gone(VkBuffer buffer) {
+    if (!buffer) return;
+    vk_texture_lock();
+    BufViewNode *head = buf_views_by_buffer.klen ? nvn_hm_del(&buf_views_by_buffer, &buffer) : NULL;
+    for (BufViewNode *n = head; n; n = n->next) nvn_hm_del(&buf_view_of, &n->k);
+    vk_texture_unlock();
+    if (!head) return;
+    vk_destroy_gen_bump();
+    VkCtx *c = vk_ctx();
+    for (BufViewNode *n = head, *next; n; n = next) {
+        next = n->next;
+        if (c && n->view) vkDestroyBufferView(c->device, n->view, NULL);
         free(n);
     }
 }
@@ -2669,8 +2738,7 @@ static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
                     rs_add(tmp, &n, ex, &ex->ubo[st][r->cbuf_slot - 3], sizeof(p_bind_buf));
                     ptr[np++] = (RsPtr){st, r};
                 }
-            } else if ((b->kind == GFX_RES_TEX || b->kind == GFX_RES_IMG) && b->type != VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER &&
-                       b->type != VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+            } else if (b->kind == GFX_RES_TEX || b->kind == GFX_RES_IMG) {
                 int img = b->kind == GFX_RES_IMG, cap = img ? 32 : 128;
                 // material arrays: their element handles come from a constant buffer, so the signature takes a hash
                 // of those words (arr_sig) instead of bound slots; pool and c0 handles stay out of it (no skip)
@@ -3008,11 +3076,47 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             int img = b->kind == GFX_RES_IMG;
             if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || b->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
                 kind = 2;
-                for (uint32_t k = 0; k < cnt; k++) {   // buffer textures are not replayed yet
+                int storage_tb = b->type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+                VkCtx *ctx = vk_ctx();
+                uint64_t align = ctx->props.limits.minTexelBufferOffsetAlignment ? ctx->props.limits.minTexelBufferOffsetAlignment : 16;
+                uint64_t max_elems = ctx->props.limits.maxTexelBufferElements ? ctx->props.limits.maxTexelBufferElements : 65536;
+                vk_texture_lock();
+                for (uint32_t k = 0; k < cnt; k++) {
+                    int slot = r->slot + (int)k;
+                    uint64_t h = 0;
+                    if (img || r->from_img) h = slot >= 0 && slot < 32 ? ex->img[st][slot] : 0;
+                    else if (r->arr_ubo) h = arr_sched_allows(r->cbuf_slot) ? ubo_word(ex, st, r->cbuf_slot, 8ull * k) & 0xffffffffull : 0;
+                    else if (r->c0_byte && st == NVN_STAGE_CS) h = c0_tex_handle(ex, st, r);
+                    else h = slot >= 0 && slot < 128 ? tex_or_image(ex, st, slot) : 0;
+                    VkBufferView v = Z.zview;
+                    uint64_t addr = 0, bytes = 0;
+                    VkFormat fmt = VK_FORMAT_UNDEFINED;
+                    uint32_t bpb = 0;
+                    if (h && vk_texture_buffer_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), &addr, &bytes, &fmt, &bpb, storage_tb)) {
+                        VkMemSpan sp;
+                        if (vk_mem_resolve(addr, 1, &sp) && sp.buffer) {
+                            VK_MEM_USE(sp);
+                            uint64_t range = bytes < sp.avail ? bytes : sp.avail;
+                            uint64_t max_bytes = max_elems * bpb;
+                            if (range > max_bytes) range = max_bytes;
+                            if (sp.offset % align == 0 && range >= bpb) {
+                                range -= range % bpb;
+                                VkBufferView got = get_buf_view(sp.buffer, fmt, sp.offset, range);
+                                if (got) {
+                                    v = got;
+                                    if (storage_tb && (r->flags & 1)) {
+                                        vk_mem_wb_kind = 4, vk_mem_gpu_wrote(&sp, range), vk_usnap_drop(addr, range);
+                                        note_written(ex, addr, range);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     o[k].w[0] = 0, o[k].w[1] = 0, o[k].w[2] = 0;
-                    o[k].view = Z.zview;
-                    if (need_w) bv[nd + k] = Z.zview;
+                    o[k].view = v;
+                    if (need_w) bv[nd + k] = v;
                 }
+                vk_texture_unlock();
             } else if (r->pool_arr) {
                 kind = 1;
                 vk_texture_lock();

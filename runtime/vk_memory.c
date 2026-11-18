@@ -398,10 +398,10 @@ static PoolRec *phys_find(const pool_t *key) {
 }
 
 static void destroy_rec(VkCtx *c, PoolRec *r) {
-    if (r->mbuf) vmaDestroyBuffer(c->vma, r->mbuf, r->malloc_);
+    if (r->mbuf) vk_exec_buffer_gone(r->mbuf), vmaDestroyBuffer(c->vma, r->mbuf, r->malloc_);
     if (r->wsbuf) vmaDestroyBuffer(c->vma, r->wsbuf, r->wsalloc);
-    if (r->salloc) vmaDestroyBuffer(c->vma, r->buf, r->salloc), r->buf = VK_NULL_HANDLE;
-    if (r->buf) vkDestroyBuffer(c->device, r->buf, NULL);
+    if (r->salloc) vk_exec_buffer_gone(r->buf), vmaDestroyBuffer(c->vma, r->buf, r->salloc), r->buf = VK_NULL_HANDLE;
+    if (r->buf) vk_exec_buffer_gone(r->buf), vkDestroyBuffer(c->device, r->buf, NULL);
     if (r->mem) vkFreeMemory(c->device, r->mem, NULL);
     if (r->alloc) vmaFreeMemory(c->vma, r->alloc);
     free(r->pt);

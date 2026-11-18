@@ -1277,9 +1277,17 @@ static void descriptor_registered(DescSlot *d, uint32_t kind) {
     slots_gen++, samp_gen++;   // a registration can replace bytes previously used by either kind
 }
 
+static volatile int64_t n_buf_tex_regs;
+
 void vk_texture_register(const dpool_ref *pool, int id, const tex_t *t, const view_t *v) {
     static volatile int32_t n_unbacked;
     if (!pool || id < 0 || id >= (1 << 20) || (uint32_t)id >= pool->count) rt_fatal("vk: texture slot %d out of pool range", id);
+    if (t->d.target == NVN_TEXTURE_TARGET_BUFFER) {
+        int64_t n = plat_inc64(&n_buf_tex_regs);
+        if (n <= 8)
+            rt_log("vk: buffer texture #%lld registered (slot %d, addr %#llx, fmt %#x, width %u)",
+                   (long long)n, id, (unsigned long long)(uintptr_t)t->mem, t->d.format, t->d.width);
+    }
     lock();
     DescSlot *d = descriptor_slot(pool, id, 1u << 20, 1);
     if (!d) {
@@ -1388,6 +1396,34 @@ const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool, int id, view_t 
     if (view) *view = has_view ? s->cview : s->v;
     if (has_view) *has_view = view ? s->chas_view : s->has_view;
     return e ? &e->pub : NULL;
+}
+
+uint64_t vk_texture_buffer_registrations(void) {
+    return (uint64_t)__atomic_load_n(&n_buf_tex_regs, __ATOMIC_RELAXED);
+}
+
+int vk_texture_buffer_by_id_locked(const dpool_ref *pool, int id, uint64_t *addr, uint64_t *bytes, VkFormat *fmt,
+                                   uint32_t *bpb, int storage) {
+    VkCtx *c = vk_ctx();
+    DescSlot *d = descriptor_slot(pool, id, 1u << 20, 0);
+    if (!c || !d || d->kind != DESC_TEXTURE) return 0;
+    const tex_t *t = &d->u.tex.t;
+    if (t->d.target != NVN_TEXTURE_TARGET_BUFFER || !t->mem) return 0;
+    TexVkFormat f;
+    if (!tex_vk_format(t->d.format, &f) || f.expand_rgb || f.astc_bw || f.chan[0]) return 0;
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(c->phys, f.vk, &fp);
+    VkFormatFeatureFlags need = storage ? VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT
+                                        : VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
+    if ((fp.bufferFeatures & need) != need) return 0;
+    nvn_texlayout L;
+    nvn_tex_layout(&t->d, &L);
+    if (!L.size || !L.bpb) return 0;
+    *addr = (uint64_t)(uintptr_t)t->mem;
+    *bytes = L.size;
+    *fmt = f.vk;
+    *bpb = (uint32_t)L.bpb;
+    return 1;
 }
 
 // vk_dump: the swizzle selectors of the descriptor registered in slot id; 0 when the slot is empty.

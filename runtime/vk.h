@@ -353,6 +353,7 @@ void vk_defer_view(VkImageView view);
 int vk_kar_upscale_record(VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32_t sw, uint32_t sh, VkImage dst,
                           VkFormat dfmt, uint32_t dw, uint32_t dh);
 void vk_exec_image_gone(VkImage image);   // destroy_tex, texture lock held: the replay's views of image go with it
+void vk_exec_buffer_gone(VkBuffer buffer); // destroy_rec: the replay's VkBufferViews of buffer go with it
 void vk_defer_buffer(VkBuffer buf, VmaAllocation alloc);
 // ---- ASTC (vk_astc.c). TOTK_ASTC = auto | gpu | native | cpu | check; see vk_astc.c.
 enum { VK_ASTC_CPU, VK_ASTC_GPU, VK_ASTC_NATIVE, VK_ASTC_CHECK };
@@ -419,6 +420,9 @@ const VkTexImage *vk_texture_by_id(const dpool_ref *pool, int id, view_t *view, 
 void vk_texture_lock(void);
 void vk_texture_unlock(void);
 const VkTexImage *vk_texture_by_id_locked(const dpool_ref *pool, int id, view_t *view, int *has_view);
+int vk_texture_buffer_by_id_locked(const dpool_ref *pool, int id, uint64_t *addr, uint64_t *bytes, VkFormat *fmt,
+                                   uint32_t *bpb, int storage);
+uint64_t vk_texture_buffer_registrations(void);
 VkSampler vk_sampler_by_id_locked(const dpool_ref *pool, int id);
 // The slot's sampler with nearest filtering and no anisotropy: a depth texture read without a compare lands on one texel
 // on the Switch although the game binds a linear sampler, and MacNativeGames samples it the same way. VK_NULL_HANDLE
