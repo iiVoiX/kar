@@ -897,16 +897,16 @@ static void ui_full_log(VkExec *ex, int op, const void *a) {
     static int on = -1;
     if (on < 0) on = getenv("KAR_UI_FULL_LOG") && *getenv("KAR_UI_FULL_LOG") == '1';
     if (!on) return;
-    static struct { uint64_t k, h; int cnt; float hgt; uint64_t last, first; } sig[64];
+    static struct { uint64_t k, h; int cnt; float hgt; uint64_t last, first; int stretched; } sig[64];
     static int nsig;
     static uint64_t fr_cur = ~0ull;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (fr != fr_cur) {
         for (int i = 0; i < nsig; i++)
             if (sig[i].last != ~0ull && sig[i].last + 1 < fr) {   // not drawn in the frame before: it ended
-                rt_log("ui full: key %016llx tex %ux%u fmt %u count %d h %.1f frames %llu-%llu", (unsigned long long)sig[i].k,
-                       (unsigned)(sig[i].h >> 32), (unsigned)(sig[i].h >> 8 & 0xffffff), (unsigned)(sig[i].h & 0xff), sig[i].cnt, sig[i].hgt, (unsigned long long)sig[i].first,
-                       (unsigned long long)sig[i].last);
+                rt_log("ui full: key %016llx tex %ux%u fmt %u count %d h %.1f stretched %d frames %llu-%llu", (unsigned long long)sig[i].k,
+                       (unsigned)(sig[i].h >> 32), (unsigned)(sig[i].h >> 8 & 0xffffff), (unsigned)(sig[i].h & 0xff), sig[i].cnt, sig[i].hgt,
+                       sig[i].stretched, (unsigned long long)sig[i].first, (unsigned long long)sig[i].last);
                 sig[i].last = ~0ull;
             }
         fr_cur = fr;
@@ -923,8 +923,9 @@ static void ui_full_log(VkExec *ex, int op, const void *a) {
         sig[i].k = k, sig[i].h = h, sig[i].cnt = cnt, sig[i].hgt = f[5], sig[i].last = ~0ull, nsig++;
         __atomic_store_n(&ui_dump_auto_at, fr + 1, __ATOMIC_RELAXED);
     }
-    if (sig[i].last == ~0ull) sig[i].first = fr;
+    if (sig[i].last == ~0ull) sig[i].first = fr, sig[i].stretched = 0;
     sig[i].last = fr;
+    if (ui_full_flat(ex)) sig[i].stretched = 1;
 }
 static int ui_dump_frame(void);
 static int ui_probe_offset(VkExec *ex);
