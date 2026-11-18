@@ -665,10 +665,10 @@ static void hud_cols_done(void *arg) {
     // A screen of its own (the results) lies on three or four cuts at once; in the race a tip box or a rider's
     // marker lies on one or two now and then, and that must not send the whole HUD to the middle.
     int many = __builtin_popcount((unsigned)mask) >= 3 || (mask & 5) == 5 || (mask & 10) == 10;   // 3 cuts, or one side in both halves (the pause panel)
-    // A banner across the middle ("LETZTE RUNDE") lies on both cuts of the top half: the cuts would split its letters
+    // A banner across the middle ("LETZTE RUNDE") lies on both cuts of one half: the cuts would split its letters
     // while it flies in, so it centres the layer at the first read, and the layer stays there until the cuts have
     // been clear for HC_HOLD reads (17.3b, 2026-11-17).
-    int banner = (mask & 3) == 3;   // the top half only: the bottom pair fired mid-race in bn2 (cause unseen)
+    int banner = (mask & 3) == 3 || (mask & 12) == 12;
     if (many || banner) HC.cross_n++, HC.clear_n = 0; else HC.clear_n++, HC.cross_n = 0;
     HC.nmany += many;
     if (!HC.blocked && (HC.cross_n >= HC_HOLD || banner)) {
@@ -754,6 +754,38 @@ static void hud_cols_read(VkExec *ex, uint64_t fr) {
     vkCmdPipelineBarrier2(ex->cb, &d);
     HC.busy = 1;
     vk_completion_add(ex->fence, hud_cols_done, NULL);
+}
+
+// KAR_UI_DUMP=<frame>,<frame>,... (diagnostic, 17.3c): every draw into the interface layer in those frames, with its
+// program, first texture, vertex count, viewport, scissor and the first words of its first user constant buffer, to
+// see whether the corner elements of the race HUD are draws of their own.
+static void ui_draw_dump(VkExec *ex, int op, const void *a) {
+    static uint64_t want[8];
+    static int nwant = -1;
+    static uint64_t cur = ~0ull;
+    static int idx;
+    if (nwant < 0) {
+        nwant = 0;
+        const char *e = getenv("KAR_UI_DUMP");
+        while (e && *e && nwant < 8) { want[nwant++] = strtoull(e, (char **)&e, 10); if (*e == ',') e++; else break; }
+    }
+    if (!nwant || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int hit = 0;
+    for (int i = 0; i < nwant; i++) hit |= want[i] == fr;
+    if (!hit) return;
+    if (fr != cur) cur = fr, idx = 0;
+    int count = op == OP_DRAW ? ((const p_draw *)a)->count : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->count : -1;
+    const p_bind_buf *u = NULL;
+    for (int k = 0; k < 18 && !u; k++) if (ex->ubo[0][k].addr) u = &ex->ubo[0][k];
+    const uint32_t *w = u ? (const uint32_t *)(uintptr_t)u->addr : NULL;
+    float f[8] = {0};
+    if (w) memcpy(f, w, sizeof f);
+    rt_log("ui dump: frame %llu draw %d prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+           (unsigned long long)fr, idx++, (unsigned long long)(ex->prog ? ex->prog->serial : 0),
+           (unsigned long long)ex->tex[4][0], count, ex->vp[0][0], ex->vp[0][1], ex->vp[0][2], ex->vp[0][3],
+           ex->has_scissor ? ex->scissor.x : -1, ex->has_scissor ? ex->scissor.y : -1, ex->scissor.w, ex->scissor.h,
+           f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
 }
 
 static void ui_layer_shift(VkExec *ex) {
@@ -1354,8 +1386,10 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DISPATCH_IND:
         case OP_DRAW_IND:
-            if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND || h->op == OP_DRAW_IND)
+            if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND || h->op == OP_DRAW_IND) {
                 vk_exec_frame.draws_seen++, split_draws++;
+                ui_draw_dump(ex, h->op, a);
+            }
             if (h->op == OP_DISPATCH || h->op == OP_DISPATCH_IND) vk_exec_frame.dispatches++, split_draws++;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
         case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
