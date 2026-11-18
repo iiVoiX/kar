@@ -88,4 +88,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   `build_game.py --runtime … --out …` + `-Exe` (Junctions mit `cmd /c rmdir` entfernen).
 - **Diagnose-Schalter:** `KAR_UI_INV`, `KAR_UI_ANCHOR`, `KAR_UI_DUMP(_AUTO)`, `KAR_UI_SKIP=<f>:k<key>`, `KAR_UI_PROBE`,
   `KAR_UI_FULL_LOG`, `KAR_HUD_COLS`, `KAR_CS_LOG`, `KAR_CS_PF_LOG`, `KAR_CS_USED_MAX`.
-- **Nächst:** 17.18 per Reflexion (gelesene Fragment-Slots). 16.6-Ruckler = Erstnutzung; Grafik-Liste `PU_KEEP` 8 Sitzungen als Risiko offen. Sicherungen: `E:/kirby/backup/` (cs-used, pipeline-used, pipeline-keys).
+- **Nächst:** dunkle City-Trial-Szene (3.2: „bei 4200 sehr dunkel, Vergleich nötig“) – Messlauf mit Farbmitteln/Dumps; 17.19 Pause-Dimmer. Sicherungen: `E:/kirby/backup/`.
