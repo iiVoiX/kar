@@ -389,6 +389,9 @@ const CfgMeta *cfg_meta_at(int i) {
     // Bananza timing is experimental; TotK retains its established default.
     static const CfgMeta dkb_realtime = {"REALTIME", "0", "0|1", RESTART};
     if (!rt_game_version && !strcmp(metas[i].key, "REALTIME")) return &dkb_realtime;
+    // Kirby enables BC3 compression automatically when GPU VRAM < 20 GiB or host RAM < 48 GiB.
+    static const CfgMeta kar_astc_bc = {"ASTC_BC", "auto", "auto|0|1", RESTART};
+    if (rt_game_is_kar() && !strcmp(metas[i].key, "ASTC_BC")) return &kar_astc_bc;
     return &metas[i];
 }
 

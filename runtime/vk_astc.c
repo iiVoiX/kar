@@ -297,10 +297,25 @@ static int create_pipeline(VkCtx *c) {
     return 1;
 }
 
-// TOTK_ASTC_BC=1: the BC3 encoder, when the device samples BC3 (every desktop GPU does); 0 leaves ASTC as RGBA8.
+// TOTK_ASTC_BC: 1 builds the BC3 encoder (when the device samples BC3); 0 leaves ASTC as RGBA8; auto (Kirby default)
+// enables BC3 unless the GPU has >= 20 GiB VRAM and the host has >= 48 GiB RAM (Windows counts VRAM against commit).
 static int create_bc_pipeline(VkCtx *c) {
-    const char *e = cfg_get("TOTK_ASTC_BC");
-    if (!e || !*e || *e == '0') return 0;
+    const char *e = cfg_value("TOTK_ASTC_BC");
+    if (!e || !*e || !strcmp(e, "0")) return 0;
+    int auto_mode = !strcmp(e, "auto");
+    uint64_t vram = 0;
+    float used_mib = 0, total_mib = 0, proc_mib = 0;
+    if (auto_mode) {
+        for (uint32_t h = 0; h < c->mem_props.memoryHeapCount; h++)
+            if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                vram += c->mem_props.memoryHeaps[h].size;
+        plat_mem_info(&used_mib, &total_mib, &proc_mib);
+        if (vram >= (20ull << 30) && total_mib >= 47.0f * 1024.0f) {
+            rt_log("vk: ASTC textures stay RGBA8 (auto: %.1f GiB VRAM, %.1f GiB RAM)",
+                   (double)vram / (double)(1ull << 30), (double)total_mib / 1024.0);
+            return 0;
+        }
+    }
     VkFormatProperties p;
     vkGetPhysicalDeviceFormatProperties(c->phys, VK_FORMAT_BC3_SRGB_BLOCK, &p);
     VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
@@ -323,7 +338,11 @@ static int create_bc_pipeline(VkCtx *c) {
         rt_log("vk: TOTK_ASTC_BC: the BC3 encoder pipeline failed (%d); ASTC stays RGBA8", (int)r);
         return 0;
     }
-    rt_log("vk: ASTC textures are encoded to BC3 after the decode (TOTK_ASTC_BC)");
+    if (auto_mode)
+        rt_log("vk: ASTC textures are encoded to BC3 after the decode (auto: %.1f GiB VRAM, %.1f GiB RAM)",
+               (double)vram / (double)(1ull << 30), (double)total_mib / 1024.0);
+    else
+        rt_log("vk: ASTC textures are encoded to BC3 after the decode (TOTK_ASTC_BC=%s)", e);
     return 1;
 }
 
