@@ -36,6 +36,7 @@ static class SwshXlate
         readonly byte[] _c1;
         readonly int _rootBytes;
         public int StorageCandidatesVersion { get; }
+        public int BdaMode { get; }
         public int GeometryVersion { get; }
         public string GeometryInputName { get; }
         public InputTopology GeometryInput { get; } = InputTopology.Triangles;
@@ -54,6 +55,15 @@ static class SwshXlate
             }
             if (StorageCandidatesVersion == 1 && ((string)job["stage"] != "cs" || job["c0"] is not JsonArray))
                 throw new InvalidDataException("storage candidates v1 requires NVN 2 compute root layout version 2");
+            if (job.TryGetPropertyValue("bda", out JsonNode bdaNode) && bdaNode != null)
+            {
+                if (bdaNode is JsonValue bdaVal && bdaVal.TryGetValue<bool>(out bool bdaBool))
+                    BdaMode = bdaBool ? 1 : 0;
+                else if (bdaNode is JsonValue bdaInt && bdaInt.TryGetValue<int>(out int bdaParsed) && bdaParsed is 0 or 1 or 2)
+                    BdaMode = bdaParsed;
+                else
+                    throw new InvalidDataException("unsupported bda value; expected bool or integer 0, 1 or 2");
+            }
             if ((string)job["stage"] == "gs")
             {
                 if (job["geometry_version"] is not JsonValue version || !version.TryGetValue<int>(out int v) || v is not (1 or 2))
@@ -245,6 +255,8 @@ static class SwshXlate
         public bool QueryHasUnalignedStorageBuffer() => _job["sbuf_align"] is JsonNode;
         public bool QueryStorageBufferRuntimeCandidates() => StorageCandidatesVersion == 1;
         public bool QueryHostSupportsStorageBufferArrayLength() => true;
+        public bool QueryHostSupportsBda() => BdaMode >= 1;
+        public bool QueryHostPrefersBda() => BdaMode == 2;
         public int QueryHostStorageBufferOffsetAlignment() => _job["sbuf_align"] is JsonNode n ? (int)n : 16;
         // "subgroup": n: lanes per subgroup when the host cannot pin 32 (AMD GCN/Vega run 64): ballots and votes span n lanes.
         public int QueryHostSubgroupSize() => _job["subgroup"] is JsonNode n ? (int)n : 32;
@@ -296,6 +308,8 @@ static class SwshXlate
                 }
                 foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot });
                 foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });
+                if (p.Info.SBuffers.Any(b => b.Flags.HasFlag(BufferUsageFlags.BdaTable)))
+                    res["uses_bda"] = true;
                 foreach (var (list, name) in new[] { (p.Info.Textures, "textures"), (p.Info.Images, "images") })
                     foreach (var t in list) res[name].AsArray().Add((JsonNode)new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags });
                 if (job["c0"] is JsonNode c0) {

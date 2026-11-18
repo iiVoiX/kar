@@ -1,0 +1,660 @@
+--- a/src/Ryujinx.Graphics.Shader/BufferUsageFlags.cs
++++ b/src/Ryujinx.Graphics.Shader/BufferUsageFlags.cs
+@@ -15,6 +15,9 @@
+         /// </summary>
+         Write = 1 << 0,
+ 
++        // Sorted guest-to-device address lookup table for PhysicalStorageBuffer accesses.
++        BdaTable = 1 << 6,
++
+         // The host must bind the real resolved descriptor range, or a one-byte
+         // invalid range (runtime-array word count zero), never a legacy fallback.
+         Guarded = 1 << 7,
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/CodeGenContext.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/CodeGenContext.cs
+@@ -371,5 +371,25 @@
+         {
+             return TypeFloat(64);
+         }
++
++        private Instruction _physicalWordStructType;
++
++        public Instruction GetPhysicalWordPointer(Instruction ptrLow, Instruction ptrHigh)
++        {
++            if (_physicalWordStructType == null)
++            {
++                _physicalWordStructType = TypeStruct(true, TypeU32());
++                Decorate(_physicalWordStructType, Spv.Specification.Decoration.Block);
++                MemberDecorate(_physicalWordStructType, 0, Spv.Specification.Decoration.Offset, (LiteralInteger)0);
++            }
++
++            Instruction vec2Type = TypeVector(TypeU32(), 2);
++            Instruction addrVec = CompositeConstruct(vec2Type, ptrLow, ptrHigh);
++            Instruction blockPtrType = TypePointer(Spv.Specification.StorageClass.PhysicalStorageBuffer, _physicalWordStructType);
++            Instruction elemPtrType = TypePointer(Spv.Specification.StorageClass.PhysicalStorageBuffer, TypeU32());
++            Instruction blockPtr = Bitcast(blockPtrType, addrVec);
++
++            return AccessChain(elemPtrType, blockPtr, Constant(TypeS32(), 0));
++        }
+     }
+ }
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1706,15 +1706,26 @@
+         private static OperationResult GenerateLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)
+         {
+             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
++            bool physical = operation.StorageKind == StorageKind.PhysicalBuffer;
+ 
+             if (isStore)
+             {
+-                context.Store(pointer, context.Get(varType, operation.GetSource(operation.SourcesCount - 1)));
++                SpvInstruction value = context.Get(varType, operation.GetSource(operation.SourcesCount - 1));
++                if (physical)
++                {
++                    context.StoreAligned(pointer, value, 4);
++                }
++                else
++                {
++                    context.Store(pointer, value);
++                }
+                 return OperationResult.Invalid;
+             }
+             else
+             {
+-                SpvInstruction result = context.Load(context.GetType(varType), pointer);
++                SpvInstruction result = physical
++                    ? context.LoadAligned(context.GetType(varType), pointer, 4)
++                    : context.Load(context.GetType(varType), pointer);
+                 return new OperationResult(varType, result);
+             }
+         }
+@@ -1722,6 +1733,14 @@
+         private static SpvInstruction GetStoragePointer(CodeGenContext context, AstOperation operation, out AggregateType varType)
+         {
+             StorageKind storageKind = operation.StorageKind;
++
++            if (storageKind == StorageKind.PhysicalBuffer)
++            {
++                SpvInstruction ptrLow = context.GetU32(operation.GetSource(0));
++                SpvInstruction ptrHigh = context.GetU32(operation.GetSource(1));
++                varType = AggregateType.U32;
++                return context.GetPhysicalWordPointer(ptrLow, ptrHigh);
++            }
+ 
+             StorageClass storageClass;
+             SpvInstruction baseObj;
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+@@ -45,7 +45,16 @@
+ 
+             context.AddCapability(Capability.Shader);
+ 
+-            context.SetMemoryModel(AddressingModel.Logical, MemoryModel.GLSL450);
++            if (parameters.Properties.UsesBda)
++            {
++                context.AddCapability(Capability.PhysicalStorageBufferAddresses);
++                context.AddExtension("SPV_KHR_physical_storage_buffer");
++                context.SetMemoryModel(AddressingModel.PhysicalStorageBuffer64, MemoryModel.GLSL450);
++            }
++            else
++            {
++                context.SetMemoryModel(AddressingModel.Logical, MemoryModel.GLSL450);
++            }
+ 
+             context.AddCapability(Capability.GroupNonUniformBallot);
+             context.AddCapability(Capability.GroupNonUniformShuffle);
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -160,6 +160,8 @@
+         // Explicit ABI opt-in. Other clients and backends retain the legacy pass.
+         bool QueryStorageBufferRuntimeCandidates() => false;
+         bool QueryHostSupportsStorageBufferArrayLength() => false;
++        bool QueryHostSupportsBda() => false;
++        bool QueryHostPrefersBda() => false;
+ 
+         /// <summary>
+         /// Queries whenever the current draw uses unaligned storage buffer addresses.
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -594,10 +594,11 @@
+             {
+                 Operand carry = context.ICompareLessUnsigned(addrLow, offs);
+ 
+-                // In candidate mode the high word participates in the bounds
+-                // check. A signed negative immediate contributes -1 in addition
++                // In candidate or BDA mode the high word participates in the 64-bit
++                // address lookup. A signed negative immediate contributes -1 in addition
+                 // to the low-word unsigned carry. Keep the legacy path intact.
+-                if (context.TranslatorContext.GpuAccessor.QueryStorageBufferRuntimeCandidates() && offset < 0)
++                if ((context.TranslatorContext.GpuAccessor.QueryStorageBufferRuntimeCandidates() ||
++                     context.TranslatorContext.GpuAccessor.QueryHostSupportsBda()) && offset < 0)
+                 {
+                     addrHigh = context.IAdd(addrHigh, Const(-1));
+                 }
+--- a/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/StorageKind.cs
++++ b/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/StorageKind.cs
+@@ -19,6 +19,7 @@
+         GlobalMemoryU8, // TODO: Remove this and store type as a field on the Operation class itself.
+         GlobalMemoryU16, // TODO: Remove this and store type as a field on the Operation class itself.
+         GlobalMemoryF16x2, // Packed half2 reduction (RED F16x2FtzRn Add), storage candidates only.
++        PhysicalBuffer,
+     }
+ 
+     static class StorageKindExtensions
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
+@@ -17,6 +17,7 @@
+         public IReadOnlyDictionary<SetBindingPair, TextureDefinition> Images => _images;
+         public IReadOnlyDictionary<int, MemoryDefinition> LocalMemories => _localMemories;
+         public IReadOnlyDictionary<int, MemoryDefinition> SharedMemories => _sharedMemories;
++        public bool UsesBda { get; set; }
+ 
+         public ShaderProperties()
+         {
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -26,6 +26,7 @@
+                 public readonly StorageKind StorageKind;
+                 public readonly bool IsMultiTarget;
+                 public readonly bool Guarded;
++                public readonly bool Bda;
+                 public readonly IReadOnlyList<uint> TargetCbs;
+ 
+                 public Entry(
+@@ -33,7 +34,7 @@
+                     Instruction inst,
+                     StorageKind storageKind,
+                     bool isMultiTarget,
+-                    IReadOnlyList<uint> targetCbs, bool guarded)
++                    IReadOnlyList<uint> targetCbs, bool guarded, bool bda)
+                 {
+                     FunctionId = functionId;
+                     Inst = inst;
+@@ -41,6 +42,7 @@
+                     IsMultiTarget = isMultiTarget;
+                     TargetCbs = targetCbs;
+                     Guarded = guarded;
++                    Bda = bda;
+                 }
+             }
+ 
+@@ -84,16 +86,16 @@
+                 _hfm = hfm;
+             }
+ 
+-            public int AddFunction(Operation baseOp, bool isMultiTarget, IReadOnlyList<uint> targetCbs, Function function, bool guarded = false)
++            public int AddFunction(Operation baseOp, bool isMultiTarget, IReadOnlyList<uint> targetCbs, Function function, bool guarded = false, bool bda = false)
+             {
+                 int functionId = _hfm.AddFunction(function);
+ 
+-                _entries.Add(new Entry(functionId, baseOp.Inst, baseOp.StorageKind, isMultiTarget, targetCbs, guarded));
++                _entries.Add(new Entry(functionId, baseOp.Inst, baseOp.StorageKind, isMultiTarget, targetCbs, guarded, bda));
+ 
+                 return functionId;
+             }
+ 
+-            public bool TryGetFunctionId(Operation baseOp, bool isMultiTarget, List<uint> targetCbs, out int functionId, bool guarded = false)
++            public bool TryGetFunctionId(Operation baseOp, bool isMultiTarget, List<uint> targetCbs, out int functionId, bool guarded = false, bool bda = false)
+             {
+                 foreach (Entry entry in _entries)
+                 {
+@@ -101,6 +103,7 @@
+                         entry.StorageKind != baseOp.StorageKind ||
+                         entry.IsMultiTarget != isMultiTarget ||
+                         entry.Guarded != guarded ||
++                        entry.Bda != bda ||
+                         entry.TargetCbs.Count != targetCbs.Count)
+                     {
+                         continue;
+@@ -246,6 +249,12 @@
+                             targetLanguage,
+                             block,
+                             node);
++
++                        if (nextNode == null && targetLanguage == TargetLanguage.Spirv && gpuAccessor.QueryHostSupportsBda() &&
++                            TryGenerateBdaStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out int fallbackBdaFuncId))
++                        {
++                            nextNode = GenerateCallStorageOp(node, operation, null, fallbackBdaFuncId);
++                        }
+ 
+                         if (nextNode == null)
+                         {
+@@ -320,6 +329,11 @@
+         {
+             Operation operation = node.Value as Operation;
+             Operand globalAddress = operation.GetSource(0);
++            if (targetLanguage == TargetLanguage.Spirv && gpuAccessor.QueryHostPrefersBda() &&
++                TryGenerateBdaStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out int preferredBdaFuncId))
++            {
++                return GenerateCallStorageOp(node, operation, null, preferredBdaFuncId);
++            }
+             if (gpuAccessor.QueryStorageBufferRuntimeCandidates())
+             {
+                 int functionId = GenerateGuardedStorageOp(gtsContext, resourceManager, gpuAccessor,
+@@ -489,6 +503,11 @@
+ 
+             if (candidates.Count == 0)
+             {
++                if (targetLanguage == TargetLanguage.Spirv && gpuAccessor.QueryHostSupportsBda() &&
++                    TryGenerateBdaStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out int bdaFuncId))
++                {
++                    return bdaFuncId;
++                }
+                 throw new NotSupportedException("No bounded cbuf-pair candidate found for global operation.");
+             }
+             if (gtsContext.TryGetFunctionId(operation, true, candidates, out int functionId, guarded: true))
+@@ -881,6 +900,11 @@
+ 
+             if (targetCbs.Count == 0)
+             {
++                if (targetLanguage == TargetLanguage.Spirv && gpuAccessor.QueryHostSupportsBda() &&
++                    TryGenerateBdaStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out functionId))
++                {
++                    return true;
++                }
+                 gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
+             }
+ 
+@@ -1310,6 +1334,297 @@
+             return oldValue;
+         }
+ 
++        private static Operand GenerateBdaCasLoop(EmitterContext context, Operand ptrLow, Operand ptrHigh, Func<Operand, Operand> opCallback)
++        {
++            Operand lblLoopHead = Label();
++
++            context.MarkLabel(lblLoopHead);
++
++            Operand oldValue = context.Load(StorageKind.PhysicalBuffer, ptrLow, ptrHigh);
++            Operand newValue = opCallback(oldValue);
++
++            Operand casResult = context.AtomicCompareAndSwap(
++                StorageKind.PhysicalBuffer,
++                ptrLow,
++                ptrHigh,
++                oldValue,
++                newValue);
++
++            Operand casFail = context.ICompareNotEqual(casResult, oldValue);
++
++            context.BranchIfTrue(lblLoopHead, casFail);
++
++            return oldValue;
++        }
++
++        private static bool TryGenerateBdaStorageOp(
++            GtsContext gtsContext,
++            ResourceManager resourceManager,
++            IGpuAccessor gpuAccessor,
++            Operation operation,
++            out int functionId)
++        {
++            functionId = 0;
++            bool packedHalfAdd = operation.StorageKind == StorageKind.GlobalMemoryF16x2 && operation.Inst == Instruction.AtomicAdd;
++            bool subWord = IsSmallInt(operation.StorageKind);
++            if (operation.Inst != Instruction.Load && operation.Inst != Instruction.Store && !operation.Inst.IsAtomic())
++            {
++                return false;
++            }
++            if (operation.StorageKind == StorageKind.GlobalMemoryF16x2 && !packedHalfAdd)
++            {
++                return false;
++            }
++            if (subWord && operation.Inst != Instruction.Load && operation.Inst != Instruction.Store)
++            {
++                return false;
++            }
++
++            List<uint> emptyTargets = [];
++            if (gtsContext.TryGetFunctionId(operation, false, emptyTargets, out functionId, guarded: false, bda: true))
++            {
++                return true;
++            }
++
++            if (!resourceManager.TryGetBdaTableBinding(out int bdaBinding))
++            {
++                return false;
++            }
++
++            int arguments = operation.Inst == Instruction.AtomicCompareAndSwap ? 4 :
++                operation.Inst == Instruction.Store || operation.Inst.IsAtomic() ? 3 : 2;
++            bool returnsValue = operation.Dest != null;
++
++            EmitterContext context = new();
++            Operand addrLow = Argument(0);
++            Operand addrHigh = Argument(1);
++            Operand lblMiss = Label();
++
++            // Header word 0 is entry count; each entry is 6 uint32 words: guest_lo (2), guest_hi (2), bda (2).
++            Operand count = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), Const(0));
++            if (gpuAccessor.QueryHostSupportsStorageBufferArrayLength())
++            {
++                Operand ssboWords = context.StorageBufferLength(bdaBinding);
++                Operand cappedWords = context.IMinimumU32(ssboWords, Const(0x40000001));
++                Operand bodyWords = context.ConditionalSelect(
++                    context.ICompareGreaterUnsigned(cappedWords, Const(1)),
++                    context.ISubtract(cappedWords, Const(1)),
++                    Const(0));
++                Operand maxEntries = context.ShiftRightU32(
++                    context.MultiplyHighU32(bodyWords, Const(unchecked((int)0xaaaaaaabu))),
++                    Const(2));
++                count = context.IMinimumU32(count, maxEntries);
++            }
++
++            context.BranchIfTrue(lblMiss, context.ICompareEqual(count, Const(0)));
++
++            // Upper-bound binary search for the last entry with guest_lo <= addr.
++            Operand loIdx = Local();
++            Operand hiIdx = Local();
++            context.Copy(loIdx, Const(0));
++            context.Copy(hiIdx, count);
++
++            Operand lblSearch = Label();
++            context.MarkLabel(lblSearch);
++            Operand mid = context.ShiftRightU32(context.IAdd(loIdx, hiIdx), Const(1));
++            Operand midWord = context.IAdd(Const(1), context.IMultiply(mid, Const(6)));
++            Operand midLoL = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), midWord);
++            Operand midLoH = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), context.IAdd(midWord, Const(1)));
++            Operand addrLess = context.BitwiseOr(
++                context.ICompareLessUnsigned(addrHigh, midLoH),
++                context.BitwiseAnd(
++                    context.ICompareEqual(addrHigh, midLoH),
++                    context.ICompareLessUnsigned(addrLow, midLoL)));
++            Operand midPlus1 = context.IAdd(mid, Const(1));
++            context.Copy(hiIdx, context.ConditionalSelect(addrLess, mid, hiIdx));
++            context.Copy(loIdx, context.ConditionalSelect(addrLess, loIdx, midPlus1));
++            context.BranchIfTrue(lblSearch, context.ICompareLessUnsigned(loIdx, hiIdx));
++
++            context.BranchIfTrue(lblMiss, context.ICompareEqual(loIdx, Const(0)));
++
++            Operand idx = context.ISubtract(loIdx, Const(1));
++            Operand entWord = context.IAdd(Const(1), context.IMultiply(idx, Const(6)));
++            Operand guestLoL = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), entWord);
++            Operand guestLoH = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), context.IAdd(entWord, Const(1)));
++            Operand guestHiL = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), context.IAdd(entWord, Const(2)));
++            Operand guestHiH = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), context.IAdd(entWord, Const(3)));
++            Operand bdaBaseL = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), context.IAdd(entWord, Const(4)));
++            Operand bdaBaseH = context.Load(StorageKind.StorageBuffer, bdaBinding, Const(0), context.IAdd(entWord, Const(5)));
++
++            bool halfword = operation.StorageKind is StorageKind.GlobalMemoryS16 or StorageKind.GlobalMemoryU16;
++            Operand lowByte = context.BitwiseAnd(addrLow, Const(3));
++            if (!subWord)
++            {
++                context.BranchIfTrue(lblMiss, context.ICompareNotEqual(lowByte, Const(0)));
++            }
++
++            Operand wordAddrL = subWord ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;
++            Operand wordAddrH = addrHigh;
++
++            Operand geLo = context.BitwiseOr(
++                context.ICompareGreaterUnsigned(wordAddrH, guestLoH),
++                context.BitwiseAnd(
++                    context.ICompareEqual(wordAddrH, guestLoH),
++                    context.ICompareGreaterOrEqualUnsigned(wordAddrL, guestLoL)));
++            Operand ltHi = context.BitwiseOr(
++                context.ICompareLessUnsigned(wordAddrH, guestHiH),
++                context.BitwiseAnd(
++                    context.ICompareEqual(wordAddrH, guestHiH),
++                    context.ICompareLessUnsigned(wordAddrL, guestHiL)));
++
++            Operand reqBytes = halfword
++                ? context.ConditionalSelect(context.ICompareEqual(lowByte, Const(3)), Const(8), Const(4))
++                : Const(4);
++            Operand remL = context.ISubtract(guestHiL, wordAddrL);
++            Operand remBorrow = context.ConditionalSelect(context.ICompareLessUnsigned(guestHiL, wordAddrL), Const(1), Const(0));
++            Operand remH = context.ISubtract(context.ISubtract(guestHiH, wordAddrH), remBorrow);
++            Operand fits = context.BitwiseOr(
++                context.ICompareNotEqual(remH, Const(0)),
++                context.ICompareGreaterOrEqualUnsigned(remL, reqBytes));
++            Operand valid = context.BitwiseAnd(geLo, context.BitwiseAnd(ltHi, fits));
++            context.BranchIfFalse(lblMiss, valid);
++
++            Operand deltaL = context.ISubtract(wordAddrL, guestLoL);
++            Operand deltaBorrow = context.ConditionalSelect(context.ICompareLessUnsigned(wordAddrL, guestLoL), Const(1), Const(0));
++            Operand deltaH = context.ISubtract(context.ISubtract(wordAddrH, guestLoH), deltaBorrow);
++            Operand devPtrL = context.IAdd(bdaBaseL, deltaL);
++            Operand devCarry = context.ConditionalSelect(context.ICompareLessUnsigned(devPtrL, bdaBaseL), Const(1), Const(0));
++            Operand devPtrH = context.IAdd(context.IAdd(bdaBaseH, deltaH), devCarry);
++
++            Operand compare = arguments == 4 ? Argument(2) : null;
++            Operand value = arguments >= 3 ? Argument(arguments - 1) : null;
++
++            if (packedHalfAdd)
++            {
++                Operand oldVal = GenerateBdaCasLoop(context, devPtrL, devPtrH, memValue => PackedHalfAddFtzRn(context, memValue, value));
++                context.Return(oldVal);
++            }
++            else if (operation.Inst.IsAtomic())
++            {
++                Operand res = operation.Inst switch
++                {
++                    Instruction.AtomicAdd => context.AtomicAdd(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    Instruction.AtomicAnd => context.AtomicAnd(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    Instruction.AtomicCompareAndSwap => context.AtomicCompareAndSwap(StorageKind.PhysicalBuffer, devPtrL, devPtrH, compare, value),
++                    Instruction.AtomicMaxS32 => context.AtomicMaxS32(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    Instruction.AtomicMaxU32 => context.AtomicMaxU32(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    Instruction.AtomicMinS32 => context.AtomicMinS32(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    Instruction.AtomicMinU32 => context.AtomicMinU32(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    Instruction.AtomicOr => context.AtomicOr(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    Instruction.AtomicSwap => context.AtomicSwap(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    Instruction.AtomicXor => context.AtomicXor(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value),
++                    _ => throw new NotSupportedException($"Unsupported BDA atomic instruction {operation.Inst}."),
++                };
++                context.Return(res);
++            }
++            else if (operation.Inst == Instruction.Store)
++            {
++                int bitSize = operation.StorageKind switch
++                {
++                    StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 => 8,
++                    StorageKind.GlobalMemoryS16 or StorageKind.GlobalMemoryU16 => 16,
++                    _ => 32,
++                };
++
++                if (bitSize == 16)
++                {
++                    Operand crossing = context.ICompareEqual(lowByte, Const(3));
++                    Operand lblSingle = Label();
++                    Operand lblDone = Label();
++                    context.BranchIfFalse(lblSingle, crossing);
++
++                    GenerateBdaCasLoop(context, devPtrL, devPtrH, memValue =>
++                        context.BitfieldInsert(memValue, value, Const(24), Const(8)));
++                    Operand nextPtrL = context.IAdd(devPtrL, Const(4));
++                    Operand nextCarry = context.ConditionalSelect(context.ICompareLessUnsigned(nextPtrL, devPtrL), Const(1), Const(0));
++                    Operand nextPtrH = context.IAdd(devPtrH, nextCarry);
++                    GenerateBdaCasLoop(context, nextPtrL, nextPtrH, memValue =>
++                        context.BitfieldInsert(memValue, context.ShiftRightU32(value, Const(8)), Const(0), Const(8)));
++                    context.Branch(lblDone);
++
++                    context.MarkLabel(lblSingle);
++                    Operand halfBitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
++                    GenerateBdaCasLoop(context, devPtrL, devPtrH, memValue =>
++                        context.BitfieldInsert(memValue, value, halfBitOffset, Const(16)));
++                    context.MarkLabel(lblDone);
++                }
++                else if (bitSize == 8)
++                {
++                    Operand byteBitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
++                    GenerateBdaCasLoop(context, devPtrL, devPtrH, memValue =>
++                        context.BitfieldInsert(memValue, value, byteBitOffset, Const(8)));
++                }
++                else
++                {
++                    context.Store(StorageKind.PhysicalBuffer, devPtrL, devPtrH, value);
++                }
++
++                context.Return();
++            }
++            else
++            {
++                Operand loaded = context.Load(StorageKind.PhysicalBuffer, devPtrL, devPtrH);
++                if (subWord)
++                {
++                    if (halfword)
++                    {
++                        Operand crossing = context.ICompareEqual(lowByte, Const(3));
++                        Operand lblAlignedHalf = Label();
++                        Operand lblHalfReady = Label();
++                        Operand rawHalf = Local();
++
++                        context.BranchIfFalse(lblAlignedHalf, crossing);
++                        Operand nextPtrL = context.IAdd(devPtrL, Const(4));
++                        Operand nextCarry = context.ConditionalSelect(context.ICompareLessUnsigned(nextPtrL, devPtrL), Const(1), Const(0));
++                        Operand nextPtrH = context.IAdd(devPtrH, nextCarry);
++                        Operand loadedNext = context.Load(StorageKind.PhysicalBuffer, nextPtrL, nextPtrH);
++                        Operand crossVal = context.BitwiseOr(
++                            context.ShiftRightU32(loaded, Const(24)),
++                            context.ShiftLeft(context.BitwiseAnd(loadedNext, Const(0xff)), Const(8)));
++                        context.Copy(rawHalf, crossVal);
++                        context.Branch(lblHalfReady);
++
++                        context.MarkLabel(lblAlignedHalf);
++                        Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
++                        context.Copy(rawHalf, context.BitwiseAnd(context.ShiftRightU32(loaded, bitOffset), Const(ushort.MaxValue)));
++
++                        context.MarkLabel(lblHalfReady);
++                        loaded = operation.StorageKind == StorageKind.GlobalMemoryS16
++                            ? context.BitfieldExtractS32(rawHalf, Const(0), Const(16))
++                            : rawHalf;
++                    }
++                    else
++                    {
++                        Operand bitOffset = HelperFunctionManager.GetBitOffset(context, addrLow);
++                        loaded = operation.StorageKind == StorageKind.GlobalMemoryS8
++                            ? context.BitfieldExtractS32(context.ShiftRightS32(loaded, bitOffset), Const(0), Const(8))
++                            : context.BitwiseAnd(context.ShiftRightU32(loaded, bitOffset), Const(byte.MaxValue));
++                    }
++                }
++
++                context.Return(loaded);
++            }
++
++            context.MarkLabel(lblMiss);
++            if (returnsValue)
++            {
++                context.Return(Const(0));
++            }
++            else
++            {
++                context.Return();
++            }
++
++            Function function = new(
++                ControlFlowGraph.Create(context.GetOperations()).Blocks,
++                "Bda_" + GetFunctionName(operation, false, emptyTargets),
++                returnsValue,
++                arguments,
++                0);
++            functionId = gtsContext.AddFunction(operation, false, emptyTargets, function, guarded: false, bda: true);
++            return true;
++        }
++
+         private static SearchResult FindUniqueBaseAddressCb(GtsContext gtsContext, BasicBlock block, Operand globalAddress, bool needsOffset)
+         {
+             globalAddress = Utils.FindLastOperation(globalAddress, block);
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -69,7 +69,8 @@
+             _cbSlotToBindingMap = new SetBindingPair[18];
+             // DKB: 32 storage buffers per stage, not Maxwell's 16. Switch 2 compute shaders read up to 25 base addresses
+             // from the driver bank (c0 0x60 + 16 r); past 16 the rest of their global accesses were dropped.
+-            _sbSlotToBindingMap = new SetBindingPair[32];
++            // One extra slot holds the optional BDA lookup table SSBO.
++            _sbSlotToBindingMap = new SetBindingPair[33];
+             _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
+             _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
+ 
+@@ -187,11 +188,41 @@
+                 AddNewStorageBuffer(setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_s{slotNumber}");
+             }
+ 
+-            if (write)
++            if (write && slot < 32)
+             {
+                 _sbSlotWritten |= 1u << slot;
+             }
+ 
++            binding = setAndBinding.Binding;
++            return true;
++        }
++
++        private const int BdaTableSlotKey = 1 << 25;
++
++        public bool TryGetBdaTableBinding(out int binding)
++        {
++            if (!_sbSlots.TryGetValue(BdaTableSlotKey, out int slot))
++            {
++                slot = _sbSlots.Count;
++                if (slot >= _sbSlotToBindingMap.Length)
++                {
++                    binding = 0;
++                    return false;
++                }
++
++                _sbSlots.Add(BdaTableSlotKey, slot);
++                _sbSlotsReverse.Add(slot, BdaTableSlotKey);
++            }
++
++            SetBindingPair setAndBinding = _sbSlotToBindingMap[slot];
++            if (setAndBinding.Binding < 0)
++            {
++                setAndBinding = _gpuAccessor.CreateStorageBufferBinding(slot);
++                _sbSlotToBindingMap[slot] = setAndBinding;
++                AddNewStorageBuffer(setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_bda");
++            }
++
++            Properties.UsesBda = true;
+             binding = setAndBinding.Binding;
+             return true;
+         }
+@@ -500,8 +531,12 @@
+ 
+                 if (setAndBinding.Binding >= 0)
+                 {
+-                    (int sbCbSlot, int sbCbOffset) = UnpackSbCbInfo(key);
+-                    BufferUsageFlags flags = (_sbSlotWritten & (1u << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
++                    (int sbCbSlot, int sbCbOffset) = (key & BdaTableSlotKey) != 0 ? (0, 0) : UnpackSbCbInfo(key);
++                    BufferUsageFlags flags = slot < 32 && (_sbSlotWritten & (1u << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
++                    if ((key & BdaTableSlotKey) != 0)
++                    {
++                        flags |= BufferUsageFlags.BdaTable;
++                    }
+                     if ((key & (1 << 24)) != 0)
+                     {
+                         flags |= BufferUsageFlags.Guarded;
+--- a/src/Spv.Generator/Module.cs
++++ b/src/Spv.Generator/Module.cs
+@@ -247,6 +247,31 @@
+             _memoryModel = memoryModel;
+         }
+ 
++        public Instruction LoadAligned(Instruction resultType, Instruction pointer, int alignment)
++        {
++            Instruction result = NewInstruction(Op.OpLoad, GetNewId(), resultType);
++
++            result.AddOperand(pointer);
++            result.AddOperand(MemoryAccessMask.Aligned);
++            result.AddOperand((LiteralInteger)alignment);
++            AddToFunctionDefinitions(result);
++
++            return result;
++        }
++
++        public Instruction StoreAligned(Instruction pointer, Instruction obj, int alignment)
++        {
++            Instruction result = NewInstruction(Op.OpStore);
++
++            result.AddOperand(pointer);
++            result.AddOperand(obj);
++            result.AddOperand(MemoryAccessMask.Aligned);
++            result.AddOperand((LiteralInteger)alignment);
++            AddToFunctionDefinitions(result);
++
++            return result;
++        }
++
+         // TODO: Find a way to make the auto generate one used.
+         public Instruction OpenClPrintf(Instruction resultType, Instruction format, params ReadOnlySpan<Instruction> additionalarguments)
+         {
