@@ -1859,6 +1859,8 @@ static void sampler_features(VkCtx *c) {
     sf.init = 1;
 }
 
+static VkSampler fallback_sampler;
+
 static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
     sampler_features(c);
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -1917,9 +1919,26 @@ static VkSampler make_sampler(VkCtx *c, const samp_par *d) {
         rm.reductionMode = d->reduction == NVN_SAMPLER_REDUCTION_MIN ? VK_SAMPLER_REDUCTION_MODE_MIN : VK_SAMPLER_REDUCTION_MODE_MAX;
         *tail = &rm;
     }
-    VkSampler s;
+    VkSampler s = VK_NULL_HANDLE;
     VkResult r = vkCreateSampler(c->device, &si, NULL, &s);
-    if (r != VK_SUCCESS) rt_fatal("vk: vkCreateSampler failed (%d)", (int)r);
+    if (r != VK_SUCCESS && si.pNext) {
+        si.pNext = NULL;
+        if (si.borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT) si.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        r = vkCreateSampler(c->device, &si, NULL, &s);
+    }
+    if (r != VK_SUCCESS) {
+        static volatile int32_t n_samp_fail;
+        log_limited(&n_samp_fail, "vkCreateSampler failed (%d): using fallback sampler", (int)r);
+        if (!fallback_sampler) {
+            VkSamplerCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR,
+                                      .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                                      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                                      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = VK_LOD_CLAMP_NONE};
+            if (vkCreateSampler(c->device, &fi, NULL, &fallback_sampler) != VK_SUCCESS) fallback_sampler = VK_NULL_HANDLE;
+        }
+        return fallback_sampler;
+    }
     return s;
 }
 
@@ -1947,7 +1966,7 @@ static VkSampler sampler_for(VkCtx *c, const samp_par *s) {
     VkSampler v = (VkSampler)nvn_hm_get(&samplers, &k);
     if (!v) {
         v = make_sampler(c, &k);
-        nvn_hm_put(&samplers, &k, (void *)v);
+        if (v) nvn_hm_put(&samplers, &k, (void *)v);
     }
     return v;
 }
@@ -2070,7 +2089,12 @@ void vk_texture_shutdown(void) {
     for (int i = 0; i < n; i++) destroy_tex(list[i]);
     free(list);
     for (uint32_t i = 0; i < samplers.cap; i++)
-        if (samplers.vals[i] && c) vk_destroy_gen_bump(), vkDestroySampler(c->device, (VkSampler)samplers.vals[i], NULL);
+        if (samplers.vals[i] && (VkSampler)samplers.vals[i] != fallback_sampler && c)
+            vk_destroy_gen_bump(), vkDestroySampler(c->device, (VkSampler)samplers.vals[i], NULL);
+    if (fallback_sampler && c) {
+        vk_destroy_gen_bump(), vkDestroySampler(c->device, fallback_sampler, NULL);
+        fallback_sampler = VK_NULL_HANDLE;
+    }
     free(by_key.keys), free(by_key.vals), free(by_addr.keys), free(by_addr.vals), free(samplers.keys), free(samplers.vals);
     by_key = (nvn_hmap){.klen = sizeof(TexKey)};
     by_addr = (nvn_hmap){.klen = 8};

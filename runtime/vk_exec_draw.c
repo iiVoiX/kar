@@ -693,7 +693,19 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
                                       .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
     if (img->block_views) ci.pNext = &use;   // the image's COLOR_ATTACHMENT usage is its block views' (vk_texture.c)
     VkImageView view;
-    if (vkCreateImageView(vk_ctx()->device, &ci, NULL, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkResult vr = vkCreateImageView(vk_ctx()->device, &ci, NULL, &view);
+    if (vr != VK_SUCCESS && !ci.pNext) {
+        use.usage = storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
+        ci.pNext = &use;
+        vr = vkCreateImageView(vk_ctx()->device, &ci, NULL, &view);
+    }
+    if (vr != VK_SUCCESS) {
+        static int32_t n_view_fail;
+        if (plat_inc32(&n_view_fail) <= 16)
+            rt_log("vk: sampled/storage image view (fmt %d, type %d, storage %d) failed (%d)",
+                   (int)img->format, (int)vt, storage, (int)vr);
+        return VK_NULL_HANDLE;
+    }
     ViewNode *n = malloc(sizeof *n);
     if (!n) rt_fatal("vk: out of memory");
     *n = (ViewNode){nvn_hm_get(&views_by_image, &img->image), k, view};
@@ -722,8 +734,26 @@ VkImageView vk_exec_target_view(const VkTexImage *img, VkFormat format, VkImageV
         // format may lack: every colour texture that allows it is made with storage usage (vk_texture.c create_tex).
         else if (format != img->format && (img->usage & VK_IMAGE_USAGE_STORAGE_BIT))
             use.usage = img->usage & ~VK_IMAGE_USAGE_STORAGE_BIT, ci.pNext = &use;
-        if (vkCreateImageView(vk_ctx()->device, &ci, NULL, &view) != VK_SUCCESS)
-            rt_fatal("vk: render target view (format %d) could not be created", (int)format);
+        VkResult vr = vkCreateImageView(vk_ctx()->device, &ci, NULL, &view);
+        if (vr != VK_SUCCESS && !ci.pNext) {
+            use.usage = (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+                      ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                      : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            ci.pNext = &use;
+            vr = vkCreateImageView(vk_ctx()->device, &ci, NULL, &view);
+        }
+        if (vr != VK_SUCCESS && ci.viewType != VK_IMAGE_VIEW_TYPE_2D && layers == 1) {
+            ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vr = vkCreateImageView(vk_ctx()->device, &ci, NULL, &view);
+        }
+        if (vr != VK_SUCCESS) {
+            static int32_t n_rtv_fail;
+            if (plat_inc32(&n_rtv_fail) <= 16)
+                rt_log("vk: render target view (format %d, type %d) failed (%d): target skipped",
+                       (int)format, (int)type, (int)vr);
+            vk_texture_unlock();
+            return VK_NULL_HANDLE;
+        }
         ViewNode *n = malloc(sizeof *n);
         if (!n) rt_fatal("vk: out of memory");
         *n = (ViewNode){nvn_hm_get(&views_by_image, &img->image), k, view};

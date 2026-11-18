@@ -40,6 +40,7 @@ void vk_queue_unlock(void) { plat_rmutex_unlock(&g_ql); }
 // ---- window state shared with the back end
 static VkSurfaceKHR g_surface;
 static volatile int32_t g_dirty;               // the window was resized; swapchain stale
+static volatile int32_t g_surface_lost;        // surface lost; recreate surface before rebuilding swapchain
 static volatile int32_t g_focused = 1;
 static volatile int32_t g_focus_msgs;
 static PlatRMutex g_start_lock;       // gfx_window_start / vsync start
@@ -289,7 +290,13 @@ static void flip_locked(void) {
     VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
     vk_device_fault_report(r);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
+    if (r == VK_ERROR_DEVICE_LOST) rt_fatal("gfx: device lost at vkQueuePresentKHR (%d)", (int)r);
+    if (r == VK_ERROR_SURFACE_LOST_KHR) {
+        plat_xchg32(&g_surface_lost, 1);
+        plat_xchg32(&g_dirty, 1);
+    } else if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
+        plat_xchg32(&g_dirty, 1);
+    }
 }
 
 static void free_capture(void) {
@@ -301,12 +308,40 @@ static void free_capture(void) {
     g_cap_valid = 0;
 }
 
+// Destroys the swapchain, its sync objects and the surface, then creates a fresh surface (g_pl held).
+static int recreate_surface_locked(VkCtx *c) {
+    vk_queue_lock();
+    vkDeviceWaitIdle(c->device);
+    for (uint32_t i = 0; i < g_sc_n; i++) {
+        vkDestroySemaphore(c->device, g_render_done[i], NULL);
+        if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
+        g_sc_view[i] = VK_NULL_HANDLE;
+    }
+    g_sc_n = 0;
+    if (g_sc) { vkDestroySwapchainKHR(c->device, g_sc, NULL); g_sc = VK_NULL_HANDLE; }
+    if (g_surface) { vkDestroySurfaceKHR(c->instance, g_surface, NULL); g_surface = VK_NULL_HANDLE; }
+    g_surface = wsys_surface(c->instance);
+    vk_queue_unlock();
+    rt_log("gfx: recreated lost Vulkan surface -> %s", g_surface ? "ok" : "failed");
+    return g_surface != VK_NULL_HANDLE;
+}
+
 // Returns 1 with a usable swapchain, 0 when the window has no area (minimised). Called with g_pl held.
 static int create_swapchain(void) {
     flip_locked();   // the acquired image goes out before its swapchain is replaced
     VkCtx *c = vk_ctx();
+    if ((plat_xchg32(&g_surface_lost, 0) || !g_surface) && !recreate_surface_locked(c)) return 0;
     VkSurfaceCapabilitiesKHR caps;
-    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c->phys, g_surface, &caps) != VK_SUCCESS) return 0;
+    VkResult cr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c->phys, g_surface, &caps);
+    if (cr == VK_ERROR_SURFACE_LOST_KHR) {
+        if (!recreate_surface_locked(c)) return 0;
+        cr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c->phys, g_surface, &caps);
+    }
+    if (cr == VK_ERROR_DEVICE_LOST) {
+        vk_device_fault_report(cr);
+        rt_fatal("gfx: device lost querying surface capabilities (%d)", (int)cr);
+    }
+    if (cr != VK_SUCCESS) return 0;
     int cw = 0, ch = 0;
     wsys_client_size(&cw, &ch);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent
@@ -350,6 +385,14 @@ static int create_swapchain(void) {
         rt_log("gfx: vkCreateSwapchainKHR failed (%d)", (int)r);
         g_sc = old;
         vk_queue_unlock();
+        if (r == VK_ERROR_DEVICE_LOST) {
+            vk_device_fault_report(r);
+            rt_fatal("gfx: device lost creating swapchain (%d)", (int)r);
+        }
+        if (r == VK_ERROR_SURFACE_LOST_KHR) {
+            plat_xchg32(&g_surface_lost, 1);
+            plat_xchg32(&g_dirty, 1);
+        }
         return 0;
     }
     for (uint32_t i = 0; i < g_sc_n; i++) {
@@ -570,8 +613,13 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     if (wsys_minimized() || !g_sc) goto out;
 
     unsigned slot = g_frame % FRAMES;
-    if (vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull) != VK_SUCCESS) {
-        rt_log("gfx: present fence wait timed out");
+    VkResult wr = vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull);
+    if (wr == VK_ERROR_DEVICE_LOST) {
+        vk_device_fault_report(wr);
+        rt_fatal("gfx: device lost waiting for present fence (%d)", (int)wr);
+    }
+    if (wr != VK_SUCCESS) {
+        rt_log("gfx: present fence wait failed (%d)", (int)wr);
         goto out;
     }
     uint64_t tv[2];
@@ -581,12 +629,14 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     g_ts_on[slot] = 0;
     uint32_t idx = 0;
     VkResult r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
+        if (r == VK_ERROR_SURFACE_LOST_KHR) plat_xchg32(&g_surface_lost, 1);
         plat_xchg32(&g_dirty, 1);
         if (!create_swapchain()) goto out;
         r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
     }
     vk_device_fault_report(r);
+    if (r == VK_ERROR_DEVICE_LOST) rt_fatal("gfx: device lost at vkAcquireNextImageKHR (%d)", (int)r);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) goto out;     // lost, not ready: skip the frame
     if (r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
     vkResetFences(c->device, 1, &g_fence[slot]);
@@ -736,10 +786,13 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         if (!defer) flip_locked();
     } else {
         vk_device_fault_report(r);
+        if (r == VK_ERROR_DEVICE_LOST) rt_fatal("gfx: device lost at present submit (%d)", (int)r);
+        if (r == VK_ERROR_SURFACE_LOST_KHR) plat_xchg32(&g_surface_lost, 1), plat_xchg32(&g_dirty, 1);
+        else if (r == VK_ERROR_OUT_OF_DATE_KHR) plat_xchg32(&g_dirty, 1);
         rt_log("gfx: present submit failed (%d)", (int)r);
     }
     g_frame++;
-    if (cap) {
+    if (cap && r == VK_SUCCESS) {
         vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull);
         vmaInvalidateAllocation(c->vma, g_cap_alloc, 0, VK_WHOLE_SIZE);
         g_cap_w = (int)g_sc_ext.width;

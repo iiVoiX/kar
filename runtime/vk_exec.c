@@ -446,8 +446,25 @@ static VkImageView view_of(VkExec *ex, const VkExecTarget *t) {
                                       .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
     if (t->blocks) ci.pNext = &use;   // not the BC image's sampling and transfer usages
     VkImageView view;
-    if (vkCreateImageView(vk_ctx()->device, &ci, NULL, &view) != VK_SUCCESS)
-        rt_fatal("vk: render target view (format %d, %ux%u) could not be created", (int)t->format, t->width, t->height);
+    VkResult vr = vkCreateImageView(vk_ctx()->device, &ci, NULL, &view);
+    if (vr != VK_SUCCESS && !ci.pNext) {
+        use.usage = (t->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+                  ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                  : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        ci.pNext = &use;
+        vr = vkCreateImageView(vk_ctx()->device, &ci, NULL, &view);
+    }
+    if (vr != VK_SUCCESS && ci.viewType != VK_IMAGE_VIEW_TYPE_2D && t->layers == 1) {
+        ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vr = vkCreateImageView(vk_ctx()->device, &ci, NULL, &view);
+    }
+    if (vr != VK_SUCCESS) {
+        static int32_t n_rtv_fail;
+        if (plat_inc32(&n_rtv_fail) <= 16)
+            rt_log("vk: render target view (format %d, %ux%u) failed (%d): target skipped",
+                   (int)t->format, t->width, t->height, (int)vr);
+        return VK_NULL_HANDLE;
+    }
     if (ex->nviews == ex->cap_views) {
         ex->cap_views = ex->cap_views ? ex->cap_views * 2 : 16;
         ex->views = realloc(ex->views, sizeof(ViewEnt) * (size_t)ex->cap_views);
@@ -1104,24 +1121,29 @@ void vk_exec_pass_begin(VkExec *ex) {
         const VkExecTarget *t = &ex->color[i];
         ca[i] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         if (!t->image) continue;
-        ca[i].imageView = view_of(ex, t);
+        VkImageView cv = view_of(ex, t);
+        if (!cv) continue;
+        ca[i].imageView = cv;
         ca[i].imageLayout = fbl >> i & 1 ? VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT : VK_IMAGE_LAYOUT_GENERAL;
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;    }
     const VkExecTarget *d = &ex->depth;
     if (d->image) {
-        VkRenderingAttachmentInfo a = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view_of(ex, d),
-                                       .imageLayout = fbl >> 8 & 1 ? VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT
-                                                                   : VK_IMAGE_LAYOUT_GENERAL,
-                                       .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
-        if (d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) da = a;
-        if (d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) sa = a;
+        VkImageView dv = view_of(ex, d);
+        if (dv) {
+            VkRenderingAttachmentInfo a = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dv,
+                                           .imageLayout = fbl >> 8 & 1 ? VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT
+                                                                       : VK_IMAGE_LAYOUT_GENERAL,
+                                           .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+            if (d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) da = a;
+            if (d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) sa = a;
+        }
     }
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {ex->pass_w, ex->pass_h}},
                           .layerCount = ex->pass_layers, .colorAttachmentCount = ex->pass_ncolor,
                           .pColorAttachments = ca,
-                          .pDepthAttachment = ex->pass_depth ? &da : NULL,
-                          .pStencilAttachment = ex->pass_stencil ? &sa : NULL};
+                          .pDepthAttachment = ex->pass_depth && da.imageView ? &da : NULL,
+                          .pStencilAttachment = ex->pass_stencil && sa.imageView ? &sa : NULL};
     vkCmdBeginRendering(ex->cb, &ri);
     vk_exec_frame.passes++;
     ex->recorded++;
@@ -1377,7 +1399,9 @@ static void clear_ds(VkExec *ex, const p_clear_ds *c) {
                 layer.view_type = VK_IMAGE_VIEW_TYPE_2D;
                 for (uint32_t i = 0; i < t->layers; i++) {
                     layer.base_layer = t->base_layer + i;
-                    vk_clear_stencil_masked(ex->cb, t->format, t->samples, t->aspect, view_of(ex, &layer),
+                    VkImageView lv = view_of(ex, &layer);
+                    if (!lv) continue;
+                    vk_clear_stencil_masked(ex->cb, t->format, t->samples, t->aspect, lv,
                                              ex->pass_w, ex->pass_h, scissor, sm, (uint32_t)c->stencil);
                     ex->recorded += 9;
                     vk_exec_frame.passes++;
