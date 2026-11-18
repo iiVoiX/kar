@@ -4039,7 +4039,25 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
                pending ? ", skipped after all" : "", count, ex->pass_w, ex->pass_h, tg);
     }
     if (pending) SKIP(10);   // a background worker is building it: the draw is skipped until it is ready
-    if (!p || !info) { warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped"); SKIP(11); }
+    if (!p || !info) {
+        warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped");
+        {   // each program whose pipeline failed, once (up to 64), with its frame and pass: which draws go missing
+            static uint64_t seen[64];
+            static int nseen;
+            uint64_t key = ex->prog ? ex->prog->serial : 0;
+            int k = 0;
+            while (k < nseen && seen[k] != key) k++;
+            if (k == nseen && nseen < 64) {
+                seen[nseen++] = key;
+                char tg[256];
+                vk_exec_targets_describe(ex, tg, sizeof tg);
+                rt_log("vk_exec: frame %llu: pipeline failed (%s) for program %llu, %u vertices, pass %ux%u, %s",
+                       (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), !p ? "no pipeline" : "no info",
+                       (unsigned long long)key, count, ex->pass_w, ex->pass_h, tg);
+            }
+        }
+        SKIP(11);
+    }
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     if (!B.st_valid || memcmp(&B.st, &s, sizeof s)) {
         vk_pipeline_set_dynamic(ex->cb, &s);
