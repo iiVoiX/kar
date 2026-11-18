@@ -46,7 +46,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - **P3b Runtime gebaut:** GPU-Puffer (VMA CPU_TO_GPU) mit uint32-Count-Prefix + sortierte Tabelle,
   Deskriptor-Set 3 (eine SSBO-Bindung), Pipeline-Layouts auf 4 Sets erweitert, Bindung pro CB analog Bindless.
   Testlauf der anderen Session (bis Frame 2400, Menü): kein Crash; im Rennlauf jedoch Geräteverlust (siehe oben).
-- **P3b Übersetzer offen:** Patch 0027 für GlobalToStorage.cs (BDA-Fallback + PhysicalStorageBuffer).
+- **P3b Übersetzer:** Patch 0027 committet (487db41); BDA bleibt Standard aus (`KAR_BDA`).
   Dateien: vk.h, vk_memory.c (GPU-Puffer + Set), vk_pipeline.c (Layout), vk_exec_draw.c (Bindung).
 - Rücksprung: `git reset --hard pre-16.3-bda`.
 
@@ -73,3 +73,11 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Spiel zeichnet das 1920er-Layout links in die breite UI-Ebene (Breite = Szenenverhältnis·1080, z. B. 2576), `ui_layer_shift` kopiert es um off=(Breite−1920)/2 in die Mitte.
 - Je Element ein SSBO-Block (Stufe 0, Platz 1): Wort 0 Breite, 3 linke Kante, 5 Höhe, 7 y im 1920er-Layout.
 - Schalter (Diagnose): `KAR_UI_DUMP=<frames>` (Draws/Zielwechsel/Kopien), `KAR_UI_OPS=1` (Ops dazwischen), `KAR_UI_SKIP=<frame>:<klasse>` (Klasse wegschalten), `KAR_UI_PROBE=<von>[-<bis>]:<modus>` (Versatz je Draw, Endkopie aus).
+
+## Stand 2026-11-18
+- 7 Commits der anderen KI (16.3 P3b, 18.1, 18.7, 18.2, 17.16) geprüft und gepusht: A/B-Rennen (eigene Exes über
+  `--runtime build/ab_x/src/runtime --out build/ab_x/out`, ini/Caches kopiert, shader-cache als Junction, `-Exe`)
+  82ecfff 118 fps → HEAD 121 fps, Minute 2. Die 141 fps vom 17.11. heute nicht reproduziert (Umgebung).
+- Ungespeicherte Änderung der anderen KI in `runtime/vk_exec_draw.c` (cur-Reset) nicht angefasst.
+- Nächstes: 17.3c nur im Rennen (Advisor): Banner/Pause/Ergebnis per `KAR_UI_DUMP` klassifizieren, dann Gate
+  `race && top_on && !blocked`, einmal pro Bild festgelegt, `hud_cols_read` aus während Elementweg.
