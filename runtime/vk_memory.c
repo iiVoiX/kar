@@ -44,7 +44,8 @@ typedef struct PoolRec {
     uint64_t lo, size;                 // GPU address range of the pool
     uint64_t import_lo, import_hi;     // POOL_IMPORT: the imported host range (aligned outwards)
     VkBuffer buf;
-    VkDeviceAddress bda;               // POOL_IMPORT with BDA: vkGetBufferDeviceAddress result (0 when unavailable)
+    VkDeviceAddress bda;               // POOL_IMPORT / POOL_PHYS: vkGetBufferDeviceAddress of buf (0 when unavailable)
+    VkDeviceAddress mbda;              // MS_ON: vkGetBufferDeviceAddress of mbuf (0 when unavailable)
     VkDeviceMemory mem;                // POOL_IMPORT
     VmaAllocation alloc;               // POOL_PHYS
     VPage *pt;                         // POOL_VIRT: size / 64 KiB entries
@@ -103,25 +104,61 @@ static PlatMutex lazy_lock = PLAT_MUTEX_INIT;   // one deferred import at a time
 static volatile int32_t n_lazy_imports;         // pools imported on their first GPU use instead of at nvnMemoryPoolInitialize
 static PFN_vkGetMemoryHostPointerPropertiesEXT p_host_props;
 
-// BDA lookup table: sorted by guest_lo, rebuilt under pool_lock when pools with device addresses are added or removed.
-// Shaders resolve a 64-bit guest address to a PhysicalStorageBuffer pointer by binary-searching this table.
+// BDA lookup table: sorted disjoint entries {guest_lo, guest_hi, bda}, rebuilt under pool_lock (shared or exclusive)
+// with bda_lock held as a leaf lock whenever pools, virtual mappings, lazy imports or mirrors change.
+static PlatMutex bda_lock = PLAT_MUTEX_INIT;
 static VkBdaEntry *bda_table;
 static int bda_n, bda_cap;
-static uint64_t bda_gen;
+static volatile uint64_t bda_gen = 1;
+
+static void bda_push(VkBdaEntry ent) {
+    if (ent.guest_lo >= ent.guest_hi || !ent.bda) return;
+    // pool_index is sorted by lo; clip or drop any overlap with the previous entry so binary search is exact.
+    if (bda_n > 0 && ent.guest_lo < bda_table[bda_n - 1].guest_hi) {
+        uint64_t prev_hi = bda_table[bda_n - 1].guest_hi;
+        if (ent.guest_lo == bda_table[bda_n - 1].guest_lo) {
+            bda_table[bda_n - 1] = ent;   // newer mapping at the same start wins
+            return;
+        }
+        bda_table[bda_n - 1].guest_hi = ent.guest_lo;
+        if (bda_table[bda_n - 1].guest_lo >= bda_table[bda_n - 1].guest_hi) bda_n--;
+        (void)prev_hi;
+    }
+    if (bda_n == bda_cap) {
+        bda_cap = bda_cap ? bda_cap * 2 : 64;
+        bda_table = realloc(bda_table, (size_t)bda_cap * sizeof *bda_table);
+        if (!bda_table) rt_fatal("vk: out of memory for the BDA lookup table");
+    }
+    bda_table[bda_n++] = ent;
+}
 
 static void bda_rebuild_locked(void) {
+    plat_mutex_lock(&bda_lock);
     bda_n = 0;
     for (int i = 0; i < pool_index.n; i++) {
         PoolRec *r = pool_index.e[i].buf;
-        if (!r || r->kind != POOL_IMPORT || !r->bda) continue;
-        if (bda_n == bda_cap) {
-            bda_cap = bda_cap ? bda_cap * 2 : 64;
-            bda_table = realloc(bda_table, (size_t)bda_cap * sizeof *bda_table);
-            if (!bda_table) rt_fatal("vk: out of memory for the BDA lookup table");
+        if (!r || !r->size) continue;
+        if (r->kind == POOL_IMPORT) {
+            VkDeviceAddress base = r->mstate == MS_ON && r->mbda ? r->mbda : r->bda;
+            if (base && r->lo >= r->import_lo)
+                bda_push((VkBdaEntry){r->lo, r->lo + r->size, base + (r->lo - r->import_lo)});
+        } else if (r->kind == POOL_PHYS && r->bda) {
+            bda_push((VkBdaEntry){r->lo, r->lo + r->size, r->bda});
+        } else if (r->kind == POOL_VIRT && r->pt) {
+            for (uint64_t k = 0; k < r->npages;) {
+                PoolRec *ph = r->pt[k].phys;
+                if (!ph || !ph->bda) { k++; continue; }
+                uint64_t off0 = r->pt[k].off, end = off0 + NVN_VPOOL_PAGE, k0 = k++;
+                while (k < r->npages && r->pt[k].phys == ph && r->pt[k].off == end)
+                    end += NVN_VPOOL_PAGE, k++;
+                uint64_t va0 = r->lo + k0 * NVN_VPOOL_PAGE, va1 = r->lo + k * NVN_VPOOL_PAGE;
+                if (va1 > r->lo + r->size) va1 = r->lo + r->size;
+                bda_push((VkBdaEntry){va0, va1, ph->bda + off0});
+            }
         }
-        bda_table[bda_n++] = (VkBdaEntry){r->import_lo, r->import_hi, r->bda};
     }
-    bda_gen++;
+    __atomic_add_fetch(&bda_gen, 1, __ATOMIC_RELEASE);
+    plat_mutex_unlock(&bda_lock);
 }
 
 static VkBufferUsageFlags pool_usage(const VkCtx *c) {
@@ -271,6 +308,7 @@ static int lazy_enabled(void) {
 // stays alive here. Returns whether r has a GPU buffer afterwards.
 static int lazy_import(PoolRec *r) {
     if (!__atomic_load_n(&r->lazy, __ATOMIC_ACQUIRE)) return r->buf != VK_NULL_HANDLE;
+    int imported = 0;
     plat_mutex_lock(&lazy_lock);
     if (r->lazy) {
         mem_thaw((uintptr_t)r->lo, r->size);   // the import may need write access to the pages
@@ -281,10 +319,12 @@ static int lazy_import(PoolRec *r) {
             r->buf = VK_NULL_HANDLE;
         } else {
             plat_inc32(&n_lazy_imports);
+            imported = r->bda != 0;
         }
         __atomic_store_n(&r->lazy, 0, __ATOMIC_RELEASE);
     }
     plat_mutex_unlock(&lazy_lock);
+    if (imported) bda_rebuild_locked();
     return r->buf != VK_NULL_HANDLE;
 }
 
@@ -319,6 +359,10 @@ static int alloc_physical(VkCtx *c, PoolRec *r) {
         r->buf = VK_NULL_HANDLE;
         r->alloc = NULL;
         return 0;
+    }
+    if (c->has_buffer_device_address) {
+        VkBufferDeviceAddressInfo bdai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = r->buf};
+        r->bda = vkGetBufferDeviceAddress(c->device, &bdai);
     }
     if (vk_fix_zero()) {   // Switch pool memory starts zeroed; once per pool, not per image placed in it
         VkCommandBuffer cb = vk_upload_begin();
@@ -428,7 +472,7 @@ int vk_pool_init(pool_t *p) {
         }
         phys_list[nphys++] = r;
     }
-    if (r->kind == POOL_IMPORT && r->bda) bda_rebuild_locked();
+    if ((r->kind == POOL_IMPORT || r->kind == POOL_PHYS) && r->bda) bda_rebuild_locked();
     plat_mutex_unlock(&pool_lock);
     return 1;
 }
@@ -490,7 +534,7 @@ void vk_pool_fini(pool_t *p) {
                 if (v->pt[k].phys == r) v->pt[k].phys = NULL;
         }
     }
-    if (r && r->kind == POOL_IMPORT && r->bda) bda_rebuild_locked();
+    if (r && (r->bda || r->kind == POOL_VIRT)) bda_rebuild_locked();
     plat_mutex_unlock(&pool_lock);
     if (!r) return;
     // Texture lock is acquired only after releasing pool_lock. Descriptor lookup takes them in the other direction
@@ -537,6 +581,7 @@ int vk_pool_map_virtual(pool_t *v, int n, const void *requests) {
         for (uint64_t k = 0; k < count; k++)
             r->pt[first + k] = (VPage){ph, ph ? (uint64_t)rq[i].physical_offset + k * NVN_VPOOL_PAGE : 0};
     }
+    if (ok) bda_rebuild_locked();
     plat_mutex_unlock(&pool_lock);
     if (!ok) rt_log("vk: MapVirtual on pool %p failed", (void *)v->mem);
     return ok;
@@ -745,110 +790,113 @@ static int resolve_locked(uint64_t addr, uint64_t size, VkMemSpan *out) {
 }
 
 uint64_t vk_mem_gen(void) {
-    return __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE) + __atomic_load_n(&mirror_gen, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE) + __atomic_load_n(&mirror_gen, __ATOMIC_ACQUIRE) +
+           __atomic_load_n(&bda_gen, __ATOMIC_ACQUIRE);
 }
 
 int vk_mem_bda_table(const VkBdaEntry **out, uint64_t *gen) {
     *out = bda_table;
-    *gen = bda_gen;
+    *gen = __atomic_load_n(&bda_gen, __ATOMIC_ACQUIRE);
     return bda_n;
 }
 
-// ---- BDA descriptor set (set 3): a single SSBO holding the sorted BDA lookup table.
-// Created lazily on first call; the SSBO is updated when bda_gen changes.
+// ---- BDA lookup table ring buffer (RELEASE_PLAN 16.3): bound as an ordinary SSBO (GFX_RES_SSBO_BDA) in set 0/1
+// only for shaders that actually emit PhysicalStorageBuffer accesses. Each bda_gen change writes into the next slot of
+// a persistent host-visible ring buffer, so in-flight command buffers never see descriptor updates, buffer frees or
+// torn table bytes.
+#define BDA_RING_SLOTS 64u
+#define BDA_MAX_ENTRIES 1020u
+#define BDA_SLOT_STRIDE 24576u   // 4 + 1020 * 24 = 24484, padded to 256-byte minStorageBufferOffsetAlignment
+
 static struct {
-    VkDescriptorSetLayout layout;
-    VkDescriptorPool pool;
-    VkDescriptorSet set;
     VkBuffer buf;
     VmaAllocation alloc;
-    uint64_t gen;       // bda_gen when the buffer was last uploaded
-    uint32_t cap;       // current buffer capacity in entries
+    uint8_t *mapped;
+    uint64_t gen;                // bda_gen uploaded in cur
+    uint64_t eager_pool_gen;     // pool_gen last scanned for deferred (lazy) imports
+    uint32_t slot;
+    VkDescriptorBufferInfo cur;
 } bda_gpu;
 
-// KAR_BDA=1 turns the set on (16.3 P3b). Off by default: with it every pipeline layout has four sets, and a race run
-// lost the device about 12 s in (VK_ERROR_DEVICE_LOST at vkQueueSubmit2, fresh profile, no frame limit; 2 of 2 runs),
-// while P3a alone (the table, no set) ran clean. Four-set layouts also miss the driver's pipeline cache.
-static int bda_set_on(void) {
-    static int on = -1;
-    if (on < 0) on = getenv("KAR_BDA") && *getenv("KAR_BDA") == '1';
-    return on;
-}
+static void vk_bda_sync_submission(int written);
 
-VkDescriptorSetLayout vk_bda_layout(void) {
+// KAR_BDA: 0 off (default until race-verified), 1 fallback when candidate search finds no cbuf pair, 2 all global ops.
+int vk_bda_mode(void) {
     VkCtx *c = vk_ctx();
-    if (!c->has_buffer_device_address || !bda_set_on()) return VK_NULL_HANDLE;
-    if (bda_gpu.layout) return bda_gpu.layout;
-    VkDescriptorSetLayoutBinding b = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                      .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL};
-    VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                          .bindingCount = 1, .pBindings = &b};
-    if (vkCreateDescriptorSetLayout(c->device, &ci, NULL, &bda_gpu.layout) != VK_SUCCESS)
-        bda_gpu.layout = VK_NULL_HANDLE;
-    return bda_gpu.layout;
-}
-
-static void bda_gpu_ensure_buffer(VkCtx *c, int n) {
-    uint32_t need = n > 0 ? (uint32_t)n : 1;
-    if (bda_gpu.cap >= need) return;
-    if (bda_gpu.buf) vmaDestroyBuffer(c->vma, bda_gpu.buf, bda_gpu.alloc);
-    uint32_t cap = bda_gpu.cap ? bda_gpu.cap : 64;
-    while (cap < need) cap *= 2;
-    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                             .size = (VkDeviceSize)cap * sizeof(VkBdaEntry) + sizeof(uint32_t),
-                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
-    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_CPU_TO_GPU};
-    if (vmaCreateBuffer(c->vma, &bi, &ai, &bda_gpu.buf, &bda_gpu.alloc, NULL) != VK_SUCCESS) {
-        bda_gpu.buf = VK_NULL_HANDLE;
-        bda_gpu.cap = 0;
-        return;
+    if (!c || !c->has_buffer_device_address) return 0;
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("KAR_BDA");
+        mode = !e || !*e ? 0 : *e == '2' ? 2 : *e == '1' ? 1 : 0;
+        if (mode) rt_log("vk: buffer device address mode %d (%s)", mode, mode == 2 ? "all global ops" : "fallback");
     }
-    bda_gpu.cap = cap;
-    bda_gpu.gen = 0;
+    return mode;
 }
 
-VkDescriptorSet vk_bda_set(void) {
+VkDescriptorBufferInfo vk_bda_buffer_info(int written) {
     VkCtx *c = vk_ctx();
-    if (!c->has_buffer_device_address) return VK_NULL_HANDLE;
-    if (!vk_bda_layout()) return VK_NULL_HANDLE;
+    VkDescriptorBufferInfo none = {0};
+    if (!c || !c->has_buffer_device_address) return none;
 
-    uint64_t gen = bda_gen;
-    if (bda_gpu.set && bda_gpu.gen == gen) return bda_gpu.set;
-
-    bda_gpu_ensure_buffer(c, bda_n);
-    if (!bda_gpu.buf) return VK_NULL_HANDLE;
-
-    if (!bda_gpu.set) {
-        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
-        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1,
-                                         .poolSizeCount = 1, .pPoolSizes = &ps};
-        if (vkCreateDescriptorPool(c->device, &pi, NULL, &bda_gpu.pool) != VK_SUCCESS) return VK_NULL_HANDLE;
-        VkDescriptorSetAllocateInfo da = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                                          .descriptorPool = bda_gpu.pool, .descriptorSetCount = 1,
-                                          .pSetLayouts = &bda_gpu.layout};
-        if (vkAllocateDescriptorSets(c->device, &da, &bda_gpu.set) != VK_SUCCESS) {
-            bda_gpu.set = VK_NULL_HANDLE;
-            return VK_NULL_HANDLE;
+    // A shader with GFX_RES_SSBO_BDA resolves addresses on the GPU without calling vk_mem_resolve per draw, so
+    // non-shader-code deferred pools are imported before the table is snapshotted (unless KAR_BDA_LAZY=1) and pools
+    // whose device addresses enter the table are marked used so vk_pool_fini waits for in-flight work.
+    static int bda_lazy = -1;
+    if (bda_lazy < 0) bda_lazy = getenv("KAR_BDA_LAZY") && *getenv("KAR_BDA_LAZY") == '1';
+    uint64_t pg = __atomic_load_n(&pool_gen, __ATOMIC_ACQUIRE);
+    if (bda_gpu.eager_pool_gen != pg) {
+        plat_mutex_lock_shared(&pool_lock);
+        for (int i = 0; i < pool_index.n; i++) {
+            PoolRec *r = pool_index.e[i].buf;
+            if (!r) continue;
+            if (!bda_lazy && r->kind == POOL_IMPORT && !(r->flags & NVN_MEMORY_POOL_FLAGS_SHADER_CODE) &&
+                __atomic_load_n(&r->lazy, __ATOMIC_ACQUIRE))
+                lazy_import(r);
+            if (r->bda && !r->used) plat_xchg32(&r->used, 1);
         }
+        for (int i = 0; i < nphys; i++)
+            if (phys_list[i]->bda && !phys_list[i]->used) plat_xchg32(&phys_list[i]->used, 1);
+        plat_mutex_unlock_shared(&pool_lock);
+        bda_gpu.eager_pool_gen = pg;
     }
 
-    void *mapped;
-    if (vmaMapMemory(c->vma, bda_gpu.alloc, &mapped) == VK_SUCCESS) {
-        uint32_t *head = mapped;
-        *head = (uint32_t)bda_n;
-        memcpy(head + 1, bda_table, (size_t)bda_n * sizeof(VkBdaEntry));
-        vmaUnmapMemory(c->vma, bda_gpu.alloc);
-        vmaFlushAllocation(c->vma, bda_gpu.alloc, 0, VK_WHOLE_SIZE);
+    vk_bda_sync_submission(written);
+
+    uint64_t g = __atomic_load_n(&bda_gen, __ATOMIC_ACQUIRE);
+    if (bda_gpu.buf && bda_gpu.gen == g) return bda_gpu.cur;
+
+    if (!bda_gpu.buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = (VkDeviceSize)BDA_RING_SLOTS * BDA_SLOT_STRIDE,
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                               VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info = {0};
+        if (vmaCreateBuffer(c->vma, &bi, &ai, &bda_gpu.buf, &bda_gpu.alloc, &info) != VK_SUCCESS || !info.pMappedData) {
+            if (bda_gpu.buf) vmaDestroyBuffer(c->vma, bda_gpu.buf, bda_gpu.alloc);
+            bda_gpu.buf = VK_NULL_HANDLE, bda_gpu.alloc = NULL, bda_gpu.mapped = NULL;
+            return none;
+        }
+        bda_gpu.mapped = info.pMappedData;
     }
 
-    VkDescriptorBufferInfo di = {.buffer = bda_gpu.buf, .offset = 0,
-                                 .range = sizeof(uint32_t) + (VkDeviceSize)bda_n * sizeof(VkBdaEntry)};
-    VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = bda_gpu.set,
-                              .dstBinding = 0, .descriptorCount = 1,
-                              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &di};
-    vkUpdateDescriptorSets(c->device, 1, &w, 0, NULL);
-    bda_gpu.gen = gen;
-    return bda_gpu.set;
+    uint32_t slot = bda_gpu.slot++ & (BDA_RING_SLOTS - 1);
+    VkDeviceSize off = (VkDeviceSize)slot * BDA_SLOT_STRIDE;
+    uint32_t *head = (uint32_t *)(bda_gpu.mapped + off);
+
+    plat_mutex_lock(&bda_lock);
+    uint64_t snap_gen = __atomic_load_n(&bda_gen, __ATOMIC_ACQUIRE);
+    uint32_t n = bda_n < 0 ? 0 : (uint32_t)bda_n > BDA_MAX_ENTRIES ? BDA_MAX_ENTRIES : (uint32_t)bda_n;
+    *head = n;
+    if (n) memcpy(head + 1, bda_table, (size_t)n * sizeof(VkBdaEntry));
+    plat_mutex_unlock(&bda_lock);
+
+    VkDeviceSize bytes = sizeof(uint32_t) + (VkDeviceSize)n * sizeof(VkBdaEntry);
+    vmaFlushAllocation(c->vma, bda_gpu.alloc, off, bytes);
+    bda_gpu.cur = (VkDescriptorBufferInfo){.buffer = bda_gpu.buf, .offset = off, .range = bytes};
+    bda_gpu.gen = snap_gen;
+    return bda_gpu.cur;
 }
 
 int vk_mem_class_of(uint64_t addr) {
@@ -1701,6 +1749,7 @@ static void mirror_mode(int discrete) {
     const char *e = cfg_value("TOTK_MEMORY");
     int mode = discrete ? 1 : 0;   // 0 import, 1 mirror, 2 verify
     const char *why = discrete ? "auto, discrete gpu" : "auto, uma";
+    if (!strcmp(e, "auto") && vk_bda_mode() >= 2) mode = 0, why = "auto, KAR_BDA=2";
     if (strcmp(e, "auto")) {
         if (!strcmp(e, "import")) mode = 0, why = "TOTK_MEMORY=import";
         else if (!strcmp(e, "mirror")) mode = 1, why = "TOTK_MEMORY=mirror";
@@ -1953,6 +2002,12 @@ static void mirror_create(PoolRec *r) {
         snprintf(why, sizeof why, "device-local allocation of %.1f MiB failed (%d)", n / 1048576.0, (int)res);
         return refuse(r, MR_ALLOC, why);
     }
+    if (c->has_buffer_device_address) {
+        VkBufferDeviceAddressInfo bdai = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = r->mbuf};
+        r->mbda = vkGetBufferDeviceAddress(c->device, &bdai);
+    }
+    r->acc_sub = msub;
+    r->mstate = MS_ON;
     plat_mutex_lock(&pool_lock);
     if (nm == mcap) grow((void **)&mlist, &mcap, sizeof *mlist);
     int at = nm;
@@ -1960,9 +2015,8 @@ static void mirror_create(PoolRec *r) {
     memmove(mlist + at + 1, mlist + at, (size_t)(nm - at) * sizeof *mlist);
     mlist[at] = r;
     nm++;
+    if (r->mbda) bda_rebuild_locked();
     plat_mutex_unlock(&pool_lock);
-    r->acc_sub = msub;
-    r->mstate = MS_ON;
     range_add(&pend, &npend, &cpend, r, 0, n);
     mrep.first_n++, mrep.first_bytes += n;
     plat_inc64(&m_live_n);
@@ -1971,6 +2025,7 @@ static void mirror_create(PoolRec *r) {
 
 static void mirror_forget(PoolRec *r) {
     __atomic_add_fetch(&mirror_gen, 1, __ATOMIC_RELEASE);
+    r->mstate = MS_NONE, r->mbda = 0;
     for (int i = 0; i < nm; i++)
         if (mlist[i] == r) {
             memmove(mlist + i, mlist + i + 1, (size_t)(nm - i - 1) * sizeof *mlist);
@@ -2083,6 +2138,21 @@ void vk_mem_gpu_wrote(const VkMemSpan *sp, uint64_t size) {
     if (!r || r->mstate != MS_ON || sp->buffer != r->mbuf || !size) return;
     if (mloop_on > 0 && vk_mem_wb_kind >= 0 && vk_mem_wb_kind < 6) wb_kind_bytes[vk_mem_wb_kind] += size;
     range_add(&wbl, &nwbl, &cwbl, r, sp->offset, size);
+}
+
+static void vk_bda_sync_submission(int written) {
+    if (!vk_mirror_on) return;
+    static uint32_t sync_sub, wrote_sub;
+    if (sync_sub != msub) {
+        sync_sub = msub;
+        for (int i = 0; i < nm; i++)
+            if (mlist[i]->acc_sub != msub) mirror_sync(mlist[i]);
+    }
+    if (written && wrote_sub != msub) {
+        wrote_sub = msub;
+        for (int i = 0; i < nm; i++)
+            range_add(&wbl, &nwbl, &cwbl, mlist[i], 0, mlist[i]->import_hi - mlist[i]->import_lo);
+    }
 }
 
 void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
@@ -2956,6 +3026,8 @@ void vk_mem_shutdown(void) {
     if (stg_pool) vmaDestroyPool(c->vma, stg_pool);   // after retire: no staging buffer is left in it
     stg_pool = NULL;
     stg_pool_tried = 0;
+    if (bda_gpu.buf) vmaDestroyBuffer(c->vma, bda_gpu.buf, bda_gpu.alloc);
+    memset(&bda_gpu, 0, sizeof bda_gpu);
     plat_rmutex_unlock(&cmd_lock);
     plat_mutex_lock(&pool_lock);
     for (int i = 0; i < pool_index.n; i++) destroy_rec(c, pool_index.e[i].buf);

@@ -151,6 +151,7 @@ static uint8_t xlate_id[32];                               // translator identit
 static int host_f64 = 1, host_set;                         // gfx_shader_set_host
 static uint32_t host_sbuf, host_sg[3] = {32, 32, 32}, host_gather;
 static uint32_t host_gs_sg;                               // must be supplied explicitly by the host
+static int host_bda;                                      // 0 off, 1 fallback, 2 all global ops (gfx_shader_set_bda_host)
 static PlatOnce paths_once = PLAT_ONCE_INIT;
 
 // ---- small helpers
@@ -372,6 +373,20 @@ void gfx_shader_set_geometry_host(uint32_t subgroup) {
     uint8_t buf[40];
     memcpy(buf, xlate_id, 32), memcpy(buf + 32, "TKHG", 4), memcpy(buf + 36, &subgroup, 4);
     rt_sha256(buf, sizeof buf, xlate_id);
+}
+
+void gfx_shader_set_bda_host(int mode) {
+    if (mode < 0 || mode > 2) rt_fatal("gfx_shader: invalid BDA mode %d", mode);
+    if (host_bda == mode) return;
+    if (n_requests || n_keys) rt_fatal("gfx_shader: BDA host mode changed after initialization");
+    paths();
+    host_bda = mode;
+    if (mode < 2) return;                                 // mode 0/1 preserve the resolved-candidate output keys
+    uint32_t m = (uint32_t)mode;
+    uint8_t buf[40];
+    memcpy(buf, xlate_id, 32), memcpy(buf + 32, "TKBD", 4), memcpy(buf + 36, &m, 4);
+    rt_sha256(buf, sizeof buf, xlate_id);
+    rt_log("gfx_shader: BDA mode %d: own shader cache keys", mode);
 }
 
 // ---- the translator children
@@ -913,7 +928,7 @@ static void add_res(GfxShader *s, int kind, const char *o, const char *e) {
             // ssbo_slot reads. vk_c0_fill puts the addresses at the packed offsets the shader reads.
             int off = r->handle * 4, ub = (int)nvn2_c0_part(&s->c0, 1), sb = (int)nvn2_c0_part(&s->c0, 2),
                 end = (int)nvn2_c0_part(&s->c0, 3);
-            if (!(r->flags & GFX_RES_SSBO_GUARDED) && s->has_c0 && r->cbuf_slot == 0 &&
+            if (!(r->flags & (GFX_RES_SSBO_GUARDED | GFX_RES_SSBO_BDA)) && s->has_c0 && r->cbuf_slot == 0 &&
                 off >= ub && off < end && (off - ub) % 16 == 0)
                 r->handle = (uint16_t)((off < sb ? 0x210 + (off - ub) : 0x310 + (off - sb)) / 4);
         }
@@ -2487,6 +2502,8 @@ static size_t build_request(char *o0, const char *hex, const char *stage, const 
     if (host_sbuf) o += sprintf(o, ",\"sbuf_align\":%u", host_sbuf);
     if (subgroup != 32) o += sprintf(o, ",\"subgroup\":%u", subgroup);
     if (host_gather) o += sprintf(o, ",\"gather_bias\":%u", host_gather);
+    if (host_bda == 1) o += sprintf(o, ",\"bda\":true");
+    else if (host_bda >= 2) o += sprintf(o, ",\"bda\":%d", host_bda);
     o += sprintf(o, "},\"out\":\"");
     json_esc(&o, cache_dir);
     o += sprintf(o, "\"}");

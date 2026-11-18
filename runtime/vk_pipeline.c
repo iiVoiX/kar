@@ -2043,14 +2043,11 @@ static Layout *layout_get(Bindings *B) {
         free(l);
         return NULL;
     }
-    VkDescriptorSetLayout bl4[4] = {l->set, empty_set_layout(), bindless_for(B, B->n), vk_bda_layout()};
-    l->bl = bl4[2] && bl4[1];
-    int nsets = 1;
-    VkDescriptorSetLayout *psets = &l->set;
-    if (bl4[3]) { nsets = 4; psets = bl4; if (!bl4[1]) bl4[1] = empty_set_layout(); if (!bl4[2]) bl4[2] = empty_set_layout(); }
-    else if (bl4[2] && bl4[1]) { nsets = 3; psets = bl4; }
-    VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nsets,
-                                     .pSetLayouts = psets};
+    VkDescriptorSetLayout bl3[3] = {l->set, empty_set_layout(), bindless_for(B, B->n)};
+    l->bl = bl3[2] && bl3[1];
+    VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                     .setLayoutCount = l->bl ? 3 : 1,
+                                     .pSetLayouts = l->bl ? bl3 : &l->set};
     if (vkCreatePipelineLayout(P.device, &pi, NULL, &l->layout) != VK_SUCCESS) {
         vkDestroyDescriptorSetLayout(P.device, l->set, NULL);
         free(l);
@@ -2110,13 +2107,11 @@ static Layout *layout_pair(Bindings *B, Bindings *F) {
         free(l);
         return NULL;
     }
-    VkDescriptorSetLayout sets[4] = {l->set, l->set1, bindless_for(B, n), vk_bda_layout()};
+    VkDescriptorSetLayout sets[3] = {l->set, l->set1, bindless_for(B, n)};
     l->bl = sets[2] != VK_NULL_HANDLE;
-    int nsets = sets[2] ? 3 : 2;
-    if (sets[3]) { nsets = 4; if (!sets[2]) sets[2] = empty_set_layout(); }
     VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
                                      .flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT,
-                                     .setLayoutCount = nsets, .pSetLayouts = sets};
+                                     .setLayoutCount = l->bl ? 3 : 2, .pSetLayouts = sets};
     if (vkCreatePipelineLayout(P.device, &pi, NULL, &l->layout) != VK_SUCCESS) {
         vkDestroyDescriptorSetLayout(P.device, l->set, NULL);
         vkDestroyDescriptorSetLayout(P.device, l->set1, NULL);

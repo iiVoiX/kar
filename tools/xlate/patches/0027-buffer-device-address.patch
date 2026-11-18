@@ -256,7 +256,7 @@
                  gpuAccessor.Log($"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
              }
  
-@@ -1310,6 +1334,297 @@
+@@ -1310,6 +1334,302 @@
              return oldValue;
          }
  
@@ -306,13 +306,18 @@
 +                return false;
 +            }
 +
++            bool isWrite = operation.Inst == Instruction.Store || operation.Inst.IsAtomic();
 +            List<uint> emptyTargets = [];
 +            if (gtsContext.TryGetFunctionId(operation, false, emptyTargets, out functionId, guarded: false, bda: true))
 +            {
++                if (isWrite)
++                {
++                    resourceManager.TryGetBdaTableBinding(true, out _);
++                }
 +                return true;
 +            }
 +
-+            if (!resourceManager.TryGetBdaTableBinding(out int bdaBinding))
++            if (!resourceManager.TryGetBdaTableBinding(isWrite, out int bdaBinding))
 +            {
 +                return false;
 +            }
@@ -556,6 +561,15 @@
              globalAddress = Utils.FindLastOperation(globalAddress, block);
 --- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
 +++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -22,7 +22,7 @@
+ 
+         private readonly SetBindingPair[] _cbSlotToBindingMap;
+         private readonly SetBindingPair[] _sbSlotToBindingMap;
+-        private uint _sbSlotWritten;
++        private ulong _sbSlotWritten;
+ 
+         private readonly Dictionary<int, int> _sbSlots;
+         private readonly Dictionary<int, int> _sbSlotsReverse;
 @@ -69,7 +69,8 @@
              _cbSlotToBindingMap = new SetBindingPair[18];
              // DKB: 32 storage buffers per stage, not Maxwell's 16. Switch 2 compute shaders read up to 25 base addresses
@@ -566,23 +580,23 @@
              _cbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
              _sbSlotToBindingMap.AsSpan().Fill(new(-1, -1));
  
-@@ -187,11 +188,41 @@
-                 AddNewStorageBuffer(setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_s{slotNumber}");
-             }
+@@ -189,9 +190,44 @@
  
--            if (write)
-+            if (write && slot < 32)
+             if (write)
              {
-                 _sbSlotWritten |= 1u << slot;
-             }
- 
+-                _sbSlotWritten |= 1u << slot;
+-            }
+-
++                _sbSlotWritten |= 1UL << slot;
++            }
++
 +            binding = setAndBinding.Binding;
 +            return true;
 +        }
 +
 +        private const int BdaTableSlotKey = 1 << 25;
 +
-+        public bool TryGetBdaTableBinding(out int binding)
++        public bool TryGetBdaTableBinding(bool write, out int binding)
 +        {
 +            if (!_sbSlots.TryGetValue(BdaTableSlotKey, out int slot))
 +            {
@@ -605,18 +619,23 @@
 +                AddNewStorageBuffer(setAndBinding.SetIndex, setAndBinding.Binding, $"{_stagePrefix}_bda");
 +            }
 +
++            if (write)
++            {
++                _sbSlotWritten |= 1UL << slot;
++            }
++
 +            Properties.UsesBda = true;
              binding = setAndBinding.Binding;
              return true;
          }
-@@ -500,8 +531,12 @@
+@@ -500,8 +536,12 @@
  
                  if (setAndBinding.Binding >= 0)
                  {
 -                    (int sbCbSlot, int sbCbOffset) = UnpackSbCbInfo(key);
 -                    BufferUsageFlags flags = (_sbSlotWritten & (1u << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
 +                    (int sbCbSlot, int sbCbOffset) = (key & BdaTableSlotKey) != 0 ? (0, 0) : UnpackSbCbInfo(key);
-+                    BufferUsageFlags flags = slot < 32 && (_sbSlotWritten & (1u << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
++                    BufferUsageFlags flags = (_sbSlotWritten & (1UL << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
 +                    if ((key & BdaTableSlotKey) != 0)
 +                    {
 +                        flags |= BufferUsageFlags.BdaTable;

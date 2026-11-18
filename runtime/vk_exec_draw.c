@@ -1416,6 +1416,10 @@ static p_bind_buf guarded_storage_binding(const VkExec *ex, int st, const GfxSha
 static uint64_t kirby_watch[2];   // KAR_DIAG_SSBO_WRITE=kirby: address and size, set by diag_kirby_vs
 
 static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *r, int written) {
+    if (r->flags & GFX_RES_SSBO_BDA) {
+        VkDescriptorBufferInfo bda = vk_bda_buffer_info(written);
+        return bda.buffer ? bda : zero_info(4);
+    }
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     uint64_t max = LIM.sbo_max, align = LIM.sbo_align;
     VkDescriptorBufferInfo bi;
@@ -2609,6 +2613,7 @@ static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
                     else if (slot >= 3 && slot - 3 < 18) rs_add(tmp, &n, ex, &ex->ubo[st][slot - 3], sizeof(p_bind_buf));
                 }   // slot 1: the program (bind_sig); others: the zero buffer
             } else if (b->kind == GFX_RES_SSBO) {   // every descriptor of the binding is the same range
+                if (r->flags & GFX_RES_SSBO_BDA) continue;   // covered by vk_mem_gen() in bind_sig
                 int ubo, slot = ssbo_slot(r, st, &ubo);
                 if (slot >= 0 && slot < 16) {
                     rs_add(tmp, &n, ex, ubo ? &ex->ubo[st][slot] : &ex->ssbo[st][slot], sizeof(p_bind_buf));
@@ -3120,17 +3125,6 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             if (!gfx && two[0]) vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 1, 2, two, 0, NULL);
             else vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 2, 1, &bls, 0, NULL);
             bl_cb[k] = ex->cb, bl_layout[k] = info->layout;
-            ex->recorded++;
-        }
-    }
-    {   // BDA lookup table (vk_memory.c, 16.3): the sorted table as set 3, bound like the bindless set
-        static VkCommandBuffer bda_cb[2];
-        static VkPipelineLayout bda_layout[2];
-        int k = !gfx;
-        VkDescriptorSet bdas = vk_bda_set();
-        if (bdas && (bda_cb[k] != ex->cb || bda_layout[k] != info->layout)) {
-            vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 3, 1, &bdas, 0, NULL);
-            bda_cb[k] = ex->cb, bda_layout[k] = info->layout;
             ex->recorded++;
         }
     }

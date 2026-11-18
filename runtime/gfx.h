@@ -71,6 +71,7 @@ void gfx_shader_counts(uint64_t *keys, uint64_t *translated);   // distinct keys
 void gfx_shader_set_host(int float64, uint32_t sbuf_align, const uint32_t subgroup[3], uint32_t gather_bits);
 // Both host setters precede shader requests. GS has no subgroup default; repeated identical setup is harmless.
 void gfx_shader_set_geometry_host(uint32_t subgroup);
+void gfx_shader_set_bda_host(int mode);                     // 0 off, 1 fallback, 2 all global ops (KAR_BDA)
 const uint8_t *gfx_shader_key(const GfxShader *s);          // the 32-byte cache key (stable while the translator is)
 const uint8_t *gfx_shader_input_id(const GfxShader *s);     // the 32-byte input id (stable across translators)
 // By input id from memory or disk; xlate 1 also translates it from its stored inputs. NULL if absent.
@@ -108,7 +109,7 @@ uint64_t gfx_shader_failures(void);                         // failed translatio
 // Reflection: parsed once per shader from the translator's .res.json and the SPIR-V before it enters the cache.
 enum { GFX_RES_UBO, GFX_RES_SSBO, GFX_RES_TEX, GFX_RES_IMG, GFX_RES_KINDS };
 // Version 1 requires guarded SSBOs to expose zero array elements when their address cannot be bound.
-enum { GFX_STORAGE_CANDIDATES_VERSION = 1, GFX_RES_SSBO_GUARDED = 0x80 };
+enum { GFX_STORAGE_CANDIDATES_VERSION = 1, GFX_RES_SSBO_BDA = 0x40, GFX_RES_SSBO_GUARDED = 0x80 };
 typedef struct {
     uint16_t set, binding;      // as the SPIR-V decorates them: set 0, bindings from 1 per shader (0: support buffer)
     int16_t slot;               // UBO: c[slot]; SSBO: storage buffer index; TEX: c2 combined slot (handle at 0x20 + 8 slot)
