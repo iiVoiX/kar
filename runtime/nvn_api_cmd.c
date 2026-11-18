@@ -729,6 +729,31 @@ static void bind_buffer(const Cpu *c, uint32_t op) {    // (cmd, stage, index, N
     cmd_t *o = cmd_of(c);
     *REC(o, op, p_bind_buf) = (p_bind_buf){(int)arg_x(c, 1), (int)arg_x(c, 2), arg_x(c, 3), arg_x(c, 4)};
     hw_fix(o, 20);
+    // KAR_UI_BINDLOG=1 (diagnostic, 17.3c): the guest callers that bind the interface element block (storage buffer,
+    // stage 0, index 1), each distinct return address once with four frames of its call chain: names the UI render code
+    static int bl = -1;
+    if (bl < 0) bl = getenv("KAR_UI_BINDLOG") && *getenv("KAR_UI_BINDLOG") == '1';
+    if (bl && op == OP_BIND_SSBO && arg_x(c, 1) == 0 && arg_x(c, 2) == 1) {
+        static uint64_t seen[16];
+        static int n;
+        uint64_t ra = c->x[30];
+        int k = 0;
+        while (k < n && seen[k] != ra) k++;
+        if (k == n && n < 16) {
+            seen[n++] = ra;
+            char t[256];
+            int w = snprintf(t, sizeof t, "%#llx", (unsigned long long)ra);
+            uint64_t fp = c->x[29];
+            for (int d = 0; d < 4 && fp && !(fp & 7) && w < (int)sizeof t - 24; d++) {
+                const uint64_t *f = ipc_guest(fp, 16);
+                if (!f) break;
+                w += snprintf(t + w, sizeof t - w, " < %#llx", (unsigned long long)f[1]);
+                fp = f[0];
+            }
+            rt_log("nvn: element block bind (ssbo 0/1) from %s, address %#llx size %llu", t,
+                   (unsigned long long)arg_x(c, 3), (unsigned long long)arg_x(c, 4));
+        }
+    }
 }
 NVN_API(nvnCommandBufferBindUniformBuffer) { bind_buffer(c, OP_BIND_UBO); }
 NVN_API(nvnCommandBufferBindUniformBuffers) { bind_buffers(c, OP_BIND_UBO); }
