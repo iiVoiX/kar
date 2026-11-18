@@ -103,3 +103,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - 17.3c Diagnose: `KAR_UI_INV=1` (jede neue nicht-normale Draw-Signatur im Rennen einmal, mit Seite und Wörtern; dumpt das
   Folgebild), `KAR_UI_SKIP=<frame>:k<key>` (nur dieses Programms nicht-normale Draws weglassen). Programme sind
   generisch (dasselbe zeichnet Platz oder Tacho) → Seite aus den Blockwörtern.
+- Anderes Seitenverhältnis testen: `KAR_DISPLAY_RES=<w>x<h>` (TOTK_WINDOW_SIZE ändert das Render-Verhältnis nicht). Vorbau-Zähler: `KAR_CS_PF_LOG=1`.
