@@ -790,6 +790,33 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
 
 // KAR_UI_DUMP also logs the ops between the draws of the interface layer (KAR_UI_OPS=1): what changes per element.
 static uint64_t ui_vbuf;   // the last vertex buffer bound (OP_BIND_VBUF, binding 0)
+static uint64_t ui_block;  // the last storage buffer at stage 0 index 1: an interface element's 2D matrix (17.3c)
+// KAR_UI_SKIP=<frame>:<class>,... (diagnostic, 17.3c): leaves out the interface draws of one class within 8 frames of
+// <frame>: 1 = blocks holding the identity (a whole-layout rectangle), 2 = other blocks with a width under 2 (another
+// projection). Shows which draws carry the rank, the speedometer and the lap counter.
+static int ui_skip(VkExec *ex) {
+    static uint64_t fr_at[8];
+    static int cls[8], n = -1;
+    if (n < 0) {
+        n = 0;
+        const char *e = getenv("KAR_UI_SKIP");
+        while (e && *e && n < 8) {
+            fr_at[n] = strtoull(e, (char **)&e, 10);
+            cls[n] = *e == ':' ? atoi(e + 1) : 0;
+            n++;
+            e = strchr(e, ',');
+            if (e) e++;
+        }
+    }
+    if (!n || !ui_block || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height))
+        return 0;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    const float *f = (const float *)(uintptr_t)ui_block;
+    int c = f[0] == 1.0f && f[3] == 0.0f && f[5] == -1.0f ? 1 : (f[0] < 2.0f && f[0] > -2.0f) ? 2 : 0;
+    for (int i = 0; i < n; i++)
+        if (c && cls[i] == c && fr + 8 >= fr_at[i] && fr <= fr_at[i] + 8) return 1;
+    return 0;
+}
 static void ui_op_dump(VkExec *ex, int op, const void *a) {
     static int on = -1;
     if (on < 0) on = getenv("KAR_UI_OPS") && *getenv("KAR_UI_OPS") == '1';
@@ -819,6 +846,10 @@ static void ui_op_dump(VkExec *ex, int op, const void *a) {
         const p_bind_buf *b = a;
         n = snprintf(t, sizeof t, "%s st %d idx %d addr %llx size %llu", op == OP_BIND_UBO ? "ubo" : "ssbo", b->stage, b->index,
                      (unsigned long long)b->addr, (unsigned long long)b->size);
+        if (op == OP_BIND_UBO && b->stage == 0 && b->index == 1 && b->addr) {
+            const float *f = (const float *)(uintptr_t)b->addr;
+            for (int i = 0; i < 32 && n < 1150; i++) n += snprintf(t + n, sizeof t - n, " %.3f", f[i]);
+        }
         if (op == OP_BIND_SSBO && b->stage == 0 && b->index == 1 && b->addr) {   // the per-element block
             const float *f = (const float *)(uintptr_t)b->addr;
             for (int i = 0; i < 56 && i * 4 < (int)b->size && n < 1150; i++) n += snprintf(t + n, sizeof t - n, " %.2f", f[i]);
@@ -1482,6 +1513,9 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             if (h->op != OP_DRAW && h->op != OP_DRAW_IDX && h->op != OP_DISPATCH && h->op != OP_UPDATE_UB &&
                 h->op != OP_DRAW_IDX_IND && h->op != OP_DISPATCH_IND && h->op != OP_DRAW_IND)
                 ui_op_dump(ex, h->op, a);
+            if (h->op == OP_BIND_SSBO && ((const p_bind_buf *)a)->stage == 0 && ((const p_bind_buf *)a)->index == 1)
+                ui_block = ((const p_bind_buf *)a)->addr;
+            if ((h->op == OP_DRAW || h->op == OP_DRAW_IDX) && ui_skip(ex)) break;
             vk_exec_op_draw(ex, h->op, a);
             break;
         case OP_COPY_B2B: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_CLEAR_TEX:
