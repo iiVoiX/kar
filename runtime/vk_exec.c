@@ -908,17 +908,20 @@ static int ui_probe_mode(void) {
         if (md[i] && fr >= lo[i] && fr <= hi[i]) return md[i];
     return 0;
 }
-// KAR_HUD_ELEMENTS=1 (17.3c v1, off by default): in the race (the anchor drew in the frame before) every interface
+// KAR_HUD_ELEMENTS (17.3c v1, on with hud_position = edges; 0 = the 17.3b band cuts): in the race (the anchor drew in the frame before) every interface
 // draw goes straight to its place in the wide layer instead of the 17.3b band cuts: the sub-layers drawn whole (the
 // rank) to the left edge, the other-projection elements of a width (the speedometer, the lap counter) to the right
 // edge, every plain element and every draw without a block to the middle, whole (markers, banners, tips, the timer).
 // Decided once per frame, at its first interface draw, so the draws and the skipped copy agree.
+static int ui_elements_on(void) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("KAR_HUD_ELEMENTS") && *getenv("KAR_HUD_ELEMENTS") == '0');   // on; 0 = the old band cuts
+    return on;
+}
 static int ui_place_mode(void) {
     int pm = ui_probe_mode();
     if (pm) return pm;
-    static int on = -1;
-    if (on < 0) on = getenv("KAR_HUD_ELEMENTS") && *getenv("KAR_HUD_ELEMENTS") == '1';
-    if (!on || !hud_edges_mode()) return 0;
+    if (!ui_elements_on() || !hud_edges_mode()) return 0;
     static uint64_t latch_fr = ~0ull;
     static int latch;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
@@ -1136,7 +1139,9 @@ static void ui_layer_shift(VkExec *ex) {
             __atomic_store_n(&ui_race_now, race, __ATOMIC_RELAXED);
             if (HC.log) rt_log("hud edges: frame %llu race %d", (unsigned long long)fr, race);
         }
-        if (mode && (mode == 2 || (race && __atomic_load_n(&HC.top_on, __ATOMIC_RELAXED))) && !__atomic_load_n(&HC.blocked, __ATOMIC_RELAXED) && UI.w - area >= 2 * off) {
+        // With KAR_HUD_ELEMENTS the band cuts are never used: a frame it does not place (the first frame of the
+        // anchor) stays centred.
+        if (mode && !ui_elements_on() && (mode == 2 || (race && __atomic_load_n(&HC.top_on, __ATOMIC_RELAXED))) && !__atomic_load_n(&HC.blocked, __ATOMIC_RELAXED) && UI.w - area >= 2 * off) {
             VkImageCopy band[10];
             uint32_t nb = 0;
             for (int hh = 0; hh < 2; hh++) {   // the top and the bottom half, each with its own cuts
