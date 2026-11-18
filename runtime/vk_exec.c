@@ -863,9 +863,11 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
     if (w) memcpy(f, w, sizeof f);
     const float *bk = ui_block ? (const float *)(uintptr_t)ui_block : NULL;
     int inst = op == OP_DRAW ? ((const p_draw *)a)->instances : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->instances : -1;
-    rt_log("ui dump: frame %llu key %016llx block %.1f %.1f %.1f %.1f inst %d", (unsigned long long)fr,
-           (unsigned long long)ui_prog_key(ex->prog), bk ? bk[0] : 0.0f, bk ? bk[3] : 0.0f, bk ? bk[5] : 0.0f,
-           bk ? bk[7] : 0.0f, inst);
+    if (bk)
+        rt_log("ui dump: frame %llu key %016llx block %.1f %.1f %.1f %.1f inst %d", (unsigned long long)fr,
+               (unsigned long long)ui_cur_key(ex), bk[0], bk[3], bk[5], bk[7], inst);
+    else
+        rt_log("ui dump: frame %llu key %016llx block none inst %d", (unsigned long long)fr, (unsigned long long)ui_cur_key(ex), inst);
     rt_log("ui dump: frame %llu draw %d target %llx %ux%u prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
            (unsigned long long)fr, idx++, (unsigned long long)(uintptr_t)ex->color[0].image, ex->color[0].width,
            ex->color[0].height, (unsigned long long)(ex->prog ? ex->prog->serial : 0),
@@ -914,6 +916,19 @@ static int ui_probe_offset(VkExec *ex) {
     const float *f = (const float *)(uintptr_t)ui_block;
     int c = f[0] == 1.0f && f[3] == 0.0f && f[5] == -1.0f ? 1 : (f[0] < 2.0f && f[0] > -2.0f) ? 2 : 0;
     if (mode == 3) return c ? -1 : off;   // only plain element blocks move; the others stay as drawn
+    if (mode == 4) {
+        // Mode 4: each element to its side by the cuts of 17.3b, whole: a plain element wholly left of the left cut of
+        // its half goes to the left edge, wholly right of the right cut to the right edge, any other to the middle; the
+        // identity blocks (a sub-layer drawn whole, the rank) to the left edge, the other-projection blocks of a width
+        // (the speedometer, the lap counter) to the right edge, an all-zero block to the middle.
+        if (c == 1) return 0;
+        if (c == 2) return f[0] != 0.0f ? 2 * off : off;
+        int half = -f[7] >= 540.0f;   // word 7: the element's top edge, negative downwards
+        float x = f[3], w = f[0];
+        if (x + w <= (float)hud_fixed_cut(half, 0)) return 0;
+        if (x >= (float)hud_fixed_cut(half, 1)) return 2 * off;
+        return off;
+    }
     return c == 1 ? 0 : c == 2 ? 2 * off : off;
 }
 
