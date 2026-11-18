@@ -908,14 +908,35 @@ static int ui_probe_mode(void) {
         if (md[i] && fr >= lo[i] && fr <= hi[i]) return md[i];
     return 0;
 }
+// KAR_HUD_ELEMENTS=1 (17.3c v1, off by default): in the race (the anchor drew in the frame before) every interface
+// draw goes straight to its place in the wide layer instead of the 17.3b band cuts: the sub-layers drawn whole (the
+// rank) to the left edge, the other-projection elements of a width (the speedometer, the lap counter) to the right
+// edge, every plain element and every draw without a block to the middle, whole (markers, banners, tips, the timer).
+// Decided once per frame, at its first interface draw, so the draws and the skipped copy agree.
+static int ui_place_mode(void) {
+    int pm = ui_probe_mode();
+    if (pm) return pm;
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_HUD_ELEMENTS") && *getenv("KAR_HUD_ELEMENTS") == '1';
+    if (!on || !hud_edges_mode()) return 0;
+    static uint64_t latch_fr = ~0ull;
+    static int latch;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (fr != latch_fr) {
+        uint64_t rf = __atomic_load_n(&ui_race_fr, __ATOMIC_RELAXED);
+        latch_fr = fr, latch = rf != ~0ull && rf + 1 == fr ? 5 : 0;
+    }
+    return latch;
+}
 static int ui_probe_offset(VkExec *ex) {
-    int mode = ui_probe_mode();
+    int mode = ui_place_mode();
     if (!mode || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return -1;
     int off = ((int)ex->color[0].width - 1920) / 2;
     if (mode == 1 || !ui_block) return off;
     const float *f = (const float *)(uintptr_t)ui_block;
     int c = f[0] == 1.0f && f[3] == 0.0f && f[5] == -1.0f ? 1 : (f[0] < 2.0f && f[0] > -2.0f) ? 2 : 0;
     if (mode == 3) return c ? -1 : off;   // only plain element blocks move; the others stay as drawn
+    if (mode == 5) return c == 1 ? 0 : c == 2 && f[0] != 0.0f ? 2 * off : off;   // KAR_HUD_ELEMENTS
     if (mode == 4) {
         // Mode 4: each element to its side by the cuts of 17.3b, whole: a plain element wholly left of the left cut of
         // its half goes to the left edge, wholly right of the right cut to the right edge, any other to the middle; the
@@ -1068,7 +1089,7 @@ static void ui_layer_shift(VkExec *ex) {
             return;
         }
         if (!kar_wide_output(t->width, t->height) || !UI.layer || UI.frame != fr || UI.shifted) continue;
-        if (ui_probe_mode()) { UI.shifted = 1; return; }   // KAR_UI_PROBE: the draws are in place already
+        if (ui_place_mode()) { UI.shifted = 1; return; }   // KAR_UI_PROBE / KAR_HUD_ELEMENTS: the draws are in place already
         VkCtx *c = vk_ctx();
         if (!UI.spare) {
             VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,

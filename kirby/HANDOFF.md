@@ -96,3 +96,5 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   Vergleiche ein ms-Skript nötig. Dort Hunderte große Compute-Programme, Treiber-Erstbau 1–7 s, Schlüssel stabil (13.3). Absturz im Spielcode f_7002ecfb00 (Lesen 0x7d72b1128) 1 von 4 Läufen, nicht wiederholt.
 - 6eb0187 + 4cc67a6 in Air Ride geprüft: race 1/0 richtig, Pause mittig, 115–120 fps. Beobachtung: Pause-Abdunklung
   deckt nur den 16:9-Bereich.
+- 17.3c v1: `KAR_HUD_ELEMENTS=1` (Standard aus) setzt im Rennen Platz links, Tacho/Runde rechts direkt beim Zeichnen,
+  alles andere ganz in der Mitte (keine Bandschnitte). Probe-Modi: `KAR_UI_PROBE=<von>-<bis>:<1..4>`.
