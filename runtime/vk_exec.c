@@ -643,6 +643,20 @@ static int hud_fixed_cut(int half, int right) {
     }
     return cut[half * 2 + right];
 }
+// KAR_UI_DUMP_AUTO=<n> (diagnostic, 17.3c): the first <n> times the guard centres the layer, the frame after that
+// read is dumped like a KAR_UI_DUMP frame: shows how the banner, the pause panel and the results are drawn.
+static uint64_t ui_dump_auto_at = ~0ull;
+static int ui_race_now;   // the race test of ui_layer_shift for the last frame (a 3D camera, no frame limiter)
+static void ui_dump_auto_arm(void) {
+    if (!__atomic_load_n(&ui_race_now, __ATOMIC_RELAXED)) return;   // only the race: fades and loading screens centre too
+    static int left = -1;
+    if (left < 0) left = getenv("KAR_UI_DUMP_AUTO") ? atoi(getenv("KAR_UI_DUMP_AUTO")) : 0;
+    if (left <= 0) return;
+    left--;
+    uint64_t at = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 2;
+    __atomic_store_n(&ui_dump_auto_at, at, __ATOMIC_RELAXED);
+    rt_log("ui dump: auto at frame %llu", (unsigned long long)at);
+}
 static void hud_cols_done(void *arg) {
     (void)arg;
     VkCtx *c = vk_ctx();
@@ -692,6 +706,7 @@ static void hud_cols_done(void *arg) {
     HC.nmany += many;
     if (!HC.blocked && (HC.cross_n >= HC_HOLD || banner)) {
         __atomic_store_n(&HC.blocked, 1, __ATOMIC_RELAXED);
+        ui_dump_auto_arm();
         if (HC.log) rt_log("hud edges: frame %llu centred (%s, cuts %d%d%d%d)", (unsigned long long)HC.frame,
                            banner ? "banner" : "3+ cuts", mask & 1, mask >> 1 & 1, mask >> 2 & 1, mask >> 3 & 1);
     }
@@ -791,22 +806,38 @@ static uint64_t ui_prog_key(const prog_t *p) {
     }
     return h;
 }
+// KAR_UI_ANCHOR=<key>,... (diagnostic, 17.3c): logs "anchor <key> 0/1" when a program (ui_prog_key) starts or stops
+// drawing into the interface layer, to find one that is drawn only during the race (the race signal of kar_pace.c
+// never counts: the game's limiter is off in these menus).
+static void ui_anchor(VkExec *ex) {
+    static uint64_t key[8], fr_cur = ~0ull;
+    static int n = -1;
+    static unsigned seen, shown;
+    static const prog_t *last_p;
+    static uint64_t last_k;
+    if (n < 0) {
+        n = 0;
+        const char *e = getenv("KAR_UI_ANCHOR");
+        while (e && *e && n < 8) { key[n++] = strtoull(e, (char **)&e, 16); if (*e == ',') e++; else break; }
+    }
+    if (!n) return;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (fr != fr_cur) {   // the frame before is complete: log the keys that came or went
+        for (int i = 0; i < n; i++)
+            if ((seen ^ shown) >> i & 1) rt_log("ui anchor: frame %llu key %016llx %d", (unsigned long long)fr_cur, (unsigned long long)key[i], seen >> i & 1);
+        shown = seen, seen = 0, fr_cur = fr;
+    }
+    if (!ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
+    if (ex->prog != last_p) last_p = ex->prog, last_k = ui_prog_key(ex->prog);
+    for (int i = 0; i < n; i++) if (last_k == key[i]) seen |= 1u << i;
+}
 static int ui_dump_frame(void);
 static void ui_draw_dump(VkExec *ex, int op, const void *a) {
-    static uint64_t want[16];
-    static int nwant = -1;
     static uint64_t cur = ~0ull;
     static int idx;
-    if (nwant < 0) {
-        nwant = 0;
-        const char *e = getenv("KAR_UI_DUMP");
-        while (e && *e && nwant < 16) { want[nwant++] = strtoull(e, (char **)&e, 10); if (*e == ',') e++; else break; }
-    }
-    if (!nwant || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
+    if (!ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-    int hit = 0;
-    for (int i = 0; i < nwant; i++) hit |= want[i] == fr;
-    if (!hit) return;
+    if (!ui_dump_frame()) return;   // a KAR_UI_DUMP frame or the KAR_UI_DUMP_AUTO one
     if (fr != cur) cur = fr, idx = 0;
     int count = op == OP_DRAW ? ((const p_draw *)a)->count : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->count : -1;
     const p_bind_buf *u = NULL;
@@ -992,7 +1023,7 @@ static int ui_dump_frame(void) {
     }
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     for (int i = 0; i < nwant; i++) if (want[i] == fr) return 1;
-    return 0;
+    return fr == __atomic_load_n(&ui_dump_auto_at, __ATOMIC_RELAXED);
 }
 
 static void ui_layer_shift(VkExec *ex) {
@@ -1055,6 +1086,10 @@ static void ui_layer_shift(VkExec *ex) {
         if (persp != persp_last) persp_last = persp, persp_at = tnow;
         if (pace != pace_last) pace_last = pace, pace_at = tnow;
         int race = persp_at && tnow - persp_at < 500000000ull && (!pace_at || tnow - pace_at > 500000000ull);
+        if (race != __atomic_load_n(&ui_race_now, __ATOMIC_RELAXED)) {
+            __atomic_store_n(&ui_race_now, race, __ATOMIC_RELAXED);
+            if (HC.log) rt_log("hud edges: frame %llu race %d", (unsigned long long)fr, race);
+        }
         if (mode && (mode == 2 || (race && __atomic_load_n(&HC.top_on, __ATOMIC_RELAXED))) && !__atomic_load_n(&HC.blocked, __ATOMIC_RELAXED) && UI.w - area >= 2 * off) {
             VkImageCopy band[10];
             uint32_t nb = 0;
@@ -1629,6 +1664,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND || h->op == OP_DRAW_IND) {
                 vk_exec_frame.draws_seen++, split_draws++;
                 ui_draw_dump(ex, h->op, a);
+                ui_anchor(ex);
             }
             if (h->op == OP_DISPATCH || h->op == OP_DISPATCH_IND) vk_exec_frame.dispatches++, split_draws++;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:

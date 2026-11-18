@@ -77,7 +77,14 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 ## Stand 2026-11-18
 - 7 Commits der anderen KI (16.3 P3b, 18.1, 18.7, 18.2, 17.16) geprüft und gepusht: A/B-Rennen (eigene Exes über
   `--runtime build/ab_x/src/runtime --out build/ab_x/out`, ini/Caches kopiert, shader-cache als Junction, `-Exe`)
-  82ecfff 118 fps → HEAD 121 fps, Minute 2. Die 141 fps vom 17.11. heute nicht reproduziert (Umgebung).
+  82ecfff 118 fps → HEAD 121 fps, Minute 2. Die 141 fps vom 17.11. heute nicht reproduziert – Ursache offen (16.6);
+  Minute 2 hat 23–36 Bilder > 25 ms (17.11.: 8) und `compute not indexed` bei Frame ~16885.
 - Ungespeicherte Änderung der anderen KI in `runtime/vk_exec_draw.c` (cur-Reset) nicht angefasst.
 - Nächstes: 17.3c nur im Rennen (Advisor): Banner/Pause/Ergebnis per `KAR_UI_DUMP` klassifizieren, dann Gate
   `race && top_on && !blocked`, einmal pro Bild festgelegt, `hud_cols_read` aus während Elementweg.
+- 17.3c Diagnose: `KAR_UI_DUMP_AUTO=<n>` dumpt das Bild nach den ersten n Zentrierungen des Wächters (jede, auch
+  Überblendungen vor dem Rennen). `KAR_UI_ANCHOR=<key>,…` loggt, wann ein Programm (ui_prog_key, über Neustarts
+  stabil) ins UI-Layer zeichnet oder aufhört – Suche nach einem Renn-Signal.
+- **Befund:** `race` in ui_layer_shift ist im ganzen Lauf 1: der karpace-Hook (kar_pace.c) zählt nie (pace 0, auch
+  bei Limit 60 im Menü); der Begrenzer des Spiels ist in diesen Menüs aus. Das 17.3b-Gate ist damit nur
+  `top_on && !blocked`.
