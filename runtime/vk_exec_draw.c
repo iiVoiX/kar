@@ -74,7 +74,7 @@ static void *grow(void *p, int *cap, size_t elem) {
 
 // ---- resources of one command buffer, freed by its completion callback
 
-typedef struct { VkBuffer buf; VmaAllocation alloc; uint8_t *map; uint64_t size, used; } Chunk;
+typedef struct { VkBuffer buf; VmaAllocation alloc; uint8_t *map; uint64_t size, used, flushed; } Chunk;
 typedef struct {
     VkImage image;
     VkFormat format;
@@ -258,7 +258,11 @@ static CbRes *cb_res(VkExec *ex) {
 
 static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
     CbRes *r = cb_res(ex);
-    size = (size + 255) & ~255ull;
+    VkCtx *ctx = vk_ctx();
+    uint64_t atom = ctx ? ctx->props.limits.nonCoherentAtomSize : 0;
+    uint64_t al = atom > 256 ? atom : 256;
+    if (al & (al - 1)) al = 256;
+    size = (size + al - 1) & ~(al - 1);
     Chunk *c = r->nchunks ? &r->chunks[r->nchunks - 1] : NULL;
     if (!c || c->used + size > c->size) {
         if (r->nchunks == r->cchunks) r->chunks = grow(r->chunks, &r->cchunks, sizeof *r->chunks);
@@ -271,11 +275,11 @@ static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *
             plat_mutex_unlock(&spare_lock);
         }
         if (reused) {
-            c->used = 0;
+            c->flushed = 0;
+            c->used = size;
             r->nchunks++;
             *buf = c->buf;
             *off = 0;
-            c->used = size;
             return c->map;
         }
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n,
@@ -285,9 +289,9 @@ static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
         VmaAllocationInfo info;
-        VkResult res = vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &c->buf, &c->alloc, &info);
+        VkResult res = vmaCreateBuffer(ctx->vma, &bi, &ai, &c->buf, &c->alloc, &info);
         if (res != VK_SUCCESS) rt_fatal("vk: transient buffer of %llu bytes failed (%d)", (unsigned long long)n, (int)res);
-        c->map = info.pMappedData, c->size = n, c->used = 0;
+        c->map = info.pMappedData, c->size = n, c->used = 0, c->flushed = 0;
         r->nchunks++;
     }
     *buf = c->buf;
@@ -295,6 +299,18 @@ static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *
     uint8_t *p = c->map + c->used;
     c->used += size;
     return p;
+}
+
+void vk_exec_draw_flush_scratch(void) {
+    VkCtx *c = vk_ctx();
+    if (!c || !cur || !cur->nchunks) return;
+    for (int i = 0; i < cur->nchunks; i++) {
+        Chunk *ch = &cur->chunks[i];
+        if (ch->used > ch->flushed) {
+            vmaFlushAllocation(c->vma, ch->alloc, ch->flushed, ch->used - ch->flushed);
+            ch->flushed = ch->used;
+        }
+    }
 }
 
 static uint32_t written_hash(uint64_t addr, uint64_t size) {
@@ -497,6 +513,7 @@ static void dummies_init(void) {
     VmaAllocationInfo info;
     if (vmaCreateBuffer(c->vma, &bi, &ai, &Z.zbuf, &Z.zalloc, &info) != VK_SUCCESS) rt_fatal("vk: zero buffer failed");
     memset(info.pMappedData, 0, ZERO_BYTES);
+    vmaFlushAllocation(c->vma, Z.zalloc, 0, ZERO_BYTES);
     VkBufferViewCreateInfo bv = {.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = Z.zbuf,
                                  .format = VK_FORMAT_R32G32B32A32_SFLOAT, .range = ZERO_BYTES};
     if (vkCreateBufferView(c->device, &bv, NULL, &Z.zview) != VK_SUCCESS) rt_fatal("vk: zero buffer view failed");

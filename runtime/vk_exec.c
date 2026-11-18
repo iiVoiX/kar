@@ -628,6 +628,8 @@ static int hud_fixed_cut(int half, int right) {
 }
 static void hud_cols_done(void *arg) {
     (void)arg;
+    VkCtx *c = vk_ctx();
+    if (c && HC.mem) vmaInvalidateAllocation(c->vma, HC.mem, 0, VK_WHOLE_SIZE);
     const uint8_t *p = HC.map;
     uint32_t stride = (HC.area + 1) * HC.bpp;
     memset(HC.col, 0, sizeof HC.col);

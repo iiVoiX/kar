@@ -279,6 +279,7 @@ static void gpu_stats(PerfGpu *g) {
 }
 
 // Weak stand-in for vk_exec.c's replay: only empty recordings ({OP_BEGIN, OP_END}) can be submitted.
+WEAK void vk_exec_draw_flush_scratch(void) {}
 WEAK int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t fence, uint64_t submitted_ticks) {
     (void)cb, (void)fence, (void)submitted_ticks;
     for (int i = 0; i < n; i++) {
@@ -497,6 +498,7 @@ static VkCommandBuffer split_impl(int wait) {
     VkCommandBuffer cb = slots[cur_slot].cb;
     ts_end(cb, cur_fence);
     if (!rec_end_cb(cb, 0, 0)) vkEndCommandBuffer(cb);   // every command of the part is in cb, ended by its recorder
+    vk_exec_draw_flush_scratch();
     vk_upload_flush(0);   // the uploads this part asked for precede it in queue order
     VkCommandBuffer pro = prologue(c, cur_fence);
     VkCommandBufferSubmitInfo cbi[2] = {{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = pro},
@@ -586,6 +588,7 @@ uint64_t vk_sync_submit_record(VkSyncRecordFn record, void *context, uint64_t su
     if (!rec_end_cb(s->cb, VK_CRUMB_SUBMIT_END, fence)) vkEndCommandBuffer(s->cb);
     perf_replay(t0);
     // After the recording: the uploads it asked for (and every earlier one) precede it in queue order.
+    vk_exec_draw_flush_scratch();
     vk_upload_flush(0);
     VkCommandBuffer pro = prologue(c, fence);
     s = &slots[cur_slot];
