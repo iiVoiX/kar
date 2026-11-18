@@ -955,6 +955,27 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
                (unsigned long long)ui_cur_key(ex), bk[0], bk[3], bk[5], bk[7], inst, ui_probe_offset(ex), bk[0], bk[3], bk[5]);
     else
         rt_log("ui dump: frame %llu key %016llx block none inst %d", (unsigned long long)fr, (unsigned long long)ui_cur_key(ex), inst);
+    if (bk && getenv("KAR_UI_DUMP_FULL")) {   // KAR_UI_DUMP_FULL=1 (diagnostic): all 56 words of the element block
+        char t[1024];
+        int n = 0;
+        for (int w = 0; w < 56 && n < (int)sizeof t - 16; w++) n += snprintf(t + n, sizeof t - n, " %g", bk[w]);
+        rt_log("ui dump: frame %llu full%s", (unsigned long long)fr, t);
+    }
+    {   // KAR_UI_WATCH=<frame>:<n> (diagnostic): at that frame, the n-th plain element block drawn gets a write watch
+        static int64_t wf = -2;
+        static int wn, seen;
+        if (wf == -2) {
+            const char *e = getenv("KAR_UI_WATCH");
+            wf = e && *e ? strtoll(e, (char **)&e, 10) : -1;
+            wn = e && *e == ':' ? atoi(e + 1) : 0;
+        }
+        if (bk && wf >= 0 && (int64_t)fr == wf && bk[0] >= 2.0f && seen++ == wn) {
+            rt_log("ui watch: frame %llu block %#llx words %g %g %g %g", (unsigned long long)fr, (unsigned long long)ui_block,
+                   bk[0], bk[3], bk[5], bk[7]);
+            plat_diag_watch_write(ui_block, 224);
+            wf = -1;
+        }
+    }
     rt_log("ui dump: frame %llu draw %d target %llx %ux%u prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
            (unsigned long long)fr, idx++, (unsigned long long)(uintptr_t)ex->color[0].image, ex->color[0].width,
            ex->color[0].height, (unsigned long long)(ex->prog ? ex->prog->serial : 0),
