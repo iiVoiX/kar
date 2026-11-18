@@ -848,6 +848,7 @@ static void ui_anchor(VkExec *ex) {
     for (int i = 0; i < n; i++) if (k == key[i]) seen |= 1u << i;
 }
 static int ui_dump_frame(void);
+static int ui_probe_offset(VkExec *ex);
 static void ui_draw_dump(VkExec *ex, int op, const void *a) {
     static uint64_t cur = ~0ull;
     static int idx;
@@ -864,8 +865,8 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
     const float *bk = ui_block ? (const float *)(uintptr_t)ui_block : NULL;
     int inst = op == OP_DRAW ? ((const p_draw *)a)->instances : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->instances : -1;
     if (bk)
-        rt_log("ui dump: frame %llu key %016llx block %.1f %.1f %.1f %.1f inst %d", (unsigned long long)fr,
-               (unsigned long long)ui_cur_key(ex), bk[0], bk[3], bk[5], bk[7], inst);
+        rt_log("ui dump: frame %llu key %016llx block %.1f %.1f %.1f %.1f inst %d off %d", (unsigned long long)fr,
+               (unsigned long long)ui_cur_key(ex), bk[0], bk[3], bk[5], bk[7], inst, ui_probe_offset(ex));
     else
         rt_log("ui dump: frame %llu key %016llx block none inst %d", (unsigned long long)fr, (unsigned long long)ui_cur_key(ex), inst);
     rt_log("ui dump: frame %llu draw %d target %llx %ux%u prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
@@ -911,7 +912,8 @@ static int ui_probe_mode(void) {
 // KAR_HUD_ELEMENTS (17.3c v1, on with hud_position = edges; 0 = the 17.3b band cuts): in the race (the anchor drew in the frame before) every interface
 // draw goes straight to its place in the wide layer instead of the 17.3b band cuts: the sub-layers drawn whole (the
 // rank) to the left edge, the other-projection elements of a width (the speedometer, the lap counter) to the right
-// edge, every plain element and every draw without a block to the middle, whole (markers, banners, tips, the timer).
+// edge, the course map and the rider list (by their blocks) to the left edge, every other plain element and every
+// draw without a block to the middle, whole (markers, banners, tips, the timer).
 // Decided once per frame, at its first interface draw, so the draws and the skipped copy agree.
 static int ui_elements_on(void) {
     static int on = -1;
@@ -939,7 +941,17 @@ static int ui_probe_offset(VkExec *ex) {
     const float *f = (const float *)(uintptr_t)ui_block;
     int c = f[0] == 1.0f && f[3] == 0.0f && f[5] == -1.0f ? 1 : (f[0] < 2.0f && f[0] > -2.0f) ? 2 : 0;
     if (mode == 3) return c ? -1 : off;   // only plain element blocks move; the others stay as drawn
-    if (mode == 5) return c == 1 ? 0 : c == 2 && f[0] != 0.0f ? 2 * off : off;   // KAR_HUD_ELEMENTS
+    if (mode == 5 || mode == 6) {   // KAR_HUD_ELEMENTS (5), and as probe mode 6
+        // The course map (its frame and its backdrop) and the rider list by their exact blocks to the left edge; what
+        // they hold is drawn with their blocks and moves along (Air Ride, 2026-11-18; another size stays in the middle).
+        static const float box[3][4] = {{240.0f, 26.0f, -239.7f, -16.0f}, {426.5f, -67.2f, -239.7f, -16.0f},
+                                        {250.0f, 50.0f, -499.4f, -309.6f}};
+        for (int i = 0; i < 3; i++)
+            if (fabsf(f[0] - box[i][0]) < 0.5f && fabsf(f[3] - box[i][1]) < 0.5f && fabsf(f[5] - box[i][2]) < 0.5f &&
+                fabsf(f[7] - box[i][3]) < 0.5f)
+                return 0;
+        return c == 1 ? 0 : c == 2 && f[0] != 0.0f ? 2 * off : off;
+    }
     if (mode == 4) {
         // Mode 4: each element to its side by the cuts of 17.3b, whole: a plain element wholly left of the left cut of
         // its half goes to the left edge, wholly right of the right cut to the right edge, any other to the middle; the

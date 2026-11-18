@@ -83,7 +83,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Nächstes: 17.3c nur im Rennen (Advisor): Banner/Pause/Ergebnis per `KAR_UI_DUMP` klassifizieren, dann Gate
   `race && top_on && !blocked`, einmal pro Bild festgelegt, `hud_cols_read` aus während Elementweg.
 - 17.3c Diagnose: `KAR_UI_DUMP_AUTO=<n>` dumpt das Bild nach den ersten n Zentrierungen des Wächters im Rennen
-  (Anker gezeichnet). `KAR_UI_ANCHOR=<key>,…` loggt, wann ein Programm (ui_prog_key, über Neustarts
+  (Anker gezeichnet; braucht `KAR_HUD_ELEMENTS=0`, sonst kein Rücklesen im Rennen). `KAR_UI_ANCHOR=<key>,…` loggt, wann ein Programm (ui_prog_key, über Neustarts
   stabil) ins UI-Layer zeichnet oder aufhört – Suche nach einem Renn-Signal.
 - **Befund:** `race` in ui_layer_shift ist im ganzen Lauf 1: der karpace-Hook (kar_pace.c) zählt nie (pace 0, auch
   bei Limit 60 im Menü); der Begrenzer des Spiels ist in diesen Menüs aus. Ersetzt durch den Anker (997de56).
