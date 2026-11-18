@@ -21,7 +21,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Race: profile `build/profile-kar-fresh` (delete its save/, save-backup/, cache/ first), script
   `kirby/scripts/fresh_race.txt`, `TOTK_FPS_LIMIT=60`, race from frame ~3600:
   `powershell -NoProfile -ExecutionPolicy Bypass -File tools/kar_race_test.ps1 -Runs 1 -Script kirby/scripts/fresh_race.txt -Profile build/profile-kar-fresh -Out E:/kirby/<dir> -Shots '4400-5200:400' -ShotCount 3 -Env 'TOTK_FPS_LIMIT=60;...'`
-- `toRace.txt` (old save) no longer reaches a race. Shots are 480x270 unless `TOTK_SHOTS_FULL=1` (ultrawide looks
+- `toRace.txt` (old save) no longer reaches a race. `RAINBOW` im Shot-Check = Median-Helligkeit > 0,62, schlägt bei hellen Strecken fälschlich an. Shots are 480x270 unless `TOTK_SHOTS_FULL=1` (ultrawide looks
   squeezed in small shots).
 - Log lines: `TOTK_FT_PERIOD=5` (fps per 5 s), `TOTK_TRACE=present`, `KAR_PRESENT_PROF=1`.
 
@@ -31,8 +31,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Frame generation (16.7): `KAR_FG=1` runs (runtime/vk_fg.cpp, FFX optical flow + interpolation, own pacing), but the
   interpolated picture is ~a blend: the game renders no motion vectors (its DLSS class is never built in 1.3.3) and
   optical flow is noise under the game's motion blur. Tools: `KAR_FG_DUMP=<n>` (+`KAR_FG_DUMP_DIR`), `KAR_FG_DEBUG=1`.
-- Open bugs: ultrawide figure/machine select (3D figures clipped in their frames); empty speech bubble 2.6 (fix behind
-  `KAR_POOL_BL=1`, untested); Top Ride card garbage 1/10; dark City Trial scene.
+- Open bugs: (Figuren-/Maschinenwahl im Breitbild 2026-11-18 wie 16:9, kein Anschnitt mehr gesehen); empty speech bubble 2.6 (`KAR_POOL_BL=1` 2026-11-18: kein Unterschied); Top Ride card garbage 1/10; City Trial: schwarzer Kirby in Lava-Höhlen (3.2).
 
 ## Next
 - 16.7 B2: camera motion vectors from depth + current/previous camera matrices (find the camera in game code; the
