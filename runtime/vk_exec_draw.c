@@ -4520,6 +4520,26 @@ static VkPipeline compute_pipe(const GfxShader *cs, const VkPipeInfo **info, int
 
 // A dispatch whose program has no usable compute stage (an NVN 2 program that did not lower) is skipped. The first
 // skip of each program is logged with its caller, so a run lists every compute pass that is missing.
+// KAR_CS_LOG=1 (13.3): each program whose compute pipeline was refused (KAR_CS_SPV_MAX) or failed, once (up to 64), at
+// the dispatch that skipped it: whether the skipped large programs are dispatched in play at all.
+static void cs_fail_log(VkExec *ex) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_CS_LOG") && *getenv("KAR_CS_LOG") == '1';
+    if (!on) return;
+    static uint64_t seen[64], cnt[64];
+    static int n;
+    uint64_t serial = ex->prog ? ex->prog->serial : 0;
+    int i = 0;
+    while (i < n && seen[i] != serial) i++;
+    if (i == n) {
+        if (n == 64) return;
+        seen[n] = serial, cnt[n] = 0, n++;
+    }
+    uint64_t c = ++cnt[i];
+    if (c == 1 || c == 10 || c == 100 || c == 1000 || c == 10000 || c == 100000)   // first and growing counts
+        rt_log("cs log: dispatch skipped, no pipeline: program %llu frame %llu count %llu", (unsigned long long)serial,
+               (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), (unsigned long long)c);
+}
 static int cs_skip_first(uint64_t serial) {
     static uint64_t seen[256];
     static int n;
@@ -4559,7 +4579,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     uint64_t q2 = plat_now_ns();
     vk_rp_sub[1] += q2 - q1;
     if (cs_pending) return;   // KAR_CS_SKIP_PENDING=1 only
-    if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
+    if (!p || !info) return cs_fail_log(ex), warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
     vk_exec_barrier(ex);   // ends the pass; earlier writes are visible to the shader
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
     c0_dim[0] = (uint32_t)d->x, c0_dim[1] = (uint32_t)d->y, c0_dim[2] = (uint32_t)d->z;
@@ -4608,7 +4628,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     uint64_t q2 = plat_now_ns();
     vk_rp_sub[1] += q2 - q1;
     if (cs_pending) return;   // KAR_CS_SKIP_PENDING=1 only
-    if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
+    if (!p || !info) return cs_fail_log(ex), warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
     vk_exec_barrier(ex);
     VK_MEM_USE(ip);
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_COMPUTE, p);
