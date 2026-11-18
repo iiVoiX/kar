@@ -760,15 +760,28 @@ static void hud_cols_read(VkExec *ex, uint64_t fr) {
 // program, first texture, vertex count, viewport, scissor and the first words of its first user constant buffer, to
 // see whether the corner elements of the race HUD are draws of their own.
 static uint64_t ui_block;   // see below (ui_skip)
+// A key of the game's shader program that does not change between runs: FNV over the control sections of its stages
+// (17.3c, the per-element allow list needs one; program serials and texture handles differ from run to run).
+static uint64_t ui_prog_key(const prog_t *p) {
+    if (!p) return 0;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t st = 0; st < p->nstage && st < 6; st++) {
+        const uint8_t *c = p->sd[st].control;
+        if (!c) continue;
+        for (uint32_t i = 0; i < 0x880; i++) h = (h ^ c[i]) * 0x100000001b3ull;
+    }
+    return h;
+}
+static int ui_dump_frame(void);
 static void ui_draw_dump(VkExec *ex, int op, const void *a) {
-    static uint64_t want[8];
+    static uint64_t want[16];
     static int nwant = -1;
     static uint64_t cur = ~0ull;
     static int idx;
     if (nwant < 0) {
         nwant = 0;
         const char *e = getenv("KAR_UI_DUMP");
-        while (e && *e && nwant < 8) { want[nwant++] = strtoull(e, (char **)&e, 10); if (*e == ',') e++; else break; }
+        while (e && *e && nwant < 16) { want[nwant++] = strtoull(e, (char **)&e, 10); if (*e == ',') e++; else break; }
     }
     if (!nwant || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
@@ -784,8 +797,9 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
     if (w) memcpy(f, w, sizeof f);
     const float *bk = ui_block ? (const float *)(uintptr_t)ui_block : NULL;
     int inst = op == OP_DRAW ? ((const p_draw *)a)->instances : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->instances : -1;
-    rt_log("ui dump: frame %llu block %.1f %.1f %.1f %.1f inst %d", (unsigned long long)fr, bk ? bk[0] : 0.0f,
-           bk ? bk[3] : 0.0f, bk ? bk[5] : 0.0f, bk ? bk[7] : 0.0f, inst);
+    rt_log("ui dump: frame %llu key %016llx block %.1f %.1f %.1f %.1f inst %d", (unsigned long long)fr,
+           (unsigned long long)ui_prog_key(ex->prog), bk ? bk[0] : 0.0f, bk ? bk[3] : 0.0f, bk ? bk[5] : 0.0f,
+           bk ? bk[7] : 0.0f, inst);
     rt_log("ui dump: frame %llu draw %d target %llx %ux%u prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
            (unsigned long long)fr, idx++, (unsigned long long)(uintptr_t)ex->color[0].image, ex->color[0].width,
            ex->color[0].height, (unsigned long long)(ex->prog ? ex->prog->serial : 0),
@@ -869,7 +883,7 @@ static void ui_op_dump(VkExec *ex, int op, const void *a) {
     if (nwant < 0) {
         nwant = 0;
         const char *e = getenv("KAR_UI_DUMP");
-        while (e && *e && nwant < 8) { want[nwant++] = strtoull(e, (char **)&e, 10); if (*e == ',') e++; else break; }
+        while (e && *e && nwant < 16) { want[nwant++] = strtoull(e, (char **)&e, 10); if (*e == ',') e++; else break; }
     }
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int hit = 0;
@@ -942,6 +956,19 @@ static void ui_op_dump(VkExec *ex, int op, const void *a) {
     default: return;
     }
     rt_log("ui op: frame %llu %s", (unsigned long long)fr, t);
+}
+
+static int ui_dump_frame(void) {
+    static uint64_t want[16];
+    static int nwant = -1;
+    if (nwant < 0) {
+        nwant = 0;
+        const char *e = getenv("KAR_UI_DUMP");
+        while (e && *e && nwant < 16) { want[nwant++] = strtoull(e, (char **)&e, 10); if (*e == ',') e++; else break; }
+    }
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    for (int i = 0; i < nwant; i++) if (want[i] == fr) return 1;
+    return 0;
 }
 
 static void ui_layer_shift(VkExec *ex) {
@@ -1492,7 +1519,16 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             if (depth >= CALL_DEPTH) rt_fatal("vk: command buffer calls nested deeper than %d", CALL_DEPTH);
             walk(ex, nvn_op_first(((const p_jump *)a)->target), depth + 1);
             break;
-        case OP_SET_RT: set_rt(ex, a); ui_block = 0; break;   // an element's block belongs to its own pass
+        case OP_SET_RT:
+            set_rt(ex, a);
+            ui_block = 0;   // an element's block belongs to its own pass
+            if (ui_dump_frame()) {
+                const p_set_rt *r = a;
+                const tex_t *t = r->n > 0 ? r->color[0] : NULL;
+                rt_log("ui dump: frame %llu target %ux%u format %d (%d colour)", (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
+                       t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : -1, r->n);
+            }
+            break;   // an element's block belongs to its own pass
         case OP_CLEAR_COLOR: clear_color(ex, a); break;
         case OP_CLEAR_DS: clear_ds(ex, a); break;
         case OP_VIEWPORTS: {
