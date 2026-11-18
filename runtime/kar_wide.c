@@ -98,6 +98,10 @@ int kar_wide_size(int *w, int *h) {
         if (o && sscanf(o, "%dx%d", &a, &b) == 2 && (int64_t)a * 9 <= (int64_t)b * 16) a = b = 0;   // 16:9 or narrower
     }
     if (a < 640 || b < 360) return 0;
+    // The game frames its output for 1440 rows (ov_system.c GetDefaultDisplayResolution: a smaller size leaves the
+    // frame in a corner of the swap image), so any size is told and widened to at 1440 rows with its aspect; the host
+    // scales the swap image to the window. 2560x1080 showed a 1920x1080 picture in a corner (RELEASE_PLAN 17.17).
+    if (b != 1440) a = (int)(((int64_t)a * 1440 / b + 8) & ~15ll), b = 1440;
     if (w) *w = a;
     if (h) *h = b;
     return 1;
