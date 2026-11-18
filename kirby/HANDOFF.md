@@ -78,7 +78,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - 7 Commits der anderen KI (16.3 P3b, 18.1, 18.7, 18.2, 17.16) in Air Ride geprüft und gepusht; ihre ungespeicherte
   vk_exec_draw.c-Änderung behob einen Absturz von fc86957 (4cc67a6). Air-Ride-A/B: A/B-Rennen (eigene Exes über
   `--runtime build/ab_x/src/runtime --out build/ab_x/out`, ini/Caches kopiert, shader-cache als Junction, `-Exe`)
-  82ecfff 118 fps → HEAD 121 fps, Minute 2. Die 141 fps vom 17.11. heute nicht reproduziert – Ursache offen (16.6);
+  82ecfff 118 fps → HEAD 121 fps, Minute 2. Die 141 fps vom 17.11. auch mit der Runtime von damals (92476f2) und dem Übersetzer vor 0027 nicht erreicht (117/124) → Umgebung (16.6);
   Minute 2 hat 23–36 Bilder > 25 ms (17.11.: 8) und `compute not indexed` bei Frame ~16885.
 - Nächstes: 17.3c nur im Rennen (Advisor): Banner/Pause/Ergebnis per `KAR_UI_DUMP` klassifizieren, dann Gate
   `race && top_on && !blocked`, einmal pro Bild festgelegt, `hud_cols_read` aus während Elementweg.
@@ -98,3 +98,5 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   deckt nur den 16:9-Bereich.
 - 17.3c v1: `KAR_HUD_ELEMENTS` (Standard an bei hud_position=edges, 0 = alte Bandschnitte) setzt im Rennen Platz links, Tacho/Runde rechts direkt beim Zeichnen,
   alles andere ganz in der Mitte (keine Bandschnitte). Probe-Modi: `KAR_UI_PROBE=<von>-<bis>:<1..4>`.
+- A/B mit altem Übersetzer: `TOTK_XLATE=<pfad>/totk_xlate.exe` (eigene ID → eigene Cache-Schlüssel); alte Runtime per
+  `build_game.py --runtime <export>/runtime --out <dir>` + `-Exe`.
