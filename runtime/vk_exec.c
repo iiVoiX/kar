@@ -910,8 +910,8 @@ static int ui_probe_mode(void) {
     return 0;
 }
 // KAR_HUD_ELEMENTS (17.3c v1, on with hud_position = edges; 0 = the 17.3b band cuts): in the race (the anchor drew in the frame before) every interface
-// draw goes straight to its place in the wide layer instead of the 17.3b band cuts: the rank's sub-layer program (by
-// key) to the left edge, the other non-plain draws (speedometer, lap counter) to the right edge, the course map and the
+// draw goes straight to its place in the wide layer instead of the 17.3b band cuts: identity blocks (a sub-layer drawn
+// whole: the rank) to the left edge, other-projection blocks of a width (speedometer, lap counter) to the right edge, the course map and the
 // rider list (by their blocks) to the left edge, every other draw to the middle, whole (markers, banners, tips, the
 // timer).
 // Decided once per frame, at its first interface draw, so the draws and the skipped copy agree.
@@ -950,12 +950,10 @@ static int ui_probe_offset(VkExec *ex) {
             if (fabsf(f[0] - box[i][0]) < 0.5f && fabsf(f[3] - box[i][1]) < 0.5f && fabsf(f[5] - box[i][2]) < 0.5f &&
                 fabsf(f[7] - box[i][3]) < 0.5f)
                 return 0;
-        if (!c) return off;
-        // The rank's sub-layer program by key to the left edge, every other non-plain draw (the speedometer and the lap
-        // counter, whose programs change with their state) to the right edge. Not the identity block words: e363…
-        // (speedometer) draws 0.99999994 where 2a63… (rank) draws 1, so a float test decided the side by rounding
-        // (KAR_UI_SKIP=<frame>:k<key> shows what each program carries; Air Ride, 2026-11-18).
-        return ui_cur_key(ex) == 0x2a63b4f626d11424ull ? 0 : 2 * off;
+        // Identity blocks (exactly 1, 0, -1) to the left edge, other non-plain blocks of a width to the right edge, zero
+        // blocks and plain ones to the middle. Note: e363… draws 0.99999994 and so counts as narrow (right edge); the
+        // side of such a draw rests on that rounding (RELEASE_PLAN 17.3c, inventory pending).
+        return c == 1 ? 0 : c == 2 && f[0] != 0.0f ? 2 * off : off;
     }
     if (mode == 4) {
         // Mode 4: each element to its side by the cuts of 17.3b, whole: a plain element wholly left of the left cut of
