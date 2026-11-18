@@ -1530,8 +1530,9 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             if (ui_dump_frame()) {
                 const p_set_rt *r = a;
                 const tex_t *t = r->n > 0 ? r->color[0] : NULL;
-                rt_log("ui dump: frame %llu target %ux%u format %d (%d colour)", (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
-                       t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : -1, r->n);
+                rt_log("ui dump: frame %llu target %ux%u format %d (%d colour) depth %ux%u", (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
+                       t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : -1, r->n, r->depth ? r->depth->d.width : 0,
+                       r->depth ? r->depth->d.height : 0);
             }
             break;   // an element's block belongs to its own pass
         case OP_CLEAR_COLOR: case OP_CLEAR_DS: {
