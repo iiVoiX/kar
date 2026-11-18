@@ -870,6 +870,7 @@ static uint64_t ui_frag_tex(VkExec *ex) {
 // KAR_UI_FULL=1 (17.18, off by default): a draw into the interface layer whose block is the whole 16:9 layout and
 // whose fragment texture is 1x1 (a flat fade, flash or dimmer: KAR_UI_FULL_LOG showed the fades and flashes as such
 // quads and the menu backgrounds with 1920x1080 textures) is drawn over the whole layer width. Returns that width, or 0.
+int vk_exec_fs_slots(uint64_t serial, int *stage, uint64_t mask[2]);
 static uint32_t ui_full_flat(VkExec *ex) {
     static int on = -1;
     if (on < 0) on = getenv("KAR_UI_FULL") && *getenv("KAR_UI_FULL") == '1';
@@ -877,13 +878,18 @@ static uint32_t ui_full_flat(VkExec *ex) {
         return 0;
     const float *f = (const float *)(uintptr_t)ui_block;
     if (f[0] != 1920.0f || f[3] != 0.0f || f[5] != -1080.0f || f[7] != 0.0f) return 0;
-    // flat only if every bound fragment texture is 1x1: a stale large binding the program never samples then makes it
-    // a miss (stays as drawn), never a stretched picture
+    // flat only if every texture slot its fragment shader samples (reflection, noted at an earlier draw of the program:
+    // vk_exec_draw.c vk_exec_fs_slots) holds a 1x1 texture; a program not drawn before, or sampling nothing, stays
+    int stage;
+    uint64_t mask[2];
+    if (!ex->prog || !vk_exec_fs_slots(ex->prog->serial, &stage, mask) || stage < 0 || stage >= 6 || !(mask[0] | mask[1]))
+        return 0;
     int bound = 0;
     vk_texture_lock();
-    for (int sl = 0; sl < 16; sl++) {
-        uint64_t th = ex->tex[1][sl];
-        if (!th) continue;
+    for (int sl = 0; sl < 128; sl++) {
+        if (!(mask[sl >> 6] >> (sl & 63) & 1)) continue;
+        uint64_t th = ex->tex[stage][sl];
+        if (!th) { vk_texture_unlock(); return 0; }
         view_t v;
         int hv;
         const VkTexImage *ti = vk_texture_by_id_locked(&ex->tex_pool, (int)(th & 0xfffff), &v, &hv);

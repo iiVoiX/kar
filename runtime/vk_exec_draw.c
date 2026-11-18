@@ -1138,6 +1138,36 @@ static int nvn_stage_of(int gfx_stage) {
            gfx_stage == GFX_STAGE_GS ? NVN_STAGE_GS : gfx_stage == GFX_STAGE_CS ? NVN_STAGE_CS : -1;
 }
 
+// The texture slots a program's fragment shader samples (its reflection), noted per program serial at its draws, so the
+// interface placement in vk_exec.c (KAR_UI_FULL) can test only what the draw reads, not stale bindings in other slots.
+static struct { uint64_t serial; int stage; uint64_t mask[2]; } FSL[512];
+static PlatMutex fsl_m;
+static void fs_slots_note(uint64_t serial, const GfxShader *fs) {
+    unsigned i = (unsigned)((serial * 0x9E3779B97F4A7C15ull) >> 55);
+    plat_mutex_lock(&fsl_m);
+    if (FSL[i].serial != serial) {
+        const GfxShaderRes *res;
+        int n = gfx_shader_resources(fs, GFX_RES_TEX, &res);
+        uint64_t m[2] = {0, 0};
+        for (int r = 0; r < n; r++)
+            for (int k = 0; k < (res[r].count ? res[r].count : 1); k++) {
+                int slot = res[r].slot + k;
+                if (slot >= 0 && slot < 128) m[slot >> 6] |= 1ull << (slot & 63);
+            }
+        FSL[i].serial = serial, FSL[i].stage = nvn_stage_of(gfx_shader_stage(fs)), FSL[i].mask[0] = m[0], FSL[i].mask[1] = m[1];
+    }
+    plat_mutex_unlock(&fsl_m);
+}
+// 1 and the stage and sampled-slot mask of the program with this serial once one of its draws noted them, else 0.
+int vk_exec_fs_slots(uint64_t serial, int *stage, uint64_t mask[2]) {
+    unsigned i = (unsigned)((serial * 0x9E3779B97F4A7C15ull) >> 55);
+    plat_mutex_lock(&fsl_m);
+    int ok = FSL[i].serial == serial && serial;
+    if (ok) *stage = FSL[i].stage, mask[0] = FSL[i].mask[0], mask[1] = FSL[i].mask[1];
+    plat_mutex_unlock(&fsl_m);
+    return ok;
+}
+
 static VkDescriptorBufferInfo zero_info(uint64_t max) {
     return (VkDescriptorBufferInfo){Z.zbuf, 0, max < ZERO_BYTES ? max : ZERO_BYTES};
 }
@@ -3928,6 +3958,7 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
     if (light_quad_fault_skip(ex, vs, fs) || skip_vs_listed(ex) || skip_fs_listed(ex)) SKIP(7);
     if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) SKIP(8);
     if (!geometry_feedback_safe(ex, vs, gs)) SKIP(9);
+    if (fs && ex->prog) fs_slots_note(ex->prog->serial, fs);   // for vk_exec_fs_slots (KAR_UI_FULL, vk_exec.c)
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;
     s.vs = vs, s.fs = fs, s.gs = gs;
