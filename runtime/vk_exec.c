@@ -788,6 +788,89 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
            f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
 }
 
+// KAR_UI_DUMP also logs the ops between the draws of the interface layer (KAR_UI_OPS=1): what changes per element.
+static uint64_t ui_vbuf;   // the last vertex buffer bound (OP_BIND_VBUF, binding 0)
+static void ui_op_dump(VkExec *ex, int op, const void *a) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_UI_OPS") && *getenv("KAR_UI_OPS") == '1';
+    if (op == OP_BIND_VBUF && ((const p_bind_vbuf *)a)->first == 0) ui_vbuf = ((const p_bind_vbuf *)a)->r[0].address;
+    if (!on || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
+    static uint64_t want[8];
+    static int nwant = -1;
+    if (nwant < 0) {
+        nwant = 0;
+        const char *e = getenv("KAR_UI_DUMP");
+        while (e && *e && nwant < 8) { want[nwant++] = strtoull(e, (char **)&e, 10); if (*e == ',') e++; else break; }
+    }
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int hit = 0;
+    for (int i = 0; i < nwant; i++) hit |= want[i] == fr;
+    if (!hit) return;
+    char t[1200];
+    int n = 0;
+    t[0] = 0;
+    switch (op) {
+    case OP_BIND_PROGRAM: {
+        const p_bind_program *b = a;
+        n = snprintf(t, sizeof t, "program %llu", (unsigned long long)(b->prog ? b->prog->serial : 0));
+        break;
+    }
+    case OP_BIND_UBO: case OP_BIND_SSBO: {
+        const p_bind_buf *b = a;
+        n = snprintf(t, sizeof t, "%s st %d idx %d addr %llx size %llu", op == OP_BIND_UBO ? "ubo" : "ssbo", b->stage, b->index,
+                     (unsigned long long)b->addr, (unsigned long long)b->size);
+        if (op == OP_BIND_SSBO && b->stage == 0 && b->index == 1 && b->addr) {   // the per-element block
+            const float *f = (const float *)(uintptr_t)b->addr;
+            for (int i = 0; i < 56 && i * 4 < (int)b->size && n < 1150; i++) n += snprintf(t + n, sizeof t - n, " %.2f", f[i]);
+        }
+        break;
+    }
+    case OP_UPDATE_UB: {
+        const p_update_ub *b = a;
+        n = snprintf(t, sizeof t, "update dst %llx size %llu:", (unsigned long long)b->dst, (unsigned long long)b->size);
+        for (uint64_t i = 0; i + 4 <= b->size && i < 64 && n < 500; i += 4) {
+            float f; memcpy(&f, b->data + i, 4);
+            n += snprintf(t + n, sizeof t - n, " %.3f", f);
+        }
+        break;
+    }
+    case OP_PUSH_CONST: {
+        const p_push_const *b = a;
+        n = snprintf(t, sizeof t, "push table %d off %d bytes %d:", b->table, b->offset, b->bytes);
+        for (int i = 0; i < b->bytes / 4 && i < 24 && n < 500; i++) n += snprintf(t + n, sizeof t - n, " %08x", b->w[i]);
+        break;
+    }
+    case OP_BIND_TEX: case OP_BIND_SAMP: {
+        const p_bind_handles *b = a;
+        n = snprintf(t, sizeof t, "%s st %d first %d n %d h0 %llx", op == OP_BIND_TEX ? "tex" : "samp", b->stage, b->first, b->n,
+                     (unsigned long long)b->h[0]);
+        break;
+    }
+    case OP_VIEWPORTS: {
+        const p_viewports *b = a;
+        n = snprintf(t, sizeof t, "viewport %.0f,%.0f %.0fx%.0f", b->v[0][0], b->v[0][1], b->v[0][2], b->v[0][3]);
+        break;
+    }
+    case OP_SCISSOR: {
+        const p_scissor *b = a;
+        n = snprintf(t, sizeof t, "scissor %d,%d %dx%d", b->x, b->y, b->w, b->h);
+        break;
+    }
+    case OP_DRAW: case OP_DRAW_IDX: {
+        int first = op == OP_DRAW ? ((const p_draw *)a)->first : 0, inst = op == OP_DRAW ? ((const p_draw *)a)->instances : ((const p_draw_idx *)a)->instances;
+        n = snprintf(t, sizeof t, "DRAW%s first %d instances %d vbuf %llx:", op == OP_DRAW_IDX ? "_IDX" : "", first, inst,
+                     (unsigned long long)ui_vbuf);
+        if (ui_vbuf) {
+            const float *v = (const float *)(uintptr_t)ui_vbuf;
+            for (int i = 0; i < 24 && n < 560; i++) n += snprintf(t + n, sizeof t - n, " %.1f", v[i]);
+        }
+        break;
+    }
+    default: return;
+    }
+    rt_log("ui op: frame %llu %s", (unsigned long long)fr, t);
+}
+
 static void ui_layer_shift(VkExec *ex) {
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     for (uint32_t i = 0; i < 8 && i < (uint32_t)ex->pass_ncolor; i++) {
@@ -1340,6 +1423,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_CLEAR_DS: clear_ds(ex, a); break;
         case OP_VIEWPORTS: {
             const p_viewports *v = a;
+            ui_op_dump(ex, h->op, a);
             for (int i = 0; i < v->n && v->first + i < 16; i++)
                 if (v->first + i >= 0) memcpy(ex->vp[v->first + i], v->v[i], sizeof ex->vp[0]);
             ex->has_vp = 1;
@@ -1348,6 +1432,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         }
         case OP_SCISSOR:
             ex->scissor = *(const p_scissor *)a;
+            ui_op_dump(ex, h->op, a);
             ex->has_scissor = 1;
             ex->dirty |= VK_EXEC_DIRTY_SCISSOR;
             break;
@@ -1386,6 +1471,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_WAIT_SYNC: break;   // submit preparation waited before any replay/snapshot; source may be gone
         case OP_DRAW: case OP_DRAW_IDX: case OP_DISPATCH: case OP_UPDATE_UB: case OP_DRAW_IDX_IND: case OP_DISPATCH_IND:
         case OP_DRAW_IND:
+            ui_op_dump(ex, h->op, a);
             if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND || h->op == OP_DRAW_IND) {
                 vk_exec_frame.draws_seen++, split_draws++;
                 ui_draw_dump(ex, h->op, a);
@@ -1393,6 +1479,9 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             if (h->op == OP_DISPATCH || h->op == OP_DISPATCH_IND) vk_exec_frame.dispatches++, split_draws++;
         case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
         case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_PUSH_CONST:
+            if (h->op != OP_DRAW && h->op != OP_DRAW_IDX && h->op != OP_DISPATCH && h->op != OP_UPDATE_UB &&
+                h->op != OP_DRAW_IDX_IND && h->op != OP_DISPATCH_IND && h->op != OP_DRAW_IND)
+                ui_op_dump(ex, h->op, a);
             vk_exec_op_draw(ex, h->op, a);
             break;
         case OP_COPY_B2B: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_CLEAR_TEX:
