@@ -4165,7 +4165,9 @@ size_t gfx_shader_warm_list(GfxWarmEnt **out) {
 // them). A shader met for the first time loads at its dispatch as before and is in the list from then on. No file: nothing is
 // prefetched (KAR_CS_PREFETCH_ALL=1 takes every stored input). Layout: "KCSU", u32 version 1, u32 session, u32 count,
 // then count entries of an input id (32 bytes) and the u32 session that last used it.
-#define CSU_MAX 1500
+// CSU_MAX holds an Air Ride race and a City Trial visit together (1798 entries, 2026-11-18): at 1500 a City Trial visit
+// pushed 298 race shaders out and the next race waited 161 times instead of 15; the larger list costs ~0.3 GB.
+#define CSU_MAX 3000
 typedef struct { uint8_t iid[32]; uint32_t session; } CsuEnt;
 static struct {
     PlatMutex m;
