@@ -68,3 +68,8 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Rennlauf: `kar_race_test.ps1 -Script kirby/scripts/fresh_race_ms.txt -Profile <Ordner nur mit account.uid aus build/profile-kar-fresh>` (Limit aus ini, 144), Shot bei Frame 17000 als Rennbeleg; `frametime: period`-Zeilen (Minute 2 = Rennen).
 - Listen/Caches liegen neben der exe (`build/kar458752/shader-cache/cs-used.bin`, `pipeline-cache.bin`), nicht im Profil. `cs-used.bin` vor Experimenten sichern und danach zurück.
 - Diagnosen: `KAR_REPLAY_PROF=1` (+ `KAR_REPLAY_PROF_MS=25`), `KAR_FT_SLOW_MS=25`; „compute not indexed“ = Shader nicht im Prefetch-Index.
+
+## HUD-Elementweg 17.3c (2026-11-18)
+- Spiel zeichnet das 1920er-Layout links in die breite UI-Ebene (Breite = Szenenverhältnis·1080, z. B. 2576), `ui_layer_shift` kopiert es um off=(Breite−1920)/2 in die Mitte.
+- Je Element ein SSBO-Block (Stufe 0, Platz 1): Wort 0 Breite, 3 linke Kante, 5 Höhe, 7 y im 1920er-Layout.
+- Schalter (Diagnose): `KAR_UI_DUMP=<frames>` (Draws/Zielwechsel/Kopien), `KAR_UI_OPS=1` (Ops dazwischen), `KAR_UI_SKIP=<frame>:<klasse>` (Klasse wegschalten), `KAR_UI_PROBE=<von>[-<bis>]:<modus>` (Versatz je Draw, Endkopie aus).

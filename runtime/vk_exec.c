@@ -1611,6 +1611,13 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             vk_exec_op_draw(ex, h->op, a);
             break;
         case OP_COPY_B2B: case OP_COPY_B2T: case OP_COPY_T2B: case OP_COPY_T2T: case OP_CLEAR_TEX:
+            if (ui_dump_frame() && (h->op == OP_COPY_T2T || h->op == OP_CLEAR_TEX || h->op == OP_COPY_B2T)) {
+                // KAR_UI_DUMP (17.3c): copies and clears around the interface layer's draws
+                const tex_t *src = h->op == OP_COPY_T2T ? ((const p_copy_t2t *)a)->src : NULL;
+                const tex_t *dst = h->op == OP_COPY_T2T ? ((const p_copy_t2t *)a)->dst : h->op == OP_CLEAR_TEX ? ((const p_clear_tex *)a)->tex : ((const p_copy_b2t *)a)->tex;
+                rt_log("ui dump: frame %llu %s src %ux%u dst %ux%u", (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
+                       nvn_op_name(h->op), src ? src->d.width : 0, src ? src->d.height : 0, dst ? dst->d.width : 0, dst ? dst->d.height : 0);
+            }
             if (h->op != OP_CLEAR_TEX) vk_exec_frame.copies++;
             if (vk_dump_armed) vk_dump_copy(ex, h->op, a);
             // fall through
