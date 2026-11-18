@@ -92,7 +92,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   bleiben im Elementweg ganz; Ziel ohne Block → Mitte; Pause → Anker aus → Mitte-Kopie. Unter-Layer: 2a63…, e363….
 - 17.3b-Gate nutzt jetzt den Anker (`ui_race_fr`, Key `KAR_RACE_KEY`, Standard 57d04d70800e9af4); Testskript mit Pause:
   `kirby/scripts/fresh_race_pause_ms.txt` (PLUS bei 128 s und 134 s).
-- `mode_top.txt` fährt City Trial (Top Ride ungetestet). Dort je Lauf 44–57 riesige Compute-Pipelines, Größen jedes
-  Mal anders (13.3). Absturz im Spielcode f_7002ecfb00 (Lesen 0x7d72b1128) 1 von 4 Läufen, nicht wiederholt.
+- `mode_top.txt` ist bildgezählt und landet je nach Tempo in City Trial oder Fahrschule (Top Ride ungetestet); für
+  Vergleiche ein ms-Skript nötig. Dort Hunderte große Compute-Programme, Treiber-Erstbau 1–7 s, Schlüssel stabil (13.3). Absturz im Spielcode f_7002ecfb00 (Lesen 0x7d72b1128) 1 von 4 Läufen, nicht wiederholt.
 - 6eb0187 + 4cc67a6 in Air Ride geprüft: race 1/0 richtig, Pause mittig, 115–120 fps. Beobachtung: Pause-Abdunklung
   deckt nur den 16:9-Bereich.
