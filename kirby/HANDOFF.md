@@ -100,3 +100,6 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   alles andere ganz in der Mitte (keine Bandschnitte). Probe-Modi: `KAR_UI_PROBE=<von>-<bis>:<1..4>`.
 - A/B mit altem Übersetzer: `TOTK_XLATE=<pfad>/totk_xlate.exe` (eigene ID → eigene Cache-Schlüssel); alte Runtime per
   `build_game.py --runtime <export>/runtime --out <dir>` + `-Exe`.
+- 17.3c Diagnose: `KAR_UI_INV=1` (jede neue nicht-normale Draw-Signatur im Rennen einmal, mit Seite und Wörtern; dumpt das
+  Folgebild), `KAR_UI_SKIP=<frame>:k<key>` (nur dieses Programms nicht-normale Draws weglassen). Programme sind
+  generisch (dasselbe zeichnet Platz oder Tacho) → Seite aus den Blockwörtern.

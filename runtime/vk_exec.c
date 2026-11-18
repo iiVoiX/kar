@@ -955,6 +955,9 @@ static int ui_probe_offset(VkExec *ex) {
         // exactly 1, in one frame and a speedometer block, 0.99999994, in another), so the side comes from the block
         // words, and the rank's block is the one that is exactly the identity.
         int side = c == 1 ? 0 : c == 2 && f[0] != 0.0f ? 2 * off : off;
+        // A full-height block that is not the full width (the "LETZTE RUNDE" banner zooms with 0.9375 over the whole
+        // layout height, KAR_UI_INV) is a middle element, not an edge composite (those are 1 or 0.99999994 wide).
+        if (c && fabsf(f[5] + 1.0f) < 1e-4f && fabsf(f[0] - 1.0f) > 1e-6f) side = off;
         if (c) {   // KAR_UI_INV=1 (diagnostic): each distinct non-plain draw of the race once, with its side
             static int inv = -1;
             if (inv < 0) inv = getenv("KAR_UI_INV") && *getenv("KAR_UI_INV") == '1';
@@ -967,9 +970,20 @@ static int ui_probe_offset(VkExec *ex) {
                 for (int i = 0; i < nseen; i++) found |= seen[i].k == k && seen[i].t == t;
                 if (!found && nseen < 256) {
                     seen[nseen].k = k, seen[nseen].t = t, nseen++;
+                    __atomic_store_n(&ui_dump_auto_at, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1,
+                                     __ATOMIC_RELAXED);   // the next frame's draw list, for each new signature
                     rt_log("ui inv: frame %llu key %016llx identity %d zero %d side %s words %.9g %.9g %.9g %.9g",
                            (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), (unsigned long long)k,
                            c == 1, f[0] == 0.0f, side == 0 ? "L" : side == off ? "M" : "R", f[0], f[3], f[5], f[7]);
+                }
+                // Every frame: the full-height non-plain blocks that are not one of the steady composites (exactly 1 or
+                // 0.99999994 wide), capped: a zooming banner's life
+                static int nfull;
+                if (fabsf(f[5] + 1.0f) < 1e-4f && f[0] != 1.0f && f[0] != 0.99999994f && nfull < 3000) {
+                    nfull++;
+                    rt_log("ui full: frame %llu key %016llx side %s words %.9g %.9g %.9g %.9g",
+                           (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), (unsigned long long)k,
+                           side == 0 ? "L" : side == off ? "M" : "R", f[0], f[3], f[5], f[7]);
                 }
             }
         }

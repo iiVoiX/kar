@@ -4407,6 +4407,12 @@ void gfx_shader_prefetch_cs(const uint8_t *control, const uint8_t *code) {
         PF.cap = (mb ? strtoull(mb, NULL, 10) : 128) << 20;
     }
     if (!on || !control || !code) return;
+    {   // how often programs ask for it (a log line at 1, 10, 100, ... calls)
+        static uint32_t calls;
+        uint32_t nc = __atomic_add_fetch(&calls, 1, __ATOMIC_RELAXED);
+        for (uint32_t p10 = 1; p10 && p10 <= nc; p10 *= 10)
+            if (nc == p10) rt_log("gfx_shader: compute prefetch requests: %u", nc);
+    }
     plat_mutex_lock(&PF.m);
     if (PF.tail == PF.cap_q) {
         uint32_t c = PF.cap_q ? PF.cap_q * 2 : 4096;
