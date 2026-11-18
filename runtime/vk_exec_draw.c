@@ -4445,6 +4445,7 @@ static int mvk_upscale_blit(VkExec *ex, const GfxShader *cs) {
 // boot prebuild was off lost the GPU device at boot. KAR_CS_SKIP_PENDING=1 restores skipping (*pending = 1 then).
 uint64_t vk_rp_sub[4];   // KAR_REPLAY_PROF: dispatch time in shader lookup, compute pipeline, resource binding, the rest
 void vk_pipeline_compute_bump(const GfxShader *cs);
+unsigned vk_pipeline_cs_queue_len(void);
 static VkPipeline compute_pipe(const GfxShader *cs, const VkPipeInfo **info, int *pending) {
     static int skip = -1;
     if (skip < 0) skip = getenv("KAR_CS_SKIP_PENDING") && *getenv("KAR_CS_SKIP_PENDING") == '1';
@@ -4457,8 +4458,12 @@ static VkPipeline compute_pipe(const GfxShader *cs, const VkPipeInfo **info, int
         p = vk_pipeline_compute_async(cs, info, pending);
     }
     uint64_t ms = (plat_now_ns() - t0) / 1000000;
-    static int told;
-    if (ms >= 100 && told++ < 8) rt_log("vk_exec: a dispatch waited %llu ms for its compute pipeline", (unsigned long long)ms);
+    static int told, cslog = -1;
+    if (cslog < 0) cslog = getenv("KAR_CS_LOG") && *getenv("KAR_CS_LOG") == '1';
+    if (cslog)   // KAR_CS_LOG=1 (13.3): every wait, with the shader and the queue left behind it
+        rt_log("cs log: wait %p %llu ms frame %llu queue %u", (const void *)cs, (unsigned long long)ms,
+               (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), vk_pipeline_cs_queue_len());
+    else if (ms >= 100 && told++ < 8) rt_log("vk_exec: a dispatch waited %llu ms for its compute pipeline", (unsigned long long)ms);
     return p;
 }
 

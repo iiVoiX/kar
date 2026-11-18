@@ -49,6 +49,7 @@
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "platform/platform.h"
 #include "tex.h"
@@ -3782,6 +3783,12 @@ static void cpend_del(const GfxShader *cs) {
 }
 
 static Pipe *compute_build(const GfxShader *cs, int locked);
+unsigned vk_pipeline_cs_queue_len(void) {   // compute builds queued and not yet taken by a worker (KAR_CS_LOG)
+    plat_mutex_lock(&CQ.m);
+    unsigned n = CQ.tail - CQ.head;
+    plat_mutex_unlock(&CQ.m);
+    return n;
+}
 
 static void cs_worker(void *arg) {
     (void)arg;
@@ -3915,6 +3922,13 @@ static Pipe *compute_build(const GfxShader *cs, int locked) {
             uint64_t ms = (plat_now_ns() - t0) / 1000000;
             if (ms >= 500) rt_log("vk_pipeline: compute pipeline of %llu bytes of SPIR-V took %llu ms",
                                   (unsigned long long)words * 4, (unsigned long long)ms);
+            static int cslog = -1;   // KAR_CS_LOG=1 (13.3): every large compute build, fast ones too, with its shader
+            if (cslog < 0) cslog = getenv("KAR_CS_LOG") && *getenv("KAR_CS_LOG") == '1';
+            if (cslog && words * 4 >= 600000)
+                rt_log("cs log: build %p %llu bytes %llu ms frame %llu %s queue %u", (const void *)cs,
+                       (unsigned long long)words * 4, (unsigned long long)ms,
+                       (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
+                       locked ? "sync" : "worker", vk_pipeline_cs_queue_len());
             if (!pipe) why = "pipeline creation failed";
             else gfx_shader_drop_spirv(cs);   // only its pipeline needs the SPIR-V (gfx_shader.c)
         }
