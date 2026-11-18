@@ -938,6 +938,10 @@ static void ui_op_dump(VkExec *ex, int op, const void *a) {
         n = snprintf(t, sizeof t, "viewport %.0f,%.0f %.0fx%.0f", b->v[0][0], b->v[0][1], b->v[0][2], b->v[0][3]);
         break;
     }
+    case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_STENCIL:
+        n = snprintf(t, sizeof t, "%s scissor %d %d,%d %dx%d", nvn_op_name(op), ex->has_scissor, ex->scissor.x, ex->scissor.y,
+                     ex->scissor.w, ex->scissor.h);
+        break;
     case OP_SCISSOR: {
         const p_scissor *b = a;
         n = snprintf(t, sizeof t, "scissor %d,%d %dx%d", b->x, b->y, b->w, b->h);
@@ -1529,8 +1533,19 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
                        t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : -1, r->n);
             }
             break;   // an element's block belongs to its own pass
-        case OP_CLEAR_COLOR: clear_color(ex, a); break;
-        case OP_CLEAR_DS: clear_ds(ex, a); break;
+        case OP_CLEAR_COLOR: case OP_CLEAR_DS: {
+            ui_op_dump(ex, h->op, a);
+            int ui_dx = ui_probe_offset(ex);   // KAR_UI_PROBE: a clear under the scissor moves with the draws
+            p_scissor sc = ex->scissor;
+            int had = ex->has_scissor;
+            if (ui_dx > 0) {
+                if (had) ex->scissor.x += ui_dx; else ex->scissor = (p_scissor){ui_dx, 0, 1920, 1081}, ex->has_scissor = 1;
+                ex->dirty |= VK_EXEC_DIRTY_SCISSOR;
+            }
+            if (h->op == OP_CLEAR_COLOR) clear_color(ex, a); else clear_ds(ex, a);
+            if (ui_dx > 0) ex->scissor = sc, ex->has_scissor = had, ex->dirty |= VK_EXEC_DIRTY_SCISSOR;
+            break;
+        }
         case OP_VIEWPORTS: {
             const p_viewports *v = a;
             ui_op_dump(ex, h->op, a);
@@ -1553,6 +1568,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             break;
         }
         case OP_STENCIL: {
+            ui_op_dump(ex, h->op, a);
             const p_stencil *s = a;
             for (int f = 0; f < 2; f++) {
                 if (!(s->face & (1 << f))) continue;
