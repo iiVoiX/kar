@@ -75,11 +75,11 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Schalter (Diagnose): `KAR_UI_DUMP=<frames>` (Draws/Zielwechsel/Kopien), `KAR_UI_OPS=1` (Ops dazwischen), `KAR_UI_SKIP=<frame>:<klasse>` (Klasse wegschalten), `KAR_UI_PROBE=<von>[-<bis>]:<modus>` (Versatz je Draw, Endkopie aus).
 
 ## Stand 2026-11-18
-- 7 Commits der anderen KI (16.3 P3b, 18.1, 18.7, 18.2, 17.16) geprüft und gepusht: A/B-Rennen (eigene Exes über
+- 7 Commits der anderen KI (16.3 P3b, 18.1, 18.7, 18.2, 17.16) in Air Ride geprüft und gepusht; ihre ungespeicherte
+  vk_exec_draw.c-Änderung behob einen Absturz von fc86957 (4cc67a6). Air-Ride-A/B: A/B-Rennen (eigene Exes über
   `--runtime build/ab_x/src/runtime --out build/ab_x/out`, ini/Caches kopiert, shader-cache als Junction, `-Exe`)
   82ecfff 118 fps → HEAD 121 fps, Minute 2. Die 141 fps vom 17.11. heute nicht reproduziert – Ursache offen (16.6);
   Minute 2 hat 23–36 Bilder > 25 ms (17.11.: 8) und `compute not indexed` bei Frame ~16885.
-- Ungespeicherte Änderung der anderen KI in `runtime/vk_exec_draw.c` (cur-Reset) nicht angefasst.
 - Nächstes: 17.3c nur im Rennen (Advisor): Banner/Pause/Ergebnis per `KAR_UI_DUMP` klassifizieren, dann Gate
   `race && top_on && !blocked`, einmal pro Bild festgelegt, `hud_cols_read` aus während Elementweg.
 - 17.3c Diagnose: `KAR_UI_DUMP_AUTO=<n>` dumpt das Bild nach den ersten n Zentrierungen des Wächters im Rennen
@@ -92,3 +92,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   bleiben im Elementweg ganz; Ziel ohne Block → Mitte; Pause → Anker aus → Mitte-Kopie. Unter-Layer: 2a63…, e363….
 - 17.3b-Gate nutzt jetzt den Anker (`ui_race_fr`, Key `KAR_RACE_KEY`, Standard 57d04d70800e9af4); Testskript mit Pause:
   `kirby/scripts/fresh_race_pause_ms.txt` (PLUS bei 128 s und 134 s).
+- `mode_top.txt` fährt City Trial (Top Ride ungetestet). Dort je Lauf 44–57 riesige Compute-Pipelines, Größen jedes
+  Mal anders (13.3). Absturz im Spielcode f_7002ecfb00 (Lesen 0x7d72b1128) 1 von 4 Läufen, nicht wiederholt.
+- 6eb0187 + 4cc67a6 in Air Ride geprüft: race 1/0 richtig, Pause mittig, 115–120 fps. Beobachtung: Pause-Abdunklung
+  deckt nur den 16:9-Bereich.
