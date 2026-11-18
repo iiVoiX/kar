@@ -759,6 +759,7 @@ static void hud_cols_read(VkExec *ex, uint64_t fr) {
 // KAR_UI_DUMP=<frame>,<frame>,... (diagnostic, 17.3c): every draw into the interface layer in those frames, with its
 // program, first texture, vertex count, viewport, scissor and the first words of its first user constant buffer, to
 // see whether the corner elements of the race HUD are draws of their own.
+static uint64_t ui_block;   // see below (ui_skip)
 static void ui_draw_dump(VkExec *ex, int op, const void *a) {
     static uint64_t want[8];
     static int nwant = -1;
@@ -781,6 +782,10 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
     const uint32_t *w = u ? (const uint32_t *)(uintptr_t)u->addr : NULL;
     float f[8] = {0};
     if (w) memcpy(f, w, sizeof f);
+    const float *bk = ui_block ? (const float *)(uintptr_t)ui_block : NULL;
+    int inst = op == OP_DRAW ? ((const p_draw *)a)->instances : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->instances : -1;
+    rt_log("ui dump: frame %llu block %.1f %.1f %.1f %.1f inst %d", (unsigned long long)fr, bk ? bk[0] : 0.0f,
+           bk ? bk[3] : 0.0f, bk ? bk[5] : 0.0f, bk ? bk[7] : 0.0f, inst);
     rt_log("ui dump: frame %llu draw %d target %llx %ux%u prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
            (unsigned long long)fr, idx++, (unsigned long long)(uintptr_t)ex->color[0].image, ex->color[0].width,
            ex->color[0].height, (unsigned long long)(ex->prog ? ex->prog->serial : 0),
@@ -795,18 +800,21 @@ static uint64_t ui_block;  // the last storage buffer at stage 0 index 1: an int
 // KAR_UI_SKIP=<frame>:<class>,... (diagnostic, 17.3c): leaves out the interface draws of one class within 8 frames of
 // <frame>: 1 = blocks holding the identity (a whole-layout rectangle), 2 = other blocks with a width under 2 (another
 // projection). Shows which draws carry the rank, the speedometer and the lap counter.
-// KAR_UI_PROBE=<frame>:<mode>,... (diagnostic, 17.3c): within 8 frames of <frame> every draw into the interface
+// KAR_UI_PROBE=<frame>[-<last>]:<mode>,... (diagnostic, 17.3c): within 8 frames of <frame> (or from <frame> to
+// <last>) every draw into the interface
 // layer goes straight to its place in the wide layer, and the copy to the middle is left out. Mode 1: all at the
 // middle (off); mode 2: identity blocks at the left edge (0), other-projection blocks at the right edge (2 off), the
 // rest at the middle. Returns the x offset for this draw, -1 outside a probe window.
 static int ui_probe_mode(void) {
-    static uint64_t fr_at[8];
+    static uint64_t lo[8], hi[8];
     static int md[8], n = -1;
     if (n < 0) {
         n = 0;
         const char *e = getenv("KAR_UI_PROBE");
         while (e && *e && n < 8) {
-            fr_at[n] = strtoull(e, (char **)&e, 10);
+            uint64_t a = strtoull(e, (char **)&e, 10), b = a;
+            if (*e == '-') b = strtoull(e + 1, (char **)&e, 10), lo[n] = a, hi[n] = b;
+            else lo[n] = a > 8 ? a - 8 : 0, hi[n] = a + 8;
             md[n] = *e == ':' ? atoi(e + 1) : 0;
             n++;
             e = strchr(e, ',');
@@ -815,7 +823,7 @@ static int ui_probe_mode(void) {
     }
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     for (int i = 0; i < n; i++)
-        if (md[i] && fr + 8 >= fr_at[i] && fr <= fr_at[i] + 8) return md[i];
+        if (md[i] && fr >= lo[i] && fr <= hi[i]) return md[i];
     return 0;
 }
 static int ui_probe_offset(VkExec *ex) {
@@ -1484,7 +1492,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
             if (depth >= CALL_DEPTH) rt_fatal("vk: command buffer calls nested deeper than %d", CALL_DEPTH);
             walk(ex, nvn_op_first(((const p_jump *)a)->target), depth + 1);
             break;
-        case OP_SET_RT: set_rt(ex, a); break;
+        case OP_SET_RT: set_rt(ex, a); ui_block = 0; break;   // an element's block belongs to its own pass
         case OP_CLEAR_COLOR: clear_color(ex, a); break;
         case OP_CLEAR_DS: clear_ds(ex, a); break;
         case OP_VIEWPORTS: {
