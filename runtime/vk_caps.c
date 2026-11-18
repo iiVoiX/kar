@@ -117,7 +117,7 @@ void vk_caps_init(VkCtx *c) {
     gfx_shader_set_host(vk_caps.float64, vk_caps.sbuf_align, told, gather);
     uint32_t geometry_told = vk_caps.sg_pin_stages & VK_SHADER_STAGE_GEOMETRY_BIT ? want : sg.subgroupSize;
     gfx_shader_set_geometry_host(geometry_told);
-    gfx_shader_set_bda_host(vk_bda_mode());
+    gfx_shader_set_bda_host(vk_bda_mode_init(c->has_buffer_device_address));
     if (gather) rt_log("vk caps: gather coordinates biased for %u sub-texel bits (TOTK_GATHER_BIAS)", gather);
 
     char dv[32];

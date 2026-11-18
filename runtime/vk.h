@@ -83,7 +83,8 @@ void vk_bindless_flush(void);                                  // pending writes
 uint64_t vk_bindless_writes(void);                        // NULL until vk_init() succeeded
 // ---- BDA lookup table (vk_memory.c, RELEASE_PLAN 16.3): sorted {guest_lo, guest_hi, device_address}
 // table bound as an ordinary SSBO (GFX_RES_SSBO_BDA) in shaders that emit PhysicalStorageBuffer accesses.
-int vk_bda_mode(void);                                         // 0 off, 1 fallback, 2 all global ops (KAR_BDA)
+int vk_bda_mode_init(int has_bda);                             // 0 off, 1 fallback, 2 all global ops (KAR_BDA)
+int vk_bda_mode(void);
 VkDescriptorBufferInfo vk_bda_buffer_info(int written);        // current ring slice; syncs mirrors when needed
 int vk_init(void);                          // idempotent; 1 on success, 0 on failure (reason logged with rt_log)
 void vk_shutdown(void);

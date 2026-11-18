@@ -821,17 +821,17 @@ static struct {
 static void vk_bda_sync_submission(int written);
 
 // KAR_BDA: 0 off (default until race-verified), 1 fallback when candidate search finds no cbuf pair, 2 all global ops.
-int vk_bda_mode(void) {
-    VkCtx *c = vk_ctx();
-    if (!c || !c->has_buffer_device_address) return 0;
-    static int mode = -1;
-    if (mode < 0) {
-        const char *e = getenv("KAR_BDA");
-        mode = !e || !*e ? 0 : *e == '2' ? 2 : *e == '1' ? 1 : 0;
-        if (mode) rt_log("vk: buffer device address mode %d (%s)", mode, mode == 2 ? "all global ops" : "fallback");
-    }
-    return mode;
+static int bda_mode_val;
+
+int vk_bda_mode_init(int has_bda) {
+    const char *e = getenv("KAR_BDA");
+    int m = !has_bda || !e || !*e ? 0 : *e == '2' ? 2 : *e == '1' ? 1 : 0;
+    bda_mode_val = m;
+    if (m) rt_log("vk: buffer device address mode %d (%s)", m, m == 2 ? "all global ops" : "fallback");
+    return m;
 }
+
+int vk_bda_mode(void) { return bda_mode_val; }
 
 VkDescriptorBufferInfo vk_bda_buffer_info(int written) {
     VkCtx *c = vk_ctx();
@@ -1746,10 +1746,10 @@ static volatile int64_t m_live_n, m_live_bytes, m_refused_n[MR_N], m_refused_byt
 static volatile int64_t m_flush_calls, m_flush_bytes, v_pages, v_skipped, v_mismatch;
 
 static void mirror_mode(int discrete) {
-    const char *e = cfg_value("TOTK_MEMORY");
+    const char *e = cfg_value("TOTK_MEMORY"), *bda = getenv("KAR_BDA");
     int mode = discrete ? 1 : 0;   // 0 import, 1 mirror, 2 verify
     const char *why = discrete ? "auto, discrete gpu" : "auto, uma";
-    if (!strcmp(e, "auto") && vk_bda_mode() >= 2) mode = 0, why = "auto, KAR_BDA=2";
+    if (!strcmp(e, "auto") && bda && *bda == '2') mode = 0, why = "auto, KAR_BDA=2";
     if (strcmp(e, "auto")) {
         if (!strcmp(e, "import")) mode = 0, why = "TOTK_MEMORY=import";
         else if (!strcmp(e, "mirror")) mode = 1, why = "TOTK_MEMORY=mirror";
