@@ -806,30 +806,46 @@ static uint64_t ui_prog_key(const prog_t *p) {
     }
     return h;
 }
-// KAR_UI_ANCHOR=<key>,... (diagnostic, 17.3c): logs "anchor <key> 0/1" when a program (ui_prog_key) starts or stops
-// drawing into the interface layer, to find one that is drawn only during the race (the race signal of kar_pace.c
-// never counts: the game's limiter is off in these menus).
+// The key of the program bound for this draw, from a small cache by program object and serial (hashing its controls
+// costs a few KB of reads, and the interface layer switches programs many times a frame).
+static uint64_t ui_cur_key(VkExec *ex) {
+    static struct { const prog_t *p; uint64_t serial, key; } cache[32];
+    static unsigned next;
+    const prog_t *p = ex->prog;
+    if (!p) return 0;
+    for (unsigned i = 0; i < 32; i++)
+        if (cache[i].p == p && cache[i].serial == p->serial) return cache[i].key;
+    unsigned i = next++ & 31;
+    cache[i].p = p, cache[i].serial = p->serial, cache[i].key = ui_prog_key(p);
+    return cache[i].key;
+}
+// The race HUD's anchor (17.3c): a program of the race HUD (the speedometer's needle class, a block of width under 2)
+// that draws into the interface layer from the race start to its end, not in the pause, the results or any menu
+// (KAR_UI_ANCHOR runs, 2026-11-18). KAR_RACE_KEY overrides it. ui_race_fr is the last frame it drew in.
+static uint64_t ui_race_fr = ~0ull;
+// KAR_UI_ANCHOR=<key>,... (diagnostic): logs "ui anchor: frame N key K 0/1" when a program starts or stops drawing
+// into the interface layer.
 static void ui_anchor(VkExec *ex) {
-    static uint64_t key[8], fr_cur = ~0ull;
+    static uint64_t key[8], fr_cur = ~0ull, race_key;
     static int n = -1;
     static unsigned seen, shown;
-    static const prog_t *last_p;
-    static uint64_t last_k;
     if (n < 0) {
         n = 0;
         const char *e = getenv("KAR_UI_ANCHOR");
         while (e && *e && n < 8) { key[n++] = strtoull(e, (char **)&e, 16); if (*e == ',') e++; else break; }
+        e = getenv("KAR_RACE_KEY");
+        race_key = e && *e ? strtoull(e, NULL, 16) : 0x57d04d70800e9af4ull;
     }
-    if (!n) return;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-    if (fr != fr_cur) {   // the frame before is complete: log the keys that came or went
+    if (n && fr != fr_cur) {   // the frame before is complete: log the keys that came or went
         for (int i = 0; i < n; i++)
             if ((seen ^ shown) >> i & 1) rt_log("ui anchor: frame %llu key %016llx %d", (unsigned long long)fr_cur, (unsigned long long)key[i], seen >> i & 1);
         shown = seen, seen = 0, fr_cur = fr;
     }
     if (!ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
-    if (ex->prog != last_p) last_p = ex->prog, last_k = ui_prog_key(ex->prog);
-    for (int i = 0; i < n; i++) if (last_k == key[i]) seen |= 1u << i;
+    uint64_t k = ui_cur_key(ex);
+    if (k == race_key) __atomic_store_n(&ui_race_fr, fr, __ATOMIC_RELAXED);
+    for (int i = 0; i < n; i++) if (k == key[i]) seen |= 1u << i;
 }
 static int ui_dump_frame(void);
 static void ui_draw_dump(VkExec *ex, int op, const void *a) {
@@ -1077,15 +1093,10 @@ static void ui_layer_shift(VkExec *ex) {
         // HUD at the edges: the left band to the left edge, the middle centred, the right band to the right edge, and
         // the two gaps this opens filled with the cleared colour from the undrawn right part (hud_cols_done).
         int mode = hud_edges_mode();
-        // The race: a 3D camera ran within the last half second and the game's frame limiter (on in the menus, the
-        // results and the replay, kar_pace.c) did not.
-        static int persp_last;
-        static uint64_t persp_at, pace_last, pace_at;
-        int persp = kar_wide_persp_count();
-        uint64_t tnow = plat_now_ns(), pace = kar_pace_count();
-        if (persp != persp_last) persp_last = persp, persp_at = tnow;
-        if (pace != pace_last) pace_last = pace, pace_at = tnow;
-        int race = persp_at && tnow - persp_at < 500000000ull && (!pace_at || tnow - pace_at > 500000000ull);
+        // The race: the race HUD's anchor program drew into the layer in this frame or the one before (ui_anchor).
+        // The game's frame limiter (kar_pace.c) cannot tell: it is off in the menus as well.
+        uint64_t rf = __atomic_load_n(&ui_race_fr, __ATOMIC_RELAXED);
+        int race = rf != ~0ull && rf + 1 >= fr;
         if (race != __atomic_load_n(&ui_race_now, __ATOMIC_RELAXED)) {
             __atomic_store_n(&ui_race_now, race, __ATOMIC_RELAXED);
             if (HC.log) rt_log("hud edges: frame %llu race %d", (unsigned long long)fr, race);

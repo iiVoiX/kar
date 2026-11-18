@@ -88,3 +88,5 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - **Befund:** `race` in ui_layer_shift ist im ganzen Lauf 1: der karpace-Hook (kar_pace.c) zählt nie (pace 0, auch
   bei Limit 60 im Menü); der Begrenzer des Spiels ist in diesen Menüs aus. Das 17.3b-Gate ist damit nur
   `top_on && !blocked`.
+- 17.3b-Gate nutzt jetzt den Anker (`ui_race_fr`, Key `KAR_RACE_KEY`, Standard 57d04d70800e9af4); Testskript mit Pause:
+  `kirby/scripts/fresh_race_pause_ms.txt` (PLUS bei 128 s und 134 s).
