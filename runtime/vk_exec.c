@@ -847,6 +847,7 @@ static int ui_probe_offset(VkExec *ex) {
     if (mode == 1 || !ui_block) return off;
     const float *f = (const float *)(uintptr_t)ui_block;
     int c = f[0] == 1.0f && f[3] == 0.0f && f[5] == -1.0f ? 1 : (f[0] < 2.0f && f[0] > -2.0f) ? 2 : 0;
+    if (mode == 3) return c ? -1 : off;   // only plain element blocks move; the others stay as drawn
     return c == 1 ? 0 : c == 2 ? 2 * off : off;
 }
 
