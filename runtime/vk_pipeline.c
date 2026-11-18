@@ -1799,10 +1799,25 @@ static int module_binding_missing(const GfxShader *s, const VkDescriptorSetLayou
     uint8_t used[MAXV] = {0};
     uint64_t words = 0;
     const uint32_t *w = gfx_shader_spirv(s, &words);
+    // Variables of descriptor set 2 and up (the bindless arrays, the BDA table) live in layouts of their own: their
+    // binding numbers say nothing about this one's. Without this, a bindless array at binding 2 of set 2 matched a hole at
+    // binding 2 of set 0 and the pipeline was refused (City Trial's 192x192 captures, RELEASE_PLAN 3.2).
+    enum { MAXS = 64 };
+    uint32_t sid[MAXS], ns = 0;
     for (uint64_t i = 5; w && i < words;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
         if (!len || i + len > words) break;
-        if (op == SPV_OP_DECORATE && len >= 4 && w[i + 2] == SPV_DEC_BINDING) {
+        if (op == SPV_OP_DECORATE && len >= 4 && w[i + 2] == 34 /* DescriptorSet */ && w[i + 3] >= 2 && ns < MAXS)
+            sid[ns++] = w[i + 1];
+        i += len;
+    }
+    for (uint64_t i = 5; w && i < words;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > words) break;
+        int other_set = 0;
+        if (op == SPV_OP_DECORATE && len >= 4 && w[i + 2] == SPV_DEC_BINDING)
+            for (uint32_t t = 0; t < ns; t++) other_set |= sid[t] == w[i + 1];
+        if (op == SPV_OP_DECORATE && len >= 4 && w[i + 2] == SPV_DEC_BINDING && !other_set) {
             uint32_t want = w[i + 3] + (w[i + 3] >= 1 ? off : 0), j = 0;
             while (j < n && b[j].binding != want) j++;
             if (j == n) {

@@ -88,4 +88,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   `build_game.py --runtime … --out …` + `-Exe` (Junctions mit `cmd /c rmdir` entfernen).
 - **Diagnose-Schalter:** `KAR_UI_INV`, `KAR_UI_ANCHOR`, `KAR_UI_DUMP(_AUTO)`, `KAR_UI_SKIP=<f>:k<key>`, `KAR_UI_PROBE`,
   `KAR_UI_FULL_LOG`, `KAR_HUD_COLS`, `KAR_CS_LOG`, `KAR_CS_PF_LOG`, `KAR_CS_USED_MAX`.
-- **Nächst:** dunkle City-Trial-Szene (3.2: „bei 4200 sehr dunkel, Vergleich nötig“) – Messlauf mit Farbmitteln/Dumps; 17.19 Pause-Dimmer. Sicherungen: `E:/kirby/backup/`.
+- **Nächst (3.2, in Arbeit):** `module_binding_missing` (vk_pipeline.c) war set-blind: Bindless-Arrays in Set 2 an Bindung 2/3 trafen Lücken in Set 0 → gültige Pipelines abgelehnt („fragment shader uses binding N, which its reflection and layout lack“), z. B. City Trials 192×192-Aufnahmen (B10G11R11 + D32S8). Fix (Set ≥ 2 überspringen) gepusht: 0 abgelehnte Pipelines in City Trial + Air Ride, kein Geräteverlust; offen: Validation-Lauf (1.9), dann Anteil schwarzer Kirby. Module in `E:/kirby/backup/lack/`. Danach 17.19 Pause-Dimmer.
