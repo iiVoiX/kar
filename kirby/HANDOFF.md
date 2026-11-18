@@ -69,40 +69,23 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - Listen/Caches liegen neben der exe (`build/kar458752/shader-cache/cs-used.bin`, `pipeline-cache.bin`), nicht im Profil. `cs-used.bin` vor Experimenten sichern und danach zurück.
 - Diagnosen: `KAR_REPLAY_PROF=1` (+ `KAR_REPLAY_PROF_MS=25`), `KAR_FT_SLOW_MS=25`; „compute not indexed“ = Shader nicht im Prefetch-Index.
 
-## HUD-Elementweg 17.3c (2026-11-18)
-- Spiel zeichnet das 1920er-Layout links in die breite UI-Ebene (Breite = Szenenverhältnis·1080, z. B. 2576), `ui_layer_shift` kopiert es um off=(Breite−1920)/2 in die Mitte.
-- Je Element ein SSBO-Block (Stufe 0, Platz 1): Wort 0 Breite, 3 linke Kante, 5 Höhe, 7 y im 1920er-Layout.
-- Schalter (Diagnose): `KAR_UI_DUMP=<frames>` (Draws/Zielwechsel/Kopien), `KAR_UI_OPS=1` (Ops dazwischen), `KAR_UI_SKIP=<frame>:<klasse>` (Klasse wegschalten), `KAR_UI_PROBE=<von>[-<bis>]:<modus>` (Versatz je Draw, Endkopie aus).
-
-## Stand 2026-11-18
-- 7 Commits der anderen KI (16.3 P3b, 18.1, 18.7, 18.2, 17.16) in Air Ride geprüft und gepusht; ihre ungespeicherte
-  vk_exec_draw.c-Änderung behob einen Absturz von fc86957 (4cc67a6). Air-Ride-A/B: A/B-Rennen (eigene Exes über
-  `--runtime build/ab_x/src/runtime --out build/ab_x/out`, ini/Caches kopiert, shader-cache als Junction, `-Exe`)
-  82ecfff 118 fps → HEAD 121 fps, Minute 2. Die 141 fps vom 17.11. auch mit der Runtime von damals (92476f2) und dem Übersetzer vor 0027 nicht erreicht (117/124), beides zusammen 111 (gestörter Lauf) → Richtung Umgebung (16.6);
-  Minute 2 hat 23–36 Bilder > 25 ms (17.11.: 8) und `compute not indexed` bei Frame ~16885.
-- Nächstes: 17.3c nur im Rennen (Advisor): Banner/Pause/Ergebnis per `KAR_UI_DUMP` klassifizieren, dann Gate
-  `race && top_on && !blocked`, einmal pro Bild festgelegt, `hud_cols_read` aus während Elementweg.
-- 17.3c Diagnose: `KAR_UI_DUMP_AUTO=<n>` dumpt das Bild nach den ersten n Zentrierungen des Wächters im Rennen
-  (Anker gezeichnet; braucht `KAR_HUD_ELEMENTS=0`, sonst kein Rücklesen im Rennen). `KAR_UI_ANCHOR=<key>,…` loggt, wann ein Programm (ui_prog_key, über Neustarts
-  stabil) ins UI-Layer zeichnet oder aufhört – Suche nach einem Renn-Signal.
-- **Befund:** `race` in ui_layer_shift ist im ganzen Lauf 1: der karpace-Hook (kar_pace.c) zählt nie (pace 0, auch
-  bei Limit 60 im Menü); der Begrenzer des Spiels ist in diesen Menüs aus. Ersetzt durch den Anker (997de56).
-- Offen: Streifen Streckenbild oben links im 16:9-Bereich in Menü-/Ergebnis-Shots (schon vor 997de56).
-- 17.3c Klassen im Rennen: Runden-Banner und Flug-Hinweis unten (Key 1d9d…, 1120×528) sind normal (Klasse 0) →
-  bleiben im Elementweg ganz; Ziel ohne Block → Mitte; Pause → Anker aus → Mitte-Kopie. Unter-Layer: 2a63…, e363….
-- 17.3b-Gate nutzt jetzt den Anker (`ui_race_fr`, Key `KAR_RACE_KEY`, Standard 57d04d70800e9af4); Testskript mit Pause:
-  `kirby/scripts/fresh_race_pause_ms.txt` (PLUS bei 128 s und 134 s).
-- `mode_top.txt` ist bildgezählt und landet je nach Tempo in City Trial oder Fahrschule (Top Ride ungetestet); für
-  Vergleiche ein ms-Skript nötig. Dort Hunderte große Compute-Programme, Treiber-Erstbau 1–7 s, Schlüssel stabil (13.3). Absturz im Spielcode f_7002ecfb00 (Lesen 0x7d72b1128) 1 von 4 Läufen, nicht wiederholt.
-- 6eb0187 + 4cc67a6 in Air Ride geprüft: race 1/0 richtig, Pause mittig, 115–120 fps. Beobachtung: Pause-Abdunklung
-  deckt nur den 16:9-Bereich.
-- 17.3c v1: `KAR_HUD_ELEMENTS` (Standard an bei hud_position=edges, 0 = alte Bandschnitte) setzt im Rennen Platz links, Tacho/Runde rechts direkt beim Zeichnen,
-  alles andere ganz in der Mitte (keine Bandschnitte). Probe-Modi: `KAR_UI_PROBE=<von>-<bis>:<1..4>`.
-- A/B mit altem Übersetzer: `TOTK_XLATE=<pfad>/totk_xlate.exe` (eigene ID → eigene Cache-Schlüssel); alte Runtime per
-  `build_game.py --runtime <export>/runtime --out <dir>` + `-Exe`.
-- 17.3c Diagnose: `KAR_UI_INV=1` (jede neue nicht-normale Draw-Signatur im Rennen einmal, mit Seite und Wörtern; dumpt das
-  Folgebild), `KAR_UI_SKIP=<frame>:k<key>` (nur dieses Programms nicht-normale Draws weglassen). Programme sind
-  generisch (dasselbe zeichnet Platz oder Tacho) → Seite aus den Blockwörtern.
-- Anderes Seitenverhältnis testen: `KAR_DISPLAY_RES=<w>x<h>` (seit 17.17 jede Höhe, intern auf 1440 umgerechnet); TOTK_WINDOW_SIZE ändert das Render-Verhältnis nicht. Vorbau-Zähler: `KAR_CS_PF_LOG=1`.
-- 13.3 Diagnose: `KAR_CS_LOG=1` loggt jeden Compute-Build ≥ 600 KB (Zeiger, ms, Bild, Worker/sync, Warteschlange) und jede Dispatch-Wartezeit; `KAR_CS_USED_MAX` setzt die Gebrauchslisten-Grenze (1500).
-- 17.18: `KAR_UI_FULL_LOG=1` (Vollbild-Rechtecke mit Texturgröße), `KAR_UI_FULL=1` (flache Vollbild-Overlays über volle Breite, aus).
+## Stand 2026-11-18 (kurz; Verlauf: HANDOFF_ARCHIV.md)
+- **HUD am Rand (17.3c, Standard bei hud_position=edges, Air Ride):** Elementweg statt Bandschnitte, nur wenn das
+  Renn-Anker-Programm (57d04d70800e9af4, `KAR_RACE_KEY`) im Bild zeichnet. Seite aus Blockwörtern: exakt 1,0,−1,0 →
+  links (Platz), andere schmale → rechts (Tacho/Runde), volle Höhe mit Breite ≠ 1 (Banner) → Mitte; Karte/Liste per
+  genauem Block links; alles andere ganz mittig. `KAR_HUD_ELEMENTS=0` = alte Bandschnitte. Andere Modi: kein Anker → mittig.
+- **17.17 ✅:** `kar_wide_size` rechnet jede Wunschgröße auf 1440 Zeilen um (1080er Ultrawide war Bild in der Ecke).
+- **13.3:** Gebrauchsliste `CSU_MAX` 2000 (Air Ride + City Trial ~1800, ~0,9 MB je vorgebaute Pipeline). Erstbesuch
+  City Trial wartet; Kirby hat keinen Installer-Weg für vorbereitete Shader.
+- **16.6:** 141 fps vom 17.11. nicht mehr erreichbar, Code ausgeschlossen (alte Runtime/alter Übersetzer 111–124).
+- **17.18 (vertagt):** `KAR_UI_FULL=1` wirkt derzeit nicht (strenger Test greift nie; Erst-Slot-Version streckte den
+  Zielblitz) → gelesene Slots aus Shader-Reflexion nötig. Pause-Dimmer offen (vermutlich Szenen-Pass).
+- **18.1-Fix 4cc67a6** (Use-after-free der anderen KI behoben). Andere KI arbeitet evtl. weiter: vor Commits fetch/status.
+- **Test-Rezepte:** Rennen `fresh_race_ms.txt`, mit Pause `fresh_race_pause_ms.txt`, Top Ride `top_ms.txt`, Fahrschule
+  `school_ms.txt`, City Trial nur bildgezählt `mode_top.txt` (TOTK_FPS_LIMIT=60, landet nicht immer). Profil: Ordner mit
+  nur `account.uid`; `cs-used.bin` vor/nach jedem Lauf aus Sicherung (`E:/kirby/backup/cs-used.bak`) zurückspielen.
+  Ein Lauf endet nach dem letzten Shot. Andere Auflösung: `TOTK_OUTPUT_RES`/`KAR_DISPLAY_RES`. Alte Runtime: export +
+  `build_game.py --runtime … --out …` + `-Exe` (Junctions mit `cmd /c rmdir` entfernen).
+- **Diagnose-Schalter:** `KAR_UI_INV`, `KAR_UI_ANCHOR`, `KAR_UI_DUMP(_AUTO)`, `KAR_UI_SKIP=<f>:k<key>`, `KAR_UI_PROBE`,
+  `KAR_UI_FULL_LOG`, `KAR_HUD_COLS`, `KAR_CS_LOG`, `KAR_CS_PF_LOG`, `KAR_CS_USED_MAX`.
+- **Nächst:** Ruckler im Rennen (16.6, `KAR_FT_SLOW_MS`), dann 17.18 per Reflexion.
