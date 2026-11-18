@@ -865,8 +865,8 @@ static void ui_draw_dump(VkExec *ex, int op, const void *a) {
     const float *bk = ui_block ? (const float *)(uintptr_t)ui_block : NULL;
     int inst = op == OP_DRAW ? ((const p_draw *)a)->instances : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->instances : -1;
     if (bk)
-        rt_log("ui dump: frame %llu key %016llx block %.1f %.1f %.1f %.1f inst %d off %d", (unsigned long long)fr,
-               (unsigned long long)ui_cur_key(ex), bk[0], bk[3], bk[5], bk[7], inst, ui_probe_offset(ex));
+        rt_log("ui dump: frame %llu key %016llx block %.1f %.1f %.1f %.1f inst %d off %d words %.9g %.9g %.9g", (unsigned long long)fr,
+               (unsigned long long)ui_cur_key(ex), bk[0], bk[3], bk[5], bk[7], inst, ui_probe_offset(ex), bk[0], bk[3], bk[5]);
     else
         rt_log("ui dump: frame %llu key %016llx block none inst %d", (unsigned long long)fr, (unsigned long long)ui_cur_key(ex), inst);
     rt_log("ui dump: frame %llu draw %d target %llx %ux%u prog %llu tex %llx count %d vp %.0f,%.0f %.0fx%.0f scissor %d,%d %dx%d ubo %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
@@ -910,10 +910,10 @@ static int ui_probe_mode(void) {
     return 0;
 }
 // KAR_HUD_ELEMENTS (17.3c v1, on with hud_position = edges; 0 = the 17.3b band cuts): in the race (the anchor drew in the frame before) every interface
-// draw goes straight to its place in the wide layer instead of the 17.3b band cuts: the sub-layers drawn whole (the
-// rank) to the left edge, the other-projection elements of a width (the speedometer, the lap counter) to the right
-// edge, the course map and the rider list (by their blocks) to the left edge, every other plain element and every
-// draw without a block to the middle, whole (markers, banners, tips, the timer).
+// draw goes straight to its place in the wide layer instead of the 17.3b band cuts: the rank's sub-layer program (by
+// key) to the left edge, the other non-plain draws (speedometer, lap counter) to the right edge, the course map and the
+// rider list (by their blocks) to the left edge, every other draw to the middle, whole (markers, banners, tips, the
+// timer).
 // Decided once per frame, at its first interface draw, so the draws and the skipped copy agree.
 static int ui_elements_on(void) {
     static int on = -1;
@@ -950,7 +950,12 @@ static int ui_probe_offset(VkExec *ex) {
             if (fabsf(f[0] - box[i][0]) < 0.5f && fabsf(f[3] - box[i][1]) < 0.5f && fabsf(f[5] - box[i][2]) < 0.5f &&
                 fabsf(f[7] - box[i][3]) < 0.5f)
                 return 0;
-        return c == 1 ? 0 : c == 2 && f[0] != 0.0f ? 2 * off : off;
+        if (!c) return off;
+        // The rank's sub-layer program by key to the left edge, every other non-plain draw (the speedometer and the lap
+        // counter, whose programs change with their state) to the right edge. Not the identity block words: e363…
+        // (speedometer) draws 0.99999994 where 2a63… (rank) draws 1, so a float test decided the side by rounding
+        // (KAR_UI_SKIP=<frame>:k<key> shows what each program carries; Air Ride, 2026-11-18).
+        return ui_cur_key(ex) == 0x2a63b4f626d11424ull ? 0 : 2 * off;
     }
     if (mode == 4) {
         // Mode 4: each element to its side by the cuts of 17.3b, whole: a plain element wholly left of the left cut of
@@ -969,14 +974,15 @@ static int ui_probe_offset(VkExec *ex) {
 }
 
 static int ui_skip(VkExec *ex) {
-    static uint64_t fr_at[8];
+    static uint64_t fr_at[8], skey[8];   // <frame>:k<key>: that program's non-plain draws only
     static int cls[8], n = -1;
     if (n < 0) {
         n = 0;
         const char *e = getenv("KAR_UI_SKIP");
         while (e && *e && n < 8) {
             fr_at[n] = strtoull(e, (char **)&e, 10);
-            cls[n] = *e == ':' ? atoi(e + 1) : 0;
+            skey[n] = *e == ':' && e[1] == 'k' ? strtoull(e + 2, NULL, 16) : 0;
+            cls[n] = *e == ':' && !skey[n] ? atoi(e + 1) : 0;
             n++;
             e = strchr(e, ',');
             if (e) e++;
@@ -988,7 +994,7 @@ static int ui_skip(VkExec *ex) {
     const float *f = (const float *)(uintptr_t)ui_block;
     int c = f[0] == 1.0f && f[3] == 0.0f && f[5] == -1.0f ? 1 : (f[0] < 2.0f && f[0] > -2.0f) ? 2 : 0;
     for (int i = 0; i < n; i++)
-        if (c && cls[i] == c && fr + 8 >= fr_at[i] && fr <= fr_at[i] + 8) return 1;
+        if (c && (skey[i] ? ui_cur_key(ex) == skey[i] : cls[i] == c) && fr + 8 >= fr_at[i] && fr <= fr_at[i] + 8) return 1;
     return 0;
 }
 static void ui_op_dump(VkExec *ex, int op, const void *a) {
