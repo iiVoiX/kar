@@ -4167,9 +4167,8 @@ size_t gfx_shader_warm_list(GfxWarmEnt **out) {
 // then count entries of an input id (32 bytes) and the u32 session that last used it.
 // CSU_MAX holds an Air Ride race and a City Trial visit together (1798 entries, 2026-11-18): at 1500 a City Trial visit
 // pushed 298 race shaders out and the next race waited 161 times instead of 15. Each prebuilt large compute pipeline
-// holds about 3-5 MB of driver memory (the 448 City Trial ones in a race session: +0.3 to +2 GB private, single
-// samples), so the cap stays just above the measured need; releasing prebuilt pipelines a session never dispatches is
-// the real fix (RELEASE_PLAN 13.3).
+// holds about 0.9 MB (the 444 City Trial ones in a race session: +0.4 GB private, medians over a minute), and a race
+// dispatches 692 of the 861 the plain list prebuilds; the cap stays near the measured need (RELEASE_PLAN 13.3).
 #define CSU_MAX 2000
 typedef struct { uint8_t iid[32]; uint32_t session; } CsuEnt;
 static struct {
