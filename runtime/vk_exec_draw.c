@@ -3958,7 +3958,9 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
     if (light_quad_fault_skip(ex, vs, fs) || skip_vs_listed(ex) || skip_fs_listed(ex)) SKIP(7);
     if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) SKIP(8);
     if (!geometry_feedback_safe(ex, vs, gs)) SKIP(9);
-    if (fs && ex->prog) fs_slots_note(ex->prog->serial, fs);   // for vk_exec_fs_slots (KAR_UI_FULL, vk_exec.c)
+    static int ui_full = -1;   // KAR_UI_FULL (vk_exec.c ui_full_flat) reads the noted slots; nothing to note without it
+    if (ui_full < 0) ui_full = getenv("KAR_UI_FULL") && *getenv("KAR_UI_FULL") == '1';
+    if (ui_full && fs && ex->prog) fs_slots_note(ex->prog->serial, fs);   // for vk_exec_fs_slots (vk_exec.c)
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;
     s.vs = vs, s.fs = fs, s.gs = gs;

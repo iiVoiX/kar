@@ -78,8 +78,8 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - **13.3:** Gebrauchsliste `CSU_MAX` 2000 (Air Ride + City Trial ~1800, ~0,9 MB je vorgebaute Pipeline). Erstbesuch
   City Trial wartet; Kirby hat keinen Installer-Weg für vorbereitete Shader.
 - **16.6:** 141 fps vom 17.11. nicht mehr erreichbar, Code ausgeschlossen (alte Runtime/alter Übersetzer 111–124).
-- **17.18 (vertagt):** `KAR_UI_FULL=1` wirkt derzeit nicht (strenger Test greift nie; Erst-Slot-Version streckte den
-  Zielblitz) → gelesene Slots aus Shader-Reflexion nötig. Pause-Dimmer offen (vermutlich Szenen-Pass).
+- **17.18 (vertagt):** `KAR_UI_FULL=1` (aus) streckt flache Vollbild-Overlays (gelesene Slots per Reflexion);
+  Zielblitz voll, weiße Wischblende nur graue Streifen → nicht Standard. Pause-Dimmer = 17.19 (Pause rendert 6 unverbreiterte 1920×1080-Ziele).
 - **18.1-Fix 4cc67a6** (Use-after-free der anderen KI behoben). Andere KI arbeitet evtl. weiter: vor Commits fetch/status.
 - **Test-Rezepte:** Rennen `fresh_race_ms.txt`, mit Pause `fresh_race_pause_ms.txt`, Top Ride `top_ms.txt`, Fahrschule
   `school_ms.txt`, City Trial nur bildgezählt `mode_top.txt` (TOTK_FPS_LIMIT=60, landet nicht immer). Profil: Ordner mit
