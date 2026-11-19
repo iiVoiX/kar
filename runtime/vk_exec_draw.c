@@ -146,6 +146,7 @@ static Chunk spare_chunk[SPARE_CHUNKS];
 static int nspare_pool, nspare_chunk;
 
 // State of the command buffer being recorded that the Vulkan command buffer itself holds.
+#define C2_BYTES 0x680   // c2 handle bank: combined 0x20, images 0x120, separate textures 0x168, samplers 0x568..0x667
 static struct {
     VkPipeline pipe[2];                  // bound per bind point: 0 graphics, 1 compute
     VkPipeState st;                      // the state vk_pipeline_set_dynamic last recorded
@@ -166,6 +167,10 @@ static struct {
     VkBuffer c0_buf[4];
     VkDeviceSize c0_off[4];
     int c0_valid[4];
+    uint8_t c2[4][C2_BYTES];             // last c2 handle bank per stage (c2_info) and where it lives
+    VkBuffer c2_buf[4];
+    VkDeviceSize c2_off[4];
+    int c2_valid[4];
     struct { p_bind_buf ssbo[16], ubo[16]; uint32_t dim[3], binst; Nvn2C0Layout lay; uint8_t has_lay;
              uint32_t roots[NVN2_ROOT_TABLES][NVN2_ROOT_WORDS]; } c0_in[4];   // what vk_c0_fill read for c0[k]
     VkPipelineLayout ds_layout;          // graphics layout the sets below were last pushed or bound with
@@ -1301,6 +1306,80 @@ static void limits_init(void) {
     __atomic_store_n(&LIM.ubo_max, l->maxUniformBufferRange, __ATOMIC_RELEASE);
 }
 
+// c2, the NVN texture handle bank (gfx_shader.c handle_slot: combined handles at 0x20 + 8 slot, images at 0x120,
+// separate textures at 0x168, separate samplers at 0x568). Texture instructions take their handles from reflection,
+// but some shaders also load handle words as data: Kirby's menu bubble text (RELEASE_PLAN 2.6) reads the separate
+// texture word at 0x168 and the sampler word at 0x568, ORs them into an id and indexes a Direct pool array with it.
+// A zero bank gives id 0 there. Built from the handles bound to the stage with KAR_C2=1 (off by default until checked
+// in races and under validation; it alone did not bring back the bubble text).
+static uint64_t c2_log_fs, c2_cur_fs;   // KAR_C2_LOG=fs:<hex>: the fragment shader hash to log (graphics draws)
+static int c2_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_C2") && *getenv("KAR_C2") == '1';
+    return on;
+}
+static VkDescriptorBufferInfo c2_info(VkExec *ex, int st) {
+    int k = st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : st == NVN_STAGE_CS ? 2 : 3;
+    uint8_t tmp[C2_BYTES];
+    memset(tmp, 0, sizeof tmp);
+    for (int s = 0; s < 32; s++) memcpy(tmp + 0x20 + 8 * s, &ex->tex[st][s], 8);
+    for (int s = 0; s < 8; s++) memcpy(tmp + 0x120 + 8 * s, &ex->img[st][s], 8);
+    for (int s = 0; s < 128; s++) memcpy(tmp + 0x168 + 8 * s, &ex->tex[st][s], 8);
+    for (int s = 0; s < 32; s++) memcpy(tmp + 0x568 + 8 * s, &ex->samp[st][s], 8);
+    {   // KAR_C2_LOG=<serial>: the handle words this program's stage gets (0: any fragment stage; first 40 calls)
+        static long long lp = -2;
+        static int lt;
+        if (lp == -2) {
+            const char *e = getenv("KAR_C2_LOG");
+            lp = e ? atoll(e) : -1;
+            if (e && !strncmp(e, "fs:", 3)) lp = 0, c2_log_fs = strtoull(e + 3, NULL, 16);
+        }
+        if (lp >= 0 && ex->prog && ((long long)ex->prog->serial == lp || (lp == 0 && st == NVN_STAGE_FS && c2_cur_fs == c2_log_fs)) && lt++ < 40) {
+            const uint32_t *w = (const uint32_t *)tmp;
+            char t[600];
+            int o = 0;
+            for (int i = 0; i < C2_BYTES / 4; i++)
+                if (w[i] && o < 560) o += snprintf(t + o, sizeof t - (size_t)o, " +%#x=%08x", i * 4, w[i]);
+            rt_log("c2 prog %llu stage %d:%s", (unsigned long long)ex->prog->serial, st, t);
+            {   // c1 (the inline constants after the code): its first 8 words, where a BRX jump table sits
+                const uint8_t *ctl, *code;
+                uint32_t len, c1;
+                if (find_stage(ex->prog, st, &ctl, &code, &len)) {
+                    memcpy(&c1, ctl + 0x700, 4);
+                    if (c1 + 48 <= len) {
+                        const uint32_t *q = (const uint32_t *)(code + c1);
+                        rt_log("c2 prog %llu c1 at %#x len %#x: %u %u %u %u %u %u %u %u | %u %u %u %u", (unsigned long long)ex->prog->serial,
+                               c1, len, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9], q[10], q[11]);
+                    }
+                }
+            }
+            const p_bind_buf *u5 = &ex->ubo[st][2];
+            if (u5->addr && u5->size >= 0x100) {
+                const uint32_t *q = (const uint32_t *)(uintptr_t)u5->addr;
+                rt_log("c2 prog %llu ubo2 %#llx size %llu: w0 %08x w44 %08x w45 %08x w48 %08x w49 %08x w100 %08x",
+                       (unsigned long long)ex->prog->serial, (unsigned long long)u5->addr, (unsigned long long)u5->size,
+                       q[0], q[44], q[45], q[48], q[49], q[100]);
+            }
+            const p_bind_buf *sb = &ex->ssbo[st][1];   // the bubble's colour records: 224 bytes, mul at +192, add at +208
+            o = 0;
+            if (sb->addr)
+                for (uint64_t r = 0; r * 224 + 224 <= sb->size && r < 12 && o < 560; r++) {
+                    const float *f = (const float *)(uintptr_t)(sb->addr + r * 224 + 192);
+                    o += snprintf(t + o, sizeof t - (size_t)o, " r%llu mul %.2f,%.2f,%.2f,%.2f add %.2f,%.2f,%.2f,%.2f;",
+                                  (unsigned long long)r, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+                }
+            rt_log("c2 prog %llu ssbo1 %#llx size %llu:%s", (unsigned long long)ex->prog->serial,
+                   (unsigned long long)sb->addr, (unsigned long long)sb->size, o ? t : " -");
+        }
+    }
+    if (!B.c2_valid[k] || memcmp(tmp, B.c2[k], C2_BYTES)) {
+        memcpy(scratch(ex, C2_BYTES, &B.c2_buf[k], &B.c2_off[k]), tmp, C2_BYTES);
+        memcpy(B.c2[k], tmp, C2_BYTES);
+        B.c2_valid[k] = 1;
+    }
+    return (VkDescriptorBufferInfo){B.c2_buf[k], B.c2_off[k], C2_BYTES};
+}
+
 static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
     if (!__atomic_load_n(&LIM.ubo_max, __ATOMIC_ACQUIRE)) limits_init();
     uint64_t max = LIM.ubo_max, align = LIM.ubo_align;
@@ -1347,6 +1426,7 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
         }
     }
     if (slot == 0 && c0_on()) return c0_info(ex, st);
+    if (slot == 2 && c2_on()) return c2_info(ex, st);
     if (slot == 1 && ex->prog) {   // compiler constants stored after the shader code
         const uint8_t *ctl, *code;
         uint32_t len, c1;
@@ -1399,6 +1479,12 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
             return bi;
         }
         if (bind_range(ex, b->addr, b->size, align, max, VK_MUSE_UBO, 0, 0, &bi)) return bi;
+        static int zl = -2, zt;   // KAR_UBO_ZERO=<slot>: calls whose user buffer falls back to the zero buffer
+        if (zl == -2) zl = getenv("KAR_UBO_ZERO") ? atoi(getenv("KAR_UBO_ZERO")) : -1;
+        if (zl == slot && zt++ < 40)
+            rt_log("vk_exec: ubo%d zero fallback: prog %llu stage %d addr %#llx size %llu", slot,
+                   ex->prog ? (unsigned long long)ex->prog->serial : 0ull, st, (unsigned long long)b->addr,
+                   (unsigned long long)b->size);
     }
     return zero_info(max);
 }
@@ -2764,6 +2850,12 @@ static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
                     int slot = r->slot + (int)k;
                     if (slot == 0 && c0_on()) c0 = 1, rs_add(tmp, &n, ex, ex->ssbo[st], sizeof ex->ssbo[st]);
                     else if (slot >= 3 && slot - 3 < 18) rs_add(tmp, &n, ex, &ex->ubo[st][slot - 3], sizeof(p_bind_buf));
+                    else if (slot == 2 && c2_on()) {   // c2_info builds the bank from these handles
+                        if (n + 3 > MAX_DESC) { ok = 0; break; }
+                        rs_add(tmp, &n, ex, ex->tex[st], sizeof ex->tex[st]);
+                        rs_add(tmp, &n, ex, ex->samp[st], 32 * sizeof ex->samp[st][0]);
+                        rs_add(tmp, &n, ex, ex->img[st], 8 * sizeof ex->img[st][0]);
+                    }
                 }   // slot 1: the program (bind_sig); others: the zero buffer
             } else if (b->kind == GFX_RES_SSBO) {   // every descriptor of the binding is the same range
                 if (r->flags & GFX_RES_SSBO_BDA) continue;   // covered by vk_mem_gen() in bind_sig
@@ -3115,7 +3207,10 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             static uint64_t bp_seen[64];
             static int bp_n;
             int bp_new = 0;
-            if (bp == 0 && ex->prog && b->binding >= 64) {   // 0: every uniform binding >= 64, once per program and binding
+            static int bnum = -2;
+            if (bnum == -2) bnum = getenv("KAR_BIND_NUM") ? atoi(getenv("KAR_BIND_NUM")) : -1;
+            if (bnum >= 0 && bp < 0) bp = 0;   // KAR_BIND_NUM=<binding>: only that binding, once per program
+            if (bp == 0 && ex->prog && (bnum >= 0 ? b->binding == (uint32_t)bnum : b->binding >= 64)) {   // 0: every uniform binding >= 64, once per program and binding
                 uint64_t key = ex->prog->serial * 256 + b->binding;
                 int q = 0;
                 while (q < bp_n && bp_seen[q] != key) q++;
@@ -4150,6 +4245,7 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
     }
     record_fixed(ex);
     repeat_stats(ex, info);
+    if (c2_log_fs) c2_cur_fs = s.fs ? gfx_shader_spirv_fnv(s.fs) : 0;
     bind_resources(ex, info);
     if (fbl & ex->fb_dirty) feedback_barrier(ex);
     feedback_written(ex, &s);
