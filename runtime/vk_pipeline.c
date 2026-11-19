@@ -2718,7 +2718,33 @@ static struct {
 } U;
 
 // A building entry for key, NULL when out of memory. Caller holds P.lock and found none.
+static Lib *lib_find(uint64_t h, const void *key, uint32_t size);
+// Counts stage libraries entered for a shader that already has a library with other layout bits (lay_bits): the pairs
+// that before 18.10 would have shared one library across incompatible layouts. Logged at 1, 10, 100, ... Caller holds P.lock.
+static void lay_split_note(const void *key, uint32_t size) {
+    uint32_t kind;
+    memcpy(&kind, key, 4);
+    size_t at = kind == LIB_PR && size == sizeof(PrKey) ? offsetof(PrKey, lay) : kind == LIB_FS && size == sizeof(FsKey) ?
+                offsetof(FsKey, lay) : 0;
+    if (!at) return;
+    uint8_t k2[sizeof(PrKey) > sizeof(FsKey) ? sizeof(PrKey) : sizeof(FsKey)];
+    memcpy(k2, key, size);
+    uint8_t own = ((const uint8_t *)key)[at];
+    for (int v = 0; v < 8; v++) {
+        if (v == own) continue;
+        k2[at] = (uint8_t)v;
+        if (lib_find(key_hash(k2, size), k2, size)) {
+            static uint64_t n;
+            if (++n == 1 || n == 10 || n == 100 || n == 1000)
+                rt_log("vk_pipeline: gpl: %llu stage libraries split by layout bits (last: %s, bits %d vs %d)",
+                       (unsigned long long)n, kind == LIB_PR ? "pre-rasterization" : "fragment", own, v);
+            return;
+        }
+    }
+}
+
 static Lib *lib_new(uint64_t h, const void *key, uint32_t size) {
+    lay_split_note(key, size);
     Lib *b = calloc(1, sizeof *b + size);
     if (!b) return NULL;
     b->hash = h, b->size = size, b->building = 1;
@@ -2808,7 +2834,14 @@ static void libs_destroy(void) {
 }
 
 // The four library keys of pipeline s (key k).
-static uint8_t lay_bits(const Layout *l, int h) { return (uint8_t)((h ? l->push1 : l->push) | (l->bl ? 2 : 0)); }
+// bit 0: the half's set is a push-descriptor set; bit 1: set 2 (bindless) is present; bit 2: the half's set has dynamic
+// uniform buffers (dyn_ubo hands its budget to set 1 first, so set 0's descriptor types depend on the fragment stage)
+static uint8_t lay_bits(const Layout *l, int h) {
+    uint32_t lo = h ? l->n0 : 0, hi = h ? l->n : l->n0;
+    int dyn = 0;
+    for (uint32_t i = lo; i < hi && i < sizeof l->dyn; i++) dyn |= l->dyn[i];
+    return (uint8_t)((h ? l->push1 : l->push) | (l->bl ? 2 : 0) | (dyn ? 4 : 0));
+}
 
 static void lib_keys(const VkPipeState *s, const GKey *k, const Layout *l, ViKey *v, PrKey *pk, FsKey *fk, FoKey *ok) {
     memset(v, 0, sizeof *v);
