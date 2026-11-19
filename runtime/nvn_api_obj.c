@@ -120,8 +120,12 @@ NVN_API(nvnTextureBuilderSetSize1D) {
 // KAR_SIZE_WATCH=<width> (diagnostic, ultrawide 17.3): log each 2D texture size of at least that width and the guest call
 // chain (frame records: [fp] the caller's fp, [fp + 8] its return address), to find where the game picks its sizes.
 static void size_watch(Cpu *c, uint32_t w, uint32_t h) {
-    static int want = -1, left = 40;
-    if (want < 0) { const char *e = getenv("KAR_SIZE_WATCH"); want = e ? atoi(e) : 0; }
+    static int want = -1, left = 40;   // KAR_SIZE_WATCH_N=<n>: log n sizes instead of 40
+    if (want < 0) {
+        const char *e = getenv("KAR_SIZE_WATCH"), *n = getenv("KAR_SIZE_WATCH_N");
+        want = e ? atoi(e) : 0;
+        if (n) left = atoi(n);
+    }
     if (!want || (int)w < want || left <= 0) return;   // every width from KAR_SIZE_WATCH up
     left--;
     uint64_t fp = c->x[29], ra[6] = {c->x[30]};
