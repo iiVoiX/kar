@@ -2543,8 +2543,11 @@ typedef struct Lib { struct Lib *next; uint64_t hash; VkPipeline pipe; uint32_t 
 static Lib *libs[LIB_BUCKETS];
 
 typedef struct { uint32_t kind, topo_class, attr_fmt[32], attr_off[32]; uint8_t attr_bind[32], rate[17], pad[3]; } ViKey;
-typedef struct { uint32_t kind, missing; const GfxShader *vs; uint8_t clamp, poly_mode, minus_w, pad; GfxShaderIo fin[32]; } PrKey;
-typedef struct { uint32_t kind; uint8_t dsb, samples, a2c, alpha; const GfxShader *fs; float alpha_ref; uint32_t pad; } FsKey;
+// lay (PrKey, FsKey): the layout bits the library's half layout depends on beyond the stage's own bindings, from lay_bits:
+// whether its set is a push-descriptor set and whether set 2 (bindless) is present. Both follow from the stage pair
+// (bindless_for looks at both stages), so a library built for one pair is not linked into a pipeline of another.
+typedef struct { uint32_t kind, missing; const GfxShader *vs; uint8_t clamp, poly_mode, minus_w, lay; GfxShaderIo fin[32]; } PrKey;
+typedef struct { uint32_t kind; uint8_t dsb, samples, a2c, alpha; const GfxShader *fs; float alpha_ref; uint32_t lay; } FsKey;
 typedef struct { uint32_t kind; uint8_t n_color, samples, a2c, logic_op, blend_en, pad[3]; uint32_t color[8], depth, stencil, wmask;
                  uint8_t blend[8][6]; } FoKey;
 
@@ -2805,7 +2808,9 @@ static void libs_destroy(void) {
 }
 
 // The four library keys of pipeline s (key k).
-static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, FsKey *fk, FoKey *ok) {
+static uint8_t lay_bits(const Layout *l, int h) { return (uint8_t)((h ? l->push1 : l->push) | (l->bl ? 2 : 0)); }
+
+static void lib_keys(const VkPipeState *s, const GKey *k, const Layout *l, ViKey *v, PrKey *pk, FsKey *fk, FoKey *ok) {
     memset(v, 0, sizeof *v);
     v->kind = LIB_VI, v->topo_class = k->topo_class;
     memcpy(v->attr_fmt, k->attr_fmt, sizeof v->attr_fmt), memcpy(v->attr_off, k->attr_off, sizeof v->attr_off);
@@ -2816,9 +2821,10 @@ static void lib_keys(const VkPipeState *s, const GKey *k, ViKey *v, PrKey *pk, F
     pk->missing = vs_union_missing(s, fin);
     for (int i = 0; i < 32; i++)
         if (pk->missing >> i & 1) pk->fin[i] = fin[i];
+    pk->lay = lay_bits(l, 0);
     memset(fk, 0, sizeof *fk);
     fk->kind = LIB_FS, fk->fs = s->fs, fk->dsb = k->dsb, fk->samples = k->samples, fk->a2c = k->a2c;
-    fk->alpha = k->alpha, fk->alpha_ref = k->alpha_ref;
+    fk->alpha = k->alpha, fk->alpha_ref = k->alpha_ref, fk->lay = lay_bits(l, 1);
     memset(ok, 0, sizeof *ok);
     ok->kind = LIB_FO, ok->n_color = k->n_color, ok->samples = k->samples, ok->a2c = k->a2c, ok->logic_op = k->logic_op;
     ok->blend_en = k->blend_en, ok->depth = k->depth, ok->stencil = k->stencil, ok->wmask = k->wmask;
@@ -2839,7 +2845,7 @@ static VkPipeline gpl_link(const VkPipeState *s, const GKey *k, const Layout *lc
     PrKey pk;
     FsKey fk;
     FoKey ok;
-    lib_keys(s, k, &vk_, &pk, &fk, &ok);
+    lib_keys(s, k, l, &vk_, &pk, &fk, &ok);
     int miss = 0;
     VkPipeline lib[4];
     lib[1] = lib_get(LIB_PR, s, k, l, &pk, sizeof pk, build, &miss);   // shader libraries first: no work when absent
@@ -3401,7 +3407,7 @@ static void lib_wait(const VkPipeState *s, const GKey *k, Layout *l, double end)
     PrKey pk;
     FsKey fk;
     FoKey ok;
-    lib_keys(s, k, &vk_, &pk, &fk, &ok);
+    lib_keys(s, k, l, &vk_, &pk, &fk, &ok);
     U.waits++;
     const void *key[2] = {&pk, &fk};
     uint32_t size[2] = {sizeof pk, sizeof fk};
@@ -4057,15 +4063,16 @@ static void lb_library(const GfxShader *sh, int vertex, int keep) {
         fk.kind = LIB_FS, fk.fs = sh, fk.samples = k.samples;
         key = &fk, size = sizeof fk;
     }
-    uint64_t h = key_hash(key, size);
     Bindings B = {0}, F = {0};
     VkPipelineLayout lay = VK_NULL_HANDLE;
     lb_lock();
+    // the layout first: its push and bindless bits are part of the key (lay_bits). Built for this stage alone, so a
+    // pair whose other stage changes them (bindless) links a library of its own instead.
+    Layout *l = add_stage(vertex ? &B : &F, sh, 0) ? layout_pair(&B, &F) : NULL;
+    if (l) pk.lay = lay_bits(l, 0), fk.lay = lay_bits(l, 1);
+    uint64_t h = key_hash(key, size);
     int have = keep && lib_find(h, key, size) != NULL;
-    if (!have && add_stage(vertex ? &B : &F, sh, 0)) {
-        Layout *l = layout_pair(&B, &F);
-        if (l) lay = half_layout(l, vertex ? 0 : 1);
-    }
+    if (!have && l) lay = half_layout(l, vertex ? 0 : 1);
     lb_unlock();
     if (have || !lay) {
         lb_count(stat, have ? 1 : 2, 0);
