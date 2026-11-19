@@ -899,6 +899,36 @@ static uint32_t ui_full_flat(VkExec *ex) {
     vk_texture_unlock();
     return bound ? ex->color[0].width : 0;
 }
+// KAR_UI_BAND (17.19, on unless 0): a draw into the interface layer whose block spans the whole 16:9 width (any height)
+// and whose fragment shader samples only narrow upright strips (at most 64 texels wide, taller than wide: a vertical
+// gradient stretched across the screen, such as the pause screen's dimmer at the bottom) is drawn over the whole layer
+// width, so the gradient reaches the sides. Flat 1x1 fades stay with KAR_UI_FULL. Returns that width, or 0.
+static uint32_t ui_band(VkExec *ex) {
+    static int on = -1;
+    if (on < 0) on = !(getenv("KAR_UI_BAND") && *getenv("KAR_UI_BAND") == '0');
+    if (!on || !ui_block || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height))
+        return 0;
+    const float *f = (const float *)(uintptr_t)ui_block;
+    if (f[0] != 1920.0f || f[3] != 0.0f || f[5] >= 0.0f) return 0;
+    int stage;
+    uint64_t mask[2];
+    if (!ex->prog || !vk_exec_fs_slots(ex->prog->serial, &stage, mask) || stage < 0 || stage >= 6 || !(mask[0] | mask[1]))
+        return 0;
+    int bound = 0;
+    vk_texture_lock();
+    for (int sl = 0; sl < 128; sl++) {
+        if (!(mask[sl >> 6] >> (sl & 63) & 1)) continue;
+        uint64_t th = ex->tex[stage][sl];
+        if (!th) { vk_texture_unlock(); return 0; }
+        view_t v;
+        int hv;
+        const VkTexImage *ti = vk_texture_by_id_locked(&ex->tex_pool, (int)(th & 0xfffff), &v, &hv);
+        if (!ti || ti->width > 64 || ti->height <= ti->width) { vk_texture_unlock(); return 0; }
+        bound++;
+    }
+    vk_texture_unlock();
+    return bound ? ex->color[0].width : 0;
+}
 static void ui_full_log(VkExec *ex, int op, const void *a) {
     static int on = -1;
     if (on < 0) on = getenv("KAR_UI_FULL_LOG") && *getenv("KAR_UI_FULL_LOG") == '1';
@@ -1885,7 +1915,8 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
                 ui_block = ((const p_bind_buf *)a)->addr;
             if ((h->op == OP_DRAW || h->op == OP_DRAW_IDX) && ui_skip(ex)) break;
             uint32_t ui_fw = (h->op == OP_DRAW || h->op == OP_DRAW_IDX) ? ui_full_flat(ex) : 0;
-            if (ui_fw) {   // KAR_UI_FULL: a flat full-layout overlay over the whole layer width
+            if (!ui_fw && (h->op == OP_DRAW || h->op == OP_DRAW_IDX)) ui_fw = ui_band(ex);   // KAR_UI_BAND
+            if (ui_fw) {   // KAR_UI_FULL / KAR_UI_BAND: a full-width overlay over the whole layer width
                 float v0 = ex->vp[0][0], v2 = ex->vp[0][2];
                 p_scissor sc = ex->scissor;
                 int had = ex->has_scissor;

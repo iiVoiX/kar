@@ -3962,9 +3962,42 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
     if (light_quad_fault_skip(ex, vs, fs) || skip_vs_listed(ex) || skip_fs_listed(ex)) SKIP(7);
     if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) SKIP(8);
     if (!geometry_feedback_safe(ex, vs, gs)) SKIP(9);
-    static int ui_full = -1;   // KAR_UI_FULL (vk_exec.c ui_full_flat) reads the noted slots; nothing to note without it
-    if (ui_full < 0) ui_full = getenv("KAR_UI_FULL") && *getenv("KAR_UI_FULL") == '1';
-    if (ui_full && fs && ex->prog) fs_slots_note(ex->prog->serial, fs);   // for vk_exec_fs_slots (vk_exec.c)
+    // KAR_UI_FULL and KAR_UI_BAND (vk_exec.c ui_full_flat, ui_band) read the noted slots of draws into the interface
+    // layer; nothing to note when both are off
+    static int ui_full = -1;
+    if (ui_full < 0)
+        ui_full = (getenv("KAR_UI_FULL") && *getenv("KAR_UI_FULL") == '1') ||
+                  !(getenv("KAR_UI_BAND") && *getenv("KAR_UI_BAND") == '0');
+    if (ui_full && fs && ex->prog && ex->pass_ncolor && kar_wide_ui(ex->color[0].width, ex->color[0].height))
+        fs_slots_note(ex->prog->serial, fs);   // for vk_exec_fs_slots (vk_exec.c)
+    {   // KAR_SAMPLE_LOG=<frame> (diagnostic, 17.19): each draw of that frame with its target and the size and pool id of
+        // every texture its fragment shader samples, to find which pass reads a given target
+        static long at = -2;
+        if (at == -2) at = getenv("KAR_SAMPLE_LOG") ? atol(getenv("KAR_SAMPLE_LOG")) : -1;
+        if (at >= 0 && fs && (long)gfx_counters.frames == at) {
+            static int lines;
+            const GfxShaderRes *res;
+            int n = gfx_shader_resources(fs, GFX_RES_TEX, &res), st = nvn_stage_of(gfx_shader_stage(fs));
+            char t[512];
+            int w = 0;
+            vk_texture_lock();
+            for (int r = 0; r < n && w < 440; r++) {
+                int slot = res[r].slot;
+                uint64_t th = slot >= 0 && slot < 128 && st >= 0 && st < 6 ? ex->tex[st][slot] : 0;
+                view_t v;
+                int hv;
+                const VkTexImage *ti = th ? vk_texture_by_id_locked(&ex->tex_pool, (int)(th & 0xfffff), &v, &hv) : NULL;
+                w += snprintf(t + w, sizeof t - w, " s%d:%d:%ux%u", slot, (int)(th & 0xfffff), ti ? ti->width : 0,
+                              ti ? ti->height : 0);
+            }
+            vk_texture_unlock();
+            t[w] = 0;
+            if (lines++ < 3000)
+                rt_log("sample log: target serial %llu %ux%u prog %llu tex%s", ex->rt.n > 0 && ex->rt.color[0] ?
+                       (unsigned long long)ex->rt.color[0]->serial : 0ull, ex->pass_w, ex->pass_h,
+                       ex->prog ? (unsigned long long)ex->prog->serial : 0ull, t);
+        }
+    }
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;
     s.vs = vs, s.fs = fs, s.gs = gs;
@@ -4077,13 +4110,18 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
                    s.chmask.mask, s.color.blend_en, (int)s.blend[0].src_rgb, (int)s.blend[0].dst_rgb, count, prim,
                    (int)s.poly.cull, (int)s.poly.front, (int)s.poly.mode, s.ms.enable, s.ms.samples, s.ms.a2c);
     }
-    {   // KAR_PASS_STATS=<frame> (diagnostic, ultrawide HUD): each draw of that frame by target size, viewport and blending
-        static long at = -2;
-        if (at == -2) { const char *e = getenv("KAR_PASS_STATS"); at = e ? atol(e) : -1; }
-        if (at >= 0 && (long)gfx_counters.frames == at) {
+    {   // KAR_PASS_STATS=<frame>[,<frame>] (diagnostic, ultrawide HUD): each draw of those frames by target size,
+        // viewport and blending (two frames: compare a race frame with a pause frame of the same run)
+        static long at = -2, at2 = -1;
+        if (at == -2) {
+            const char *e = getenv("KAR_PASS_STATS");
+            at = e ? atol(e) : -1;
+            if (e && strchr(e, ',')) at2 = atol(strchr(e, ',') + 1);
+        }
+        if (at >= 0 && ((long)gfx_counters.frames == at || (long)gfx_counters.frames == at2)) {
             static int lines;
             if (lines++ < 5000)
-                rt_log("pass stats: target serial %llu %ux%u vp %g,%g %gx%g blend %d count %d", ex->rt.n > 0 && ex->rt.color[0] ? (unsigned long long)ex->rt.color[0]->serial : 0ull, ex->pass_w, ex->pass_h,
+                rt_log("pass stats: f%ld target serial %llu %ux%u vp %g,%g %gx%g blend %d count %d", (long)gfx_counters.frames, ex->rt.n > 0 && ex->rt.color[0] ? (unsigned long long)ex->rt.color[0]->serial : 0ull, ex->pass_w, ex->pass_h,
                        ex->has_vp ? ex->vp[0][0] : 0, ex->has_vp ? ex->vp[0][1] : 0, ex->has_vp ? ex->vp[0][2] : 0,
                        ex->has_vp ? ex->vp[0][3] : 0, s.color.blend_en != 0, count);
         }
