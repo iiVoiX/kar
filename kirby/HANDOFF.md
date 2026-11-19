@@ -78,7 +78,7 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
   City Trial wartet; Kirby hat keinen Installer-Weg für vorbereitete Shader.
 - **16.6:** 141 fps vom 17.11. nicht mehr erreichbar, Code ausgeschlossen (alte Runtime/alter Übersetzer 111–124).
 - **17.18 (vertagt):** `KAR_UI_FULL=1` (aus) streckt flache Vollbild-Overlays (gelesene Slots per Reflexion);
-  Zielblitz voll, weiße Wischblende nur graue Streifen → nicht Standard. Pause-Dimmer = 17.19 (Pause rendert 6 unverbreiterte 1920×1080-Ziele).
+  Zielblitz voll, weiße Wischblende nur graue Streifen → nicht Standard. Pause-Dimmer = 17.19 (geparkt, siehe Plan).
 - **18.1-Fix 4cc67a6** (Use-after-free der anderen KI behoben). Andere KI arbeitet evtl. weiter: vor Commits fetch/status.
 - **Test-Rezepte:** Rennen `fresh_race_ms.txt`, mit Pause `fresh_race_pause_ms.txt`, Top Ride `top_ms.txt`, Fahrschule
   `school_ms.txt`, City Trial nur bildgezählt `mode_top.txt` (TOTK_FPS_LIMIT=60, landet nicht immer). Profil: Ordner mit
@@ -88,4 +88,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - **Diagnose-Schalter:** `KAR_UI_INV`, `KAR_UI_ANCHOR`, `KAR_UI_DUMP(_AUTO)`, `KAR_UI_SKIP=<f>:k<key>`, `KAR_UI_PROBE`,
   `KAR_UI_FULL_LOG`, `KAR_HUD_COLS`, `KAR_CS_LOG`, `KAR_CS_PF_LOG`, `KAR_CS_USED_MAX`.
 - **Validation (1.9, 2026-11-18):** VUID-08600 – Set 2 (Bindless) bei Draws/Dispatches nicht kompatibel gebunden, ab Menü (unabhängig von 4f37ae8). Gegenlauf KAR_BINDLESS=0 brach früh ab → wiederholen, Bind-Stellen lesen.
-- **Nächst:** Compute-Shader > 4 MiB ✅ (Grenze bleibt, 13.3). Läufe nur ohne WardogsClient. 1) 17.20 Pane-Check: wartender Lauf steht im Plan (Bind-Aufrufer, volle Blöcke, Watch), 2) CPU-Profil 4.4, 3) 2.6 Sprechblase (grep „Direct pool arrays read through the bindless set“ zeigt, ob der Patch greift), 4) 17.19 Pause-Dimmer, 5) 18.9: Kandidat-Fix (Set-2-Merker bei neuem Command-Buffer zurücksetzen) mit Validation prüfen. Geparkt: schwarzer Kirby (3.2). Module: `E:/kirby/backup/lack/`.
+- **Nächst:** (2026-11-19) 18.9 ✅ (7dae53c, Validation Air Ride + City Trial sauber). Offen: 18.10 (Pipeline-Linken, Set-2-Layouts der Bibliotheken); 17.19 geparkt (Hook auf feste 1920×1080 in f_7005b5f120 wirkungslos, Spur: Farbziele im Pausenbild); 2.6 geparkt (Blasen-Shader 5b25957debc3dc4b analysieren); 17.20 + Seitenstreifen = Nutzerentscheid. Läufe nur ohne WardogsClient. Geparkt: schwarzer Kirby (3.2). Module: `E:/kirby/backup/lack/`.
