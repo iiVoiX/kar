@@ -3107,6 +3107,28 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
             o->buffer = (VkDescriptorBufferInfo){B.sup_buf, B.sup_off, SUPPORT_BYTES};
         } else if (b->kind == GFX_RES_UBO) {
             for (uint32_t k = 0; k < cnt; k++) o[k].buffer = ubo_info(ex, st, r->slot + (int)k);
+            // KAR_BIND_PROG=<serial> (RELEASE_PLAN 2.6): which slot and buffer each uniform binding of that program gets,
+            // for the first 40 bindings logged, to compare against the shader's Binding decorations.
+            static long long bp = -2;
+            static int bp_told;
+            if (bp == -2) bp = getenv("KAR_BIND_PROG") ? atoll(getenv("KAR_BIND_PROG")) : -1;
+            static uint64_t bp_seen[64];
+            static int bp_n;
+            int bp_new = 0;
+            if (bp == 0 && ex->prog && b->binding >= 64) {   // 0: every uniform binding >= 64, once per program and binding
+                uint64_t key = ex->prog->serial * 256 + b->binding;
+                int q = 0;
+                while (q < bp_n && bp_seen[q] != key) q++;
+                if (q == bp_n && bp_n < 64) bp_seen[bp_n++] = key, bp_new = 1;
+            }
+            if (bp >= 0 && ex->prog && (bp_new || (long long)ex->prog->serial == bp) && bp_told < 60) {
+                bp_told++;
+                const p_bind_buf *u = r->slot >= 3 && r->slot - 3 < 18 ? &ex->ubo[st][r->slot - 3] : NULL;
+                rt_log("bind prog %llu: stage %d binding %u slot %d count %u -> buf %p off %llu range %llu (guest %#llx size %u)",
+                       (unsigned long long)ex->prog->serial, st, b->binding, r->slot, cnt, (void *)o[0].buffer.buffer,
+                       (unsigned long long)o[0].buffer.offset, (unsigned long long)o[0].buffer.range,
+                       u ? (unsigned long long)u->addr : 0ull, u ? (unsigned)u->size : 0u);
+            }
         } else if (b->kind == GFX_RES_SSBO) {
             for (uint32_t k = 0; k < cnt; k++) o[k].buffer = ssbo_info(ex, st, r, r->flags & 1);
         } else if (b->kind == GFX_RES_TEX || b->kind == GFX_RES_IMG) {
