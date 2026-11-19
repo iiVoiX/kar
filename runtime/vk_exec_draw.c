@@ -169,6 +169,7 @@ static struct {
     struct { p_bind_buf ssbo[16], ubo[16]; uint32_t dim[3], binst; Nvn2C0Layout lay; uint8_t has_lay;
              uint32_t roots[NVN2_ROOT_TABLES][NVN2_ROOT_WORDS]; } c0_in[4];   // what vk_c0_fill read for c0[k]
     VkPipelineLayout ds_layout;          // graphics layout the sets below were last pushed or bound with
+    VkPipelineLayout bl_layout[2];       // layout the bindless set was bound with (graphics, compute) in this command buffer
     VkDescriptorSet ds_bound[2];         // allocated set bound per set number (0: none or pushed since)
     uint32_t dyn_bound[2][32], ndyn_bound[2];   // the dynamic uniform buffer offsets it was bound with (16.5)
     VkDescriptorSet ds_last[2];          // last allocated and written set per set number, contents in DS
@@ -3302,17 +3303,20 @@ static void bind_resources_impl(VkExec *ex, const VkPipeInfo *info) {
     }
     {   // bindless (vk_bindless.c, 16.2): the global set as set 2, again after a new command buffer or layout; bound
         // before sets 0 and 1 are pushed or bound, so it does not disturb their push sets
-        static VkCommandBuffer bl_cb[2];
-        static VkPipelineLayout bl_layout[2];
+        // The state lives in B, which a new command buffer clears.
         int k = !gfx;
         VkDescriptorSet bls = info->bindless ? vk_bindless_set() : VK_NULL_HANDLE;
-        if (bls && (bl_cb[k] != ex->cb || bl_layout[k] != info->layout)) {
+        if (bls && B.bl_layout[k] != info->layout) {
             extern VkDescriptorSet vk_pipeline_empty_set(void);
             VkDescriptorSet two[2] = {vk_pipeline_empty_set(), bls};
             if (!gfx && two[0]) vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 1, 2, two, 0, NULL);
             else vkCmdBindDescriptorSets(ex->cb, info->bind_point, info->layout, 2, 1, &bls, 0, NULL);
-            bl_cb[k] = ex->cb, bl_layout[k] = info->layout;
+            B.bl_layout[k] = info->layout;
             ex->recorded++;
+        } else if (!bls && info->layout != B.bl_layout[k]) {
+            // a pipeline without set 2 binds sets 0 and 1 with another layout, which disturbs set 2: the next bindless
+            // pipeline binds it again even when its layout matches the one set 2 was bound with
+            B.bl_layout[k] = VK_NULL_HANDLE;
         }
     }
     for (uint32_t k = 0; k < n_sets; k++) {
