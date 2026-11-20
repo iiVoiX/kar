@@ -26,6 +26,8 @@
 #include "platform/platform.h"
 
 #define NFP_R_DEVICE_NOT_FOUND 0x8073u     // nfp: no NFC reader on the host
+#define LDN_R_DISABLED 0x2ccbu             // ldn: local communication off (module 203, description 22)
+#define LDN_R_BAD_STATE 0x40cbu            // ldn: not in a state for the call (description 32)
 #define ACCOUNT_R_INVALID 0x7c67u          // MacNativeGames' result for an unknown user handle or uid
 #define ACCOUNT_R_REGISTRATION_REQUIRED 0x1907cu
 #define TIME_R_INVALID 0x74u
@@ -349,6 +351,53 @@ static void ov_nfp_availability(Cpu *c) {
 static void ov_nfp_no_device(Cpu *c) { ret_x(c, NFP_R_DEVICE_NOT_FOUND); }
 static void ov_nfp_device_state(Cpu *c) { ret_x(c, 0); }   // DeviceState GetDeviceState(const DeviceHandle &): none
 
+// nn::ldn (local wireless play, Kirby Air Riders' "Lokales Spiel"): the host has no local wireless, and the SDK's
+// version opens ldn:u, which the host does not serve (it ended the game). Initialize succeeds by default, so the game
+// stays in its own flow; opening an access point or a station, creating and connecting report the feature as off,
+// and a scan finds no group. KAR_LDN_INIT=<result> makes Initialize fail with that result instead (to try other dialogs).
+static volatile int32_t ldn_state;   // nn::ldn::State: 0 None, 1 Initialized
+static void ov_ldn_initialize(Cpu *c) {
+    static int64_t r = -2;
+    if (r == -2) r = getenv("KAR_LDN_INIT") ? strtoll(getenv("KAR_LDN_INIT"), NULL, 0) : 0;
+    rt_log("ldn: Initialize (no local wireless on the host), result %#llx", (unsigned long long)r);
+    if (!r) plat_xchg32(&ldn_state, 1);
+    ret_x(c, (uint64_t)r);
+}
+static void ov_ldn_finalize(Cpu *c) { plat_xchg32(&ldn_state, 0); ret_x(c, 0); }
+static void ov_ldn_state(Cpu *c) { ret_x(c, (uint64_t)ldn_state); }
+static void ov_ldn_disabled(Cpu *c) {
+    static int told;
+    if (!told++) rt_log("ldn: local wireless requested; reported as off");
+    ret_x(c, LDN_R_DISABLED);
+}
+// Result Scan(NetworkInfo *out, int *count, int max, const ScanFilter &, int channel)
+static void ov_ldn_scan(Cpu *c) {   // nobody nearby: a failing scan left the game's search spinner turning
+    int32_t *count = arg_p(c, 1);
+    if (count) *count = 0;
+    ret_x(c, 0);
+}
+static void ov_ldn_bad_state(Cpu *c) { ret_x(c, LDN_R_BAD_STATE); }   // GetNetworkInfo: no network
+
+// nn::friends: no friend service (the SDK's version opens friend:u, which the host does not serve; Kirby Air Riders'
+// local play lobby reads the friend and blocked lists). Lists are empty, play history is accepted and dropped, the
+// registration key is zeros, and profile fetches (online) fail at once.
+#define FRIENDS_R_UNAVAILABLE 0x279u   // module 121, description 1
+// Result GetFriendList(int *count, Friend *out, const Uid &, int offset, int max, const FriendFilter &)
+static void ov_friends_list(Cpu *c) {
+    int32_t *count = arg_p(c, 0);
+    if (count) *count = 0;
+    ret_x(c, 0);
+}
+// Result GetBlockedUserList(int *count, NetworkServiceAccountId *out, const Uid &, int offset, int max)
+static void ov_friends_blocked(Cpu *c) { ov_friends_list(c); }
+// Result GetPlayHistoryRegistrationKey(PlayHistoryRegistrationKey *out, const Uid &, bool local): 0x40 bytes
+static void ov_friends_ph_key(Cpu *c) {
+    uint8_t *out = arg_p(c, 0);
+    if (out) memset(out, 0, 0x40);
+    ret_x(c, 0);
+}
+static void ov_friends_unavailable(Cpu *c) { ret_x(c, FRIENDS_R_UNAVAILABLE); }   // GetProfileList (async, online)
+
 // void err::ShowError(Result): the game's error dialog, logged
 static void ov_show_error(Cpu *c) {
     uint32_t r = (uint32_t)arg_x(c, 0);
@@ -535,6 +584,27 @@ static void ov_user_existence(Cpu *c) {
     ret_x(c, 0);
 }
 
+// Result LoadProfileImage(size_t *out_size, void *buf, size_t buf_size, const Uid &): the user's 256x256 JPEG
+// (profile_image.h). The SDK's version reads a profile service the host never opened (Kirby Air Riders' local play
+// lobby loads it; reading address 0). A null buffer asks for the size only.
+#include "profile_image.h"
+// The offline user has no network service account (Nintendo Account link). IsNetworkServiceAccountAvailable says so;
+// the calls that need one fail with "unavailable" instead of reading the profile service the host never opened.
+#define ACCOUNT_R_NSA_UNAVAILABLE 0x67cu   // module 124, description 3
+static void ov_nsa_available(Cpu *c) {
+    uint8_t *out = arg_p(c, 0);
+    if (out) *out = 0;
+    ret_x(c, 0);
+}
+static void ov_nsa_unavailable(Cpu *c) { ret_x(c, ACCOUNT_R_NSA_UNAVAILABLE); }
+static void ov_profile_image(Cpu *c) {
+    uint64_t *out_size = arg_p(c, 0);
+    uint8_t *buf = arg_p(c, 1);
+    uint64_t cap = arg_x(c, 2), n = sizeof profile_image_jpg;
+    if (out_size) *out_size = n;
+    if (buf) memcpy(buf, profile_image_jpg, n < cap ? n : cap);
+    ret_x(c, 0);
+}
 // Result GetNickname(Nickname *out, const Uid &): 33 bytes, NUL-terminated UTF-8
 static void ov_nickname(Cpu *c) {
     char *out = arg_p(c, 0);
@@ -1060,6 +1130,28 @@ HOST_OVERRIDE("_ZN2nn3nfp8GetStateEv", ov_nfp_state);
 HOST_OVERRIDE("_ZN2nn3nfp11ListDevicesEPNS0_12DeviceHandleEPii", ov_nfp_list);
 HOST_OVERRIDE("_ZN2nn3nfp29AttachAvailabilityChangeEventEPNS_2os15SystemEventTypeE", ov_nfp_availability);
 HOST_OVERRIDE("_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE", ov_nfp_device_state);
+HOST_OVERRIDE("_ZN2nn7friends13GetFriendListEPiPNS0_6FriendERKNS_7account3UidEiiRKNS0_12FriendFilterE", ov_friends_list);
+HOST_OVERRIDE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEii", ov_friends_blocked);
+HOST_OVERRIDE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", ov_friends_ph_key);
+HOST_OVERRIDE("_ZN2nn7friends14GetProfileListEPNS0_12AsyncContextEPNS0_7ProfileERKNS_7account3UidEPKNS5_23NetworkServiceAccountIdEi", ov_friends_unavailable);
+HOST_OVERRIDE("_ZN2nn3ldn10InitializeEv", ov_ldn_initialize);
+HOST_OVERRIDE("_ZN2nn3ldn8FinalizeEv", ov_ldn_finalize);
+HOST_OVERRIDE("_ZN2nn3ldn8GetStateEv", ov_ldn_state);
+HOST_OVERRIDE("_ZN2nn3ldn15OpenAccessPointEv", ov_ldn_disabled);
+HOST_OVERRIDE("_ZN2nn3ldn11OpenStationEv", ov_ldn_disabled);
+HOST_OVERRIDE("_ZN2nn3ldn13CreateNetworkERKNS0_13NetworkConfigERKNS0_14SecurityConfigERKNS0_10UserConfigE", ov_ldn_disabled);
+HOST_OVERRIDE("_ZN2nn3ldn7ConnectERKNS0_11NetworkInfoERKNS0_14SecurityConfigERKNS0_10UserConfigEiNS0_13ConnectOptionE", ov_ldn_disabled);
+HOST_OVERRIDE("_ZN2nn3ldn4ScanEPNS0_11NetworkInfoEPiiRKNS0_10ScanFilterEi", ov_ldn_scan);
+HOST_OVERRIDE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoE", ov_ldn_bad_state);
+HOST_OVERRIDE("_ZN2nn3ldn14GetNetworkInfoEPNS0_11NetworkInfoEPNS0_16NodeLatestUpdateEi", ov_ldn_bad_state);
+HOST_OVERRIDE("_ZN2nn3ldn10DisconnectEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ldn12CloseStationEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ldn14DestroyNetworkEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ldn16CloseAccessPointEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ldn11SetProtocolENS0_8ProtocolE", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp9GetNpadIdEPjRKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_no_device);
@@ -1126,6 +1218,12 @@ HOST_OVERRIDE("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNinten
 HOST_OVERRIDE("_ZN2nn7account17GetLastOpenedUserEPNS0_3UidE", ov_last_opened_user);
 HOST_OVERRIDE("_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE", ov_user_existence);
 HOST_OVERRIDE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", ov_nickname);
+HOST_OVERRIDE("_ZN2nn7account16LoadProfileImageEPmPvmRKNS0_3UidE", ov_profile_image);
+HOST_OVERRIDE("_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserHandleE", ov_nsa_available);
+HOST_OVERRIDE("_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE", ov_nsa_unavailable);
+HOST_OVERRIDE("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", ov_nsa_unavailable);
+HOST_OVERRIDE("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE", ov_nsa_unavailable);
+HOST_OVERRIDE("_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncContextERKNS0_10UserHandleE", ov_nsa_unavailable);
 
 HOST_OVERRIDE("_ZN2nn4time10InitializeEv", ov_time_initialize);
 HOST_OVERRIDE("_ZN2nn4time8FinalizeEv", ov_time_finalize);
