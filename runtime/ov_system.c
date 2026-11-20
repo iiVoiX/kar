@@ -418,9 +418,9 @@ static void ov_album_list(Cpu *c) {
 }
 
 // nn::ngc::ProfanityFilter (the SDK's version opens ngc:u): no word list on the host, so nothing is masked.
-// Result MaskProfanityWordsInText(int *count, char *text, uint32_t regions)
+// Result ProfanityFilter::MaskProfanityWordsInText(int *count, char *text, uint32_t regions): x0 is this
 static void ov_ngc_mask(Cpu *c) {
-    int32_t *count = arg_p(c, 0);
+    int32_t *count = arg_p(c, 1);
     if (count) *count = 0;
     ret_x(c, 0);
 }
