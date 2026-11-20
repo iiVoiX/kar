@@ -398,6 +398,44 @@ static void ov_friends_ph_key(Cpu *c) {
 }
 static void ov_friends_unavailable(Cpu *c) { ret_x(c, FRIENDS_R_UNAVAILABLE); }   // GetProfileList (async, online)
 
+// nn::album (capture album: screenshots, replay videos): the SDK's version opens caps services the host does not serve.
+// Kirby Air Riders writes replay videos through the movie writer and loads album pictures. Nothing is stored on the
+// host yet: saving, writing and loading fail with an album error the game can report, lists are empty.
+#define ALBUM_R_UNAVAILABLE 0x4ceu   // module 206, description 2
+static void ov_album_fail(Cpu *c) {
+    static int told;
+    if (!told++) rt_log("album: capture album requested; not available on the host");
+    ret_x(c, ALBUM_R_UNAVAILABLE);
+}
+static void ov_album_false(Cpu *c) { ret_x(c, 0); }                    // IsMovieWriterInitialized/Running
+static void ov_album_work_size(Cpu *c) { ret_x(c, 0x100000); }         // GetMovieWriterRequiredWorkMemorySize
+static void ov_album_work_align(Cpu *c) { ret_x(c, 0x1000); }          // ...Alignment
+// Result GetExtraMovieFileList(int *count, AlbumFileEntry *out, int max)
+static void ov_album_list(Cpu *c) {
+    int32_t *count = arg_p(c, 0);
+    if (count) *count = 0;
+    ret_x(c, 0);
+}
+
+// nn::ngc::ProfanityFilter (the SDK's version opens ngc:u): no word list on the host, so nothing is masked.
+// Result MaskProfanityWordsInText(int *count, char *text, uint32_t regions)
+static void ov_ngc_mask(Cpu *c) {
+    int32_t *count = arg_p(c, 0);
+    if (count) *count = 0;
+    ret_x(c, 0);
+}
+static void ov_void(Cpu *c) { (void)c; }
+// int CountNumbers(const char *utf8): ASCII and full-width digits
+static void ov_ngc_count_numbers(Cpu *c) {
+    const uint8_t *t = arg_p(c, 0);
+    int n = 0;
+    for (; t && *t; t++) {
+        if (*t >= '0' && *t <= '9') n++;
+        else if (t[0] == 0xef && t[1] == 0xbc && t[2] >= 0x90 && t[2] <= 0x99) n++, t += 2;   // U+FF10..U+FF19
+    }
+    ret_x(c, (uint64_t)n);
+}
+
 // void err::ShowError(Result): the game's error dialog, logged
 static void ov_show_error(Cpu *c) {
     uint32_t r = (uint32_t)arg_x(c, 0);
@@ -1135,6 +1173,35 @@ HOST_OVERRIDE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkService
 HOST_OVERRIDE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", ov_friends_ph_key);
 HOST_OVERRIDE("_ZN2nn7friends14GetProfileListEPNS0_12AsyncContextEPNS0_7ProfileERKNS_7account3UidEPKNS5_23NetworkServiceAccountIdEi", ov_friends_unavailable);
+HOST_OVERRIDE("_ZN2nn5album10InitializeEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5album8FinalizeEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5album14LoadAlbumImageEPiS1_PmPvmS3_mS3_mRKNS0_14AlbumFileEntryE", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album23LoadAlbumThumbnailImageEPiS1_PmPvmS3_mS3_mRKNS0_14AlbumFileEntryE", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album21SaveCurrentScreenshotENS0_17AlbumReportOptionE", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album21InitializeMovieWriterEPvm", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album19FinalizeMovieWriterEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5album16AbortMovieWriterEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5album24IsMovieWriterInitializedEv", ov_album_false);
+HOST_OVERRIDE("_ZN2nn5album20IsMovieWriterRunningEv", ov_album_false);
+HOST_OVERRIDE("_ZN2nn5album21CheckMovieWriterErrorEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5album26PrecheckToStartMovieWriterEm", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album16StartMovieWriterERKNS0_25MovieWriterMovieParameterE", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album25WriteMp4DataToMovieWriterEmPKvm", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album17FinishMovieWriterEPNS0_14AlbumFileEntryEPKvmS4_mNS0_9ImageSizeE", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album36GetMovieWriterRequiredWorkMemorySizeEv", ov_album_work_size);
+HOST_OVERRIDE("_ZN2nn5album41GetMovieWriterRequiredWorkMemoryAlignmentEv", ov_album_work_align);
+HOST_OVERRIDE("_ZN2nn5album21GetExtraMovieFileListEPiPNS0_14AlbumFileEntryEi", ov_album_list);
+HOST_OVERRIDE("_ZN2nn5album20DeleteExtraMovieFileERKNS0_14AlbumFileEntryE", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album20OpenAlbumMovieStreamEPNS0_17MovieStreamHandleERKNS0_14AlbumFileEntryE", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album20ReadAlbumMovieStreamEPmPvmNS0_17MovieStreamHandleEl", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album23GetAlbumMovieStreamSizeEPmNS0_17MovieStreamHandleE", ov_album_fail);
+HOST_OVERRIDE("_ZN2nn5album21CloseAlbumMovieStreamENS0_17MovieStreamHandleE", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ngc15ProfanityFilter10InitializeEPvm", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ngc15ProfanityFilter11SetMaskModeENS1_8MaskModeE", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ngc15ProfanityFilter15SkipAtSignCheckENS1_8SkipModeE", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn3ngc15ProfanityFilter24MaskProfanityWordsInTextEPiPcj", ov_ngc_mask);
+HOST_OVERRIDE("_ZN2nn3ngc15ProfanityFilterD1Ev", ov_void);
+HOST_OVERRIDE("_ZN2nn3ngc12CountNumbersEPKc", ov_ngc_count_numbers);
 HOST_OVERRIDE("_ZN2nn3ldn10InitializeEv", ov_ldn_initialize);
 HOST_OVERRIDE("_ZN2nn3ldn8FinalizeEv", ov_ldn_finalize);
 HOST_OVERRIDE("_ZN2nn3ldn8GetStateEv", ov_ldn_state);
