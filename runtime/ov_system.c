@@ -337,6 +337,9 @@ static void ov_nfp_finalize(Cpu *c) { plat_xchg32(&nfp_state, 0); ret_x(c, 0); }
 static void ov_nfp_state(Cpu *c) { ret_x(c, (uint64_t)nfp_state); }
 // Result ListDevices(DeviceHandle *out, int *count, int max)
 static void ov_nfp_list(Cpu *c) {
+    static int told;
+    char lr[96];
+    if (told++ < 10) rt_log("nfp: ListDevices from %s -> none", caller(c, lr, sizeof lr));
     int32_t *count = arg_p(c, 1);
     if (count) *count = 0;
     ret_x(c, NFP_R_DEVICE_NOT_FOUND);
@@ -348,7 +351,12 @@ static void ov_nfp_availability(Cpu *c) {
     kern_bind_system_event(c, ev, 0);
     ret_x(c, 0);
 }
-static void ov_nfp_no_device(Cpu *c) { ret_x(c, NFP_R_DEVICE_NOT_FOUND); }
+static void ov_nfp_no_device(Cpu *c) {
+    static int told;
+    char lr[96];
+    if (told++ < 40) rt_log("nfp: call from %s -> no device", caller(c, lr, sizeof lr));
+    ret_x(c, NFP_R_DEVICE_NOT_FOUND);
+}
 static void ov_nfp_device_state(Cpu *c) { ret_x(c, 0); }   // DeviceState GetDeviceState(const DeviceHandle &): none
 
 // nn::ldn (local wireless play, Kirby Air Riders' "Lokales Spiel"): the host has no local wireless, and the SDK's
