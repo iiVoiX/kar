@@ -210,11 +210,45 @@ static void commit(uint64_t a, uint64_t n, const char *what) {
     if (!ok) rt_fatal("memory: commit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
 
+// Readability generation: starts at 1 and goes up after every change that can leave pages unreadable (a decommit, a
+// protection change to none; not a freeze or a thaw). lost_ring keeps the range of the latest LOST_N such changes, the
+// one that ended generation g at g % LOST_N (frz_lock). vk_texture.c upload skips its VirtualQuery walk while no
+// change since its last walk touched the texture: on a large committed region one VirtualQuery scans every page table
+// entry to the region's end, which made single City Trial submissions take 150 ms (RELEASE_PLAN 7.3). Thread stacks
+// are mapped and unmapped all the time, so a plain counter would force the walk again and again.
+#define LOST_N 256
+static volatile int64_t layout_gen = 1;
+static uint64_t lost_ring[LOST_N][2];
+
+uint64_t mem_layout_gen(void) { return (uint64_t)__atomic_load_n(&layout_gen, __ATOMIC_ACQUIRE); }
+
+static void lost_locked(uint64_t a, uint64_t n) {   // frz_lock held
+    uint64_t g = (uint64_t)layout_gen;
+    lost_ring[g % LOST_N][0] = a, lost_ring[g % LOST_N][1] = n;
+    __atomic_store_n(&layout_gen, (int64_t)g + 1, __ATOMIC_RELEASE);
+}
+
+uint64_t mem_readable_since(uint64_t a, uint64_t n, uint64_t since) {
+    uint64_t now = mem_layout_gen();
+    if (since == now) return now;
+    if (!since || since > now) return 0;
+    plat_mutex_lock(&frz_lock);
+    now = (uint64_t)layout_gen;
+    int kept = now - since <= LOST_N;
+    for (uint64_t g = since; kept && g < now; g++) {
+        const uint64_t *r = lost_ring[g % LOST_N];
+        if (r[0] < a + n && a < r[0] + r[1]) kept = 0;
+    }
+    plat_mutex_unlock(&frz_lock);
+    return kept ? now : 0;
+}
+
 static void decommit(uint64_t a, uint64_t n, const char *what) {
     plat_mutex_lock(&frz_lock);
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_decommit(a, n);
     if (ok) plat_add64(&guest_committed, -(int64_t)n);
+    lost_locked(a, n);
     plat_mutex_unlock(&frz_lock);
     if (!ok) rt_fatal("memory: decommit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
@@ -223,6 +257,7 @@ static void protect(uint64_t a, uint64_t n, int prot, const char *what) {
     plat_mutex_lock(&frz_lock);
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_protect(a, n, prot);
+    if (prot == PLAT_PROT_NONE) lost_locked(a, n);
     plat_mutex_unlock(&frz_lock);
     if (!ok) rt_fatal("memory: protect %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }

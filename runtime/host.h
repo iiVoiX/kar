@@ -154,6 +154,10 @@ uint32_t mem_map_physical(uint64_t a, uint64_t n);                              
 uint32_t mem_unmap_physical(uint64_t a, uint64_t n);                            // 0x2D
 int mem_info(uint32_t id, uint64_t *out);                  // GetInfo memory ids 2-7, 12-17, 21, 22, 28; 0 if not a memory id
 void *mem_kernel_alloc(uint64_t size, uint64_t align);     // zeroed, guest-visible, in the kernel region; align <= 64 KiB
+uint64_t mem_layout_gen(void);                             // goes up with every change that can leave pages unreadable
+uint64_t mem_readable_since(uint64_t a, uint64_t n, uint64_t since);
+                                                           // the current generation if no such change since
+                                                           // generation `since` touched [a, a+n), else 0
 uint64_t mem_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max);
                                                            // GetWriteWatch(RESET): fills pages[] (4 KiB addresses)
                                                            // with the pages of [addr, addr+size) written since the

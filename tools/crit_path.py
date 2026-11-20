@@ -6,7 +6,7 @@ the wake that ended the wait names the waker: the time from that signal to the e
 the walk goes on on the waker at the moment it signalled. A wait no guest thread ended (a timeout, a host signal)
 counts whole. The sums per frame add up to the frame interval.
 
-Usage: crit_path.py <crit.bin> [--top N]
+Usage: crit_path.py <crit.bin> [--top N] [--host-sites] [--slow MS]   (--slow: each frame over MS on its own)
 """
 import argparse
 import bisect
@@ -45,6 +45,7 @@ def main():
     ap.add_argument('crit')
     ap.add_argument('--top', type=int, default=30)
     ap.add_argument('--host-sites', action='store_true', help='split host time by the host call site')
+    ap.add_argument('--slow', type=float, default=0, help='also list each frame longer than this many ms on its own')
     a = ap.parse_args()
     threads, ev = load(a.crit)
     seg = defaultdict(lambda: ([], [], [], []))   # per thread: starts, states, wakers at the start, wait objects
@@ -66,7 +67,7 @@ def main():
             frames.append((int(e['ts']), int(e['a']), int(e['obj'])))
     tot = Counter()
     lens = []
-    for (t0, p0, _), (t1, p1, _) in zip(frames, frames[1:]):
+    for (t0, p0, _), (t1, p1, f1) in zip(frames, frames[1:]):
         x, t, steps = p1, t1, 0
         acc = Counter()
         while t > t0 and steps < 100000:
@@ -104,6 +105,9 @@ def main():
                 t = lo
         tot.update(acc)
         lens.append(t1 - t0)
+        if a.slow and t1 - t0 > a.slow * 1e6:   # a spike: its own path, the biggest parts first
+            parts = ', '.join(f'{label(h, threads)} {kind} {ns / 1e6:.1f}' for (h, kind), ns in acc.most_common(5))
+            print(f'frame {f1}: {(t1 - t0) / 1e6:.1f} ms: {parts}')
     n = len(lens)
     if not n:
         raise SystemExit('fewer than two presents recorded')

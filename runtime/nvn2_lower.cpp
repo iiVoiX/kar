@@ -167,7 +167,7 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
                                 static_cast<uint8_t>(tex_entries > 255 ? 255 : tex_entries)};
         {   // KAR diagnostic: the raw count bytes, to place the handle entries the layout does not count yet
             static int told;
-            if (told++ < 400) {
+            if (told++ < 16) {
                 char hx[3 * 24 + 1];
                 for (int i = 0; i < 24; i++) std::snprintf(hx + 3 * i, 4, "%02x ", control[0xa8 + i]);
                 rt_log("nvn2 cs counts: ub %u ss %u tx %u b4 %u b5 %u im %u | a8.. %s", control[0xb1], control[0xb2],

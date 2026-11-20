@@ -43,6 +43,8 @@ typedef struct Tex {
     VmaAllocation alloc;          // own memory; NULL when bound into pool memory
     VmaAllocation bound_to;       // the pool memory it is bound into
     uint32_t wgen;                // page generation of the last upload check
+    uint64_t rgen;                // mem_layout_gen when the storage was last found readable (0: not yet)
+    uint64_t rmem, rsize;         // the storage range that check covered
     uint32_t checked;             // submit_epoch of the last check from a draw binding
     int uploaded, released;
     uint32_t n_up;                // uploads of this entry (vk_texture_debug)
@@ -636,11 +638,20 @@ static void upload(Tex *e) {
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
     if (!bpb || !t->mem) return;
     // Storage that runs into pages nobody mapped (a descriptor the game never backed, or one we size wrongly) would
-    // fault in the deswizzle: such a texture is read as zeros instead. Every page run must be readable.
+    // fault in the deswizzle: such a texture is read as zeros instead. Every page run must be readable. The walk is
+    // skipped while no page changed its commit or protection since the storage was last found readable (memory.c
+    // mem_readable_since): one VirtualQuery can cost milliseconds on a large region, and re-uploads are frequent.
     int readable = 1;
-    for (uint64_t a = (uintptr_t)t->mem, lim = a + t->L.size, end; a < lim; a = end) {
-        int s = plat_mem_state(a, lim, &end);
-        if ((s != PLAT_PROT_RW && s != PLAT_PROT_READ) || end <= a) { readable = 0; break; }
+    uint64_t gen = mem_layout_gen(), kept = 0;
+    if (e->rgen && (uintptr_t)t->mem == e->rmem && t->L.size == e->rsize)
+        kept = mem_readable_since((uintptr_t)t->mem, t->L.size, e->rgen);
+    if (kept) e->rgen = kept;
+    else {
+        for (uint64_t a = (uintptr_t)t->mem, lim = a + t->L.size, end; a < lim; a = end) {
+            int s = plat_mem_state(a, lim, &end);
+            if ((s != PLAT_PROT_RW && s != PLAT_PROT_READ) || end <= a) { readable = 0; break; }
+        }
+        e->rgen = readable ? gen : 0, e->rmem = (uintptr_t)t->mem, e->rsize = t->L.size;
     }
     if (!readable) {
         static volatile int32_t n_unmapped;

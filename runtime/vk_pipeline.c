@@ -1280,7 +1280,8 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
             w = fmz, words = fmz_n;
             uint64_t h = 0xcbf29ce484222325ull;
             for (uint64_t i = 0; i < words * 4; i++) h = (h ^ ((const uint8_t *)w)[i]) * 0x100000001b3ull;
-            rt_log("vk: FMZ rewrite %016llx mul=%u fma=%u", (unsigned long long)h, nm, nf);
+            static int told;   // one line per module came to over a thousand in City Trial, on the submit path
+            if (told++ < 16) rt_log("vk: FMZ rewrite %016llx mul=%u fma=%u", (unsigned long long)h, nm, nf);
         }
     }
     spv_dump(w, words, src);

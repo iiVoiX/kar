@@ -1160,7 +1160,8 @@ static void ov_display_resolution(Cpu *c) {
     if (kar_wide_size(&a, &b)) dw = a, dh = b;   // KAR_DISPLAY_RES, or the ultrawide setting's output size (kar_wide.c)
     if (w) *w = dw;
     if (h) *h = dh;
-    rt_log("oe: GetDefaultDisplayResolution -> %dx%d (caller %#llx)", dw, dh, (unsigned long long)c->x[30]);
+    static int told;   // the game asks every frame: the first few calls show the size
+    if (told++ < 4) rt_log("oe: GetDefaultDisplayResolution -> %dx%d (caller %#llx)", dw, dh, (unsigned long long)c->x[30]);
 }
 HOST_OVERRIDE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", ov_display_resolution);
 
