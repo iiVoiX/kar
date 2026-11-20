@@ -404,10 +404,22 @@ static void ov_friends_unavailable(Cpu *c) { ret_x(c, FRIENDS_R_UNAVAILABLE); } 
 #define ALBUM_R_UNAVAILABLE 0x4ceu   // module 206, description 2
 static void ov_album_fail(Cpu *c) {
     static int told;
-    if (!told++) rt_log("album: capture album requested; not available on the host");
+    char lr[96];
+    if (told++ < 40) rt_log("album: call from %s fails (album not available on the host)", caller(c, lr, sizeof lr));
     ret_x(c, ALBUM_R_UNAVAILABLE);
 }
-static void ov_album_false(Cpu *c) { ret_x(c, 0); }                    // IsMovieWriterInitialized/Running
+static void album_note(Cpu *c, const char *what) {   // every album call, capped, with its caller
+    static int told;
+    char lr[96];
+    if (told++ < 40) rt_log("album: %s from %s", what, caller(c, lr, sizeof lr));
+}
+// The movie writer initialises (the replay screen waited for it otherwise); only starting a recording fails.
+static volatile int32_t album_mw;
+static void ov_album_mw_init(Cpu *c) { album_note(c, "InitializeMovieWriter"); plat_xchg32(&album_mw, 1); ret_x(c, 0); }
+static void ov_album_mw_fini(Cpu *c) { album_note(c, "FinalizeMovieWriter"); plat_xchg32(&album_mw, 0); ret_x(c, 0); }
+static void ov_album_mw_ready(Cpu *c) { ret_x(c, (uint64_t)album_mw); }   // IsMovieWriterInitialized
+static void ov_album_ok(Cpu *c) { album_note(c, "call"); ret_x(c, 0); }
+static void ov_album_false(Cpu *c) { ret_x(c, 0); }                    // IsMovieWriterRunning
 static void ov_album_work_size(Cpu *c) { ret_x(c, 0x100000); }         // GetMovieWriterRequiredWorkMemorySize
 static void ov_album_work_align(Cpu *c) { ret_x(c, 0x1000); }          // ...Alignment
 // Result GetExtraMovieFileList(int *count, AlbumFileEntry *out, int max)
@@ -1173,17 +1185,17 @@ HOST_OVERRIDE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkService
 HOST_OVERRIDE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", ov_friends_ph_key);
 HOST_OVERRIDE("_ZN2nn7friends14GetProfileListEPNS0_12AsyncContextEPNS0_7ProfileERKNS_7account3UidEPKNS5_23NetworkServiceAccountIdEi", ov_friends_unavailable);
-HOST_OVERRIDE("_ZN2nn5album10InitializeEv", ov_result_ok);
-HOST_OVERRIDE("_ZN2nn5album8FinalizeEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5album10InitializeEv", ov_album_ok);
+HOST_OVERRIDE("_ZN2nn5album8FinalizeEv", ov_album_ok);
 HOST_OVERRIDE("_ZN2nn5album14LoadAlbumImageEPiS1_PmPvmS3_mS3_mRKNS0_14AlbumFileEntryE", ov_album_fail);
 HOST_OVERRIDE("_ZN2nn5album23LoadAlbumThumbnailImageEPiS1_PmPvmS3_mS3_mRKNS0_14AlbumFileEntryE", ov_album_fail);
 HOST_OVERRIDE("_ZN2nn5album21SaveCurrentScreenshotENS0_17AlbumReportOptionE", ov_album_fail);
-HOST_OVERRIDE("_ZN2nn5album21InitializeMovieWriterEPvm", ov_album_fail);
-HOST_OVERRIDE("_ZN2nn5album19FinalizeMovieWriterEv", ov_result_ok);
-HOST_OVERRIDE("_ZN2nn5album16AbortMovieWriterEv", ov_result_ok);
-HOST_OVERRIDE("_ZN2nn5album24IsMovieWriterInitializedEv", ov_album_false);
+HOST_OVERRIDE("_ZN2nn5album21InitializeMovieWriterEPvm", ov_album_mw_init);
+HOST_OVERRIDE("_ZN2nn5album19FinalizeMovieWriterEv", ov_album_mw_fini);
+HOST_OVERRIDE("_ZN2nn5album16AbortMovieWriterEv", ov_album_ok);
+HOST_OVERRIDE("_ZN2nn5album24IsMovieWriterInitializedEv", ov_album_mw_ready);
 HOST_OVERRIDE("_ZN2nn5album20IsMovieWriterRunningEv", ov_album_false);
-HOST_OVERRIDE("_ZN2nn5album21CheckMovieWriterErrorEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5album21CheckMovieWriterErrorEv", ov_album_ok);
 HOST_OVERRIDE("_ZN2nn5album26PrecheckToStartMovieWriterEm", ov_album_fail);
 HOST_OVERRIDE("_ZN2nn5album16StartMovieWriterERKNS0_25MovieWriterMovieParameterE", ov_album_fail);
 HOST_OVERRIDE("_ZN2nn5album25WriteMp4DataToMovieWriterEmPKvm", ov_album_fail);
@@ -1195,7 +1207,7 @@ HOST_OVERRIDE("_ZN2nn5album20DeleteExtraMovieFileERKNS0_14AlbumFileEntryE", ov_a
 HOST_OVERRIDE("_ZN2nn5album20OpenAlbumMovieStreamEPNS0_17MovieStreamHandleERKNS0_14AlbumFileEntryE", ov_album_fail);
 HOST_OVERRIDE("_ZN2nn5album20ReadAlbumMovieStreamEPmPvmNS0_17MovieStreamHandleEl", ov_album_fail);
 HOST_OVERRIDE("_ZN2nn5album23GetAlbumMovieStreamSizeEPmNS0_17MovieStreamHandleE", ov_album_fail);
-HOST_OVERRIDE("_ZN2nn5album21CloseAlbumMovieStreamENS0_17MovieStreamHandleE", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5album21CloseAlbumMovieStreamENS0_17MovieStreamHandleE", ov_album_ok);
 HOST_OVERRIDE("_ZN2nn3ngc15ProfanityFilter10InitializeEPvm", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3ngc15ProfanityFilter11SetMaskModeENS1_8MaskModeE", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3ngc15ProfanityFilter15SkipAtSignCheckENS1_8SkipModeE", ov_result_ok);
