@@ -330,6 +330,16 @@ static void ov_report_save(Cpu *c) {   // Result PlayReport::Save() and Save(con
 }
 static void ov_result_ok(Cpu *c) { ret_x(c, 0); }   // RequestImmediateTransmission, AddInternetConnectionStatus
 
+// KAR_AMIIBO=1 (RELEASE_PLAN 3.10, stage "reader, no figure"): one NFC reader on the controller in use, which
+// searches and never finds a figure. Off by default: without figure data a reader only keeps the game waiting.
+static int nfp_reader(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_AMIIBO") && *getenv("KAR_AMIIBO") == '1';
+    return on;
+}
+#define NFP_HANDLE 0x4e46u                 // the one DeviceHandle (8 bytes; the value is ours)
+static volatile int32_t nfp_dev_state;     // nn::nfp::DeviceState: 0 Init, 1 Search, 2 Active, 3 Deactive, 4 Mount
+static uint64_t nfp_ev_activate, nfp_ev_deactivate;
 // nn::nfp: no NFC reader
 static volatile int32_t nfp_state;
 static void ov_nfp_initialize(Cpu *c) { plat_xchg32(&nfp_state, 1); ret_x(c, 0); }
@@ -339,8 +349,15 @@ static void ov_nfp_state(Cpu *c) { ret_x(c, (uint64_t)nfp_state); }
 static void ov_nfp_list(Cpu *c) {
     static int told;
     char lr[96];
-    if (told++ < 10) rt_log("nfp: ListDevices from %s -> none", caller(c, lr, sizeof lr));
+    if (told++ < 10) rt_log("nfp: ListDevices from %s -> %s", caller(c, lr, sizeof lr), nfp_reader() ? "one reader" : "none");
     int32_t *count = arg_p(c, 1);
+    if (nfp_reader()) {
+        uint64_t *out = arg_p(c, 0);
+        if (out && arg_x(c, 2) >= 1) out[0] = NFP_HANDLE;
+        if (count) *count = 1;
+        ret_x(c, 0);
+        return;
+    }
     if (count) *count = 0;
     ret_x(c, NFP_R_DEVICE_NOT_FOUND);
 }
@@ -357,7 +374,36 @@ static void ov_nfp_no_device(Cpu *c) {
     if (told++ < 40) rt_log("nfp: call from %s -> no device", caller(c, lr, sizeof lr));
     ret_x(c, NFP_R_DEVICE_NOT_FOUND);
 }
-static void ov_nfp_device_state(Cpu *c) { ret_x(c, 0); }   // DeviceState GetDeviceState(const DeviceHandle &): none
+static void ov_nfp_device_state(Cpu *c) { ret_x(c, nfp_reader() ? (uint64_t)nfp_dev_state : 0); }   // GetDeviceState
+// Result GetNpadId(uint32_t *out, const DeviceHandle &): the controller in use
+static void ov_nfp_npad(Cpu *c) {
+    if (!nfp_reader()) { ov_nfp_no_device(c); return; }
+    uint32_t *out = arg_p(c, 0);
+    if (out) *out = ov_handheld() ? 0x20u : 0u;
+    ret_x(c, 0);
+}
+// Result Attach{Activate,Deactivate}Event(os::SystemEventType *, const DeviceHandle &)
+static void ov_nfp_attach(Cpu *c, uint64_t *slot) {
+    if (!nfp_reader()) { ov_nfp_no_device(c); return; }
+    uint64_t ev = arg_x(c, 0);
+    if (!ev) rt_fatal("nn::nfp: attach of a null event");
+    kern_bind_system_event(c, ev, 0);
+    *slot = ev;
+    ret_x(c, 0);
+}
+static void ov_nfp_attach_activate(Cpu *c) { ov_nfp_attach(c, &nfp_ev_activate); }
+static void ov_nfp_attach_deactivate(Cpu *c) { ov_nfp_attach(c, &nfp_ev_deactivate); }
+static void ov_nfp_start_detection(Cpu *c) {
+    if (!nfp_reader()) { ov_nfp_no_device(c); return; }
+    rt_log("nfp: StartDetection (no figure on the virtual reader)");
+    plat_xchg32(&nfp_dev_state, 1);
+    ret_x(c, 0);
+}
+static void ov_nfp_stop_detection(Cpu *c) {
+    if (!nfp_reader()) { ov_nfp_no_device(c); return; }
+    plat_xchg32(&nfp_dev_state, 0);
+    ret_x(c, 0);
+}
 
 // nn::ldn (local wireless play, Kirby Air Riders' "Lokales Spiel"): the host has no local wireless, and the SDK's
 // version opens ldn:u, which the host does not serve (it ended the game). Initialize succeeds by default, so the game
@@ -1240,9 +1286,9 @@ HOST_OVERRIDE("_ZN2nn3ldn11SetProtocolENS0_8ProtocolE", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp9GetNpadIdEPjRKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp9GetNpadIdEPjRKNS0_12DeviceHandleE", ov_nfp_npad);
+HOST_OVERRIDE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_attach_activate);
+HOST_OVERRIDE("_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_attach_deactivate);
 // Kirby Air Riders' amiibo forms: the extended-area initialisation as Initialize; with no reader, every device
 // operation and amiibo settings applet answers "device not found", as the others above.
 HOST_OVERRIDE("_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv", ov_nfp_initialize);
@@ -1269,8 +1315,8 @@ HOST_OVERRIDE("_ZN2nn3nfp13StartRestorerEPNS0_12DeviceHandleERKNS0_24AmiiboSetti
               ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE",
               ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp14StartDetectionERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp13StopDetectionERKNS0_12DeviceHandleE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp14StartDetectionERKNS0_12DeviceHandleE", ov_nfp_start_detection);
+HOST_OVERRIDE("_ZN2nn3nfp13StopDetectionERKNS0_12DeviceHandleE", ov_nfp_stop_detection);
 HOST_OVERRIDE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3err9ShowErrorENS_6ResultE", ov_show_error);
