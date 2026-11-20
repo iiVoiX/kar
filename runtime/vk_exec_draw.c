@@ -1324,8 +1324,13 @@ static VkDescriptorBufferInfo c2_info(VkExec *ex, int st) {
     memset(tmp, 0, sizeof tmp);
     for (int s = 0; s < 32; s++) memcpy(tmp + 0x20 + 8 * s, &ex->tex[st][s], 8);
     for (int s = 0; s < 8; s++) memcpy(tmp + 0x120 + 8 * s, &ex->img[st][s], 8);
-    for (int s = 0; s < 128; s++) memcpy(tmp + 0x168 + 8 * s, &ex->tex[st][s], 8);
-    for (int s = 0; s < 32; s++) memcpy(tmp + 0x568 + 8 * s, &ex->samp[st][s], 8);
+    static int sep = -1, smp = -1;   // KAR_C2_SEP / KAR_C2_SAMP (experiment): other table bases
+    if (sep < 0) sep = getenv("KAR_C2_SEP") ? (int)strtol(getenv("KAR_C2_SEP"), NULL, 0) : 0x168;
+    if (smp < 0) smp = getenv("KAR_C2_SAMP") ? (int)strtol(getenv("KAR_C2_SAMP"), NULL, 0) : 0x568;
+    for (int s = 0; s < 128; s++)
+        if (sep + 8 * s + 8 <= C2_BYTES) memcpy(tmp + sep + 8 * s, &ex->tex[st][s], 8);
+    for (int s = 0; s < 32; s++)
+        if (smp + 8 * s + 8 <= C2_BYTES) memcpy(tmp + smp + 8 * s, &ex->samp[st][s], 8);
     {   // KAR_C2_LOG=<serial>: the handle words this program's stage gets (0: any fragment stage; first 40 calls)
         static long long lp = -2;
         static int lt;
@@ -1334,9 +1339,9 @@ static VkDescriptorBufferInfo c2_info(VkExec *ex, int st) {
             lp = e ? atoll(e) : -1;
             if (e && !strncmp(e, "fs:", 3)) lp = 0, c2_log_fs = strtoull(e + 3, NULL, 16);
         }
-        if (lp >= 0 && ex->prog && ((long long)ex->prog->serial == lp || (lp == 0 && st == NVN_STAGE_FS && c2_cur_fs == c2_log_fs)) && lt++ < 40) {
+        if (lp >= 0 && ex->prog && ((long long)ex->prog->serial == lp || (lp == 0 && st == NVN_STAGE_FS && c2_cur_fs == c2_log_fs)) && lt++ < 2000) {
             const uint32_t *w = (const uint32_t *)tmp;
-            char t[600];
+            char t[1200];
             int o = 0;
             for (int i = 0; i < C2_BYTES / 4; i++)
                 if (w[i] && o < 560) o += snprintf(t + o, sizeof t - (size_t)o, " +%#x=%08x", i * 4, w[i]);
@@ -1353,6 +1358,14 @@ static VkDescriptorBufferInfo c2_info(VkExec *ex, int st) {
                     }
                 }
             }
+            for (int k = 0; k < 8; k++) {   // every bound user uniform slot with its words 44, 48 and 51
+                const p_bind_buf *u = &ex->ubo[st][k];
+                if (!u->addr || u->size < 0xd0) continue;
+                const uint32_t *q = (const uint32_t *)(uintptr_t)u->addr;
+                rt_log("c2 prog %llu uslot %d %#llx size %llu: w0 %08x w44 %08x w48 %08x w51 %08x",
+                       (unsigned long long)ex->prog->serial, k, (unsigned long long)u->addr, (unsigned long long)u->size,
+                       q[0], q[44], q[48], q[51]);
+            }
             const p_bind_buf *u5 = &ex->ubo[st][2];
             if (u5->addr && u5->size >= 0x100) {
                 const uint32_t *q = (const uint32_t *)(uintptr_t)u5->addr;
@@ -1363,11 +1376,18 @@ static VkDescriptorBufferInfo c2_info(VkExec *ex, int st) {
             const p_bind_buf *sb = &ex->ssbo[st][1];   // the bubble's colour records: 224 bytes, mul at +192, add at +208
             o = 0;
             if (sb->addr)
-                for (uint64_t r = 0; r * 224 + 224 <= sb->size && r < 12 && o < 560; r++) {
-                    const float *f = (const float *)(uintptr_t)(sb->addr + r * 224 + 192);
-                    o += snprintf(t + o, sizeof t - (size_t)o, " r%llu mul %.2f,%.2f,%.2f,%.2f add %.2f,%.2f,%.2f,%.2f;",
-                                  (unsigned long long)r, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
+                for (uint64_t r = 0; r * 224 + 224 <= sb->size && r < 12 && o < 1100; r++) {
+                    const float *f = (const float *)(uintptr_t)(sb->addr + r * 224 + 176);
+                    o += snprintf(t + o, sizeof t - (size_t)o, " r%llu +176 %.3f,%.3f,%.3f,%.3f mulA %.2f;",
+                                  (unsigned long long)r, f[0], f[1], f[2], f[3], f[7]);
                 }
+            if (sb->addr && sb->size == 2464) {   // the bubble text's records: words of record 0, and where record 1 differs
+                const uint32_t *r0 = (const uint32_t *)(uintptr_t)sb->addr, *r1 = r0 + 56;
+                char d[1400];
+                int od = 0;
+                for (int i = 0; i < 56 && od < 1300; i++) od += snprintf(d + od, sizeof d - (size_t)od, " %08x%s", r0[i], r1[i] != r0[i] ? "*" : "");
+                rt_log("c2 rec0 (* differs in rec1):%s", d);
+            }
             rt_log("c2 prog %llu ssbo1 %#llx size %llu:%s", (unsigned long long)ex->prog->serial,
                    (unsigned long long)sb->addr, (unsigned long long)sb->size, o ? t : " -");
         }
@@ -1474,6 +1494,34 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
         return (VkDescriptorBufferInfo){b, o, sizeof blk};
     } else if (slot >= 3 && slot - 3 < 18) {
         const p_bind_buf *b = &ex->ubo[st][slot - 3];
+        {   // KAR_C5_SLOT=<k> (experiment, 2.6): the KAR_C2_LOG=fs:<hash> shader reads bank 5 from user slot k instead
+            static int k5 = -2;
+            if (k5 == -2) k5 = getenv("KAR_C5_SLOT") ? atoi(getenv("KAR_C5_SLOT")) : -1;
+            if (k5 >= 0 && k5 < 16 && slot == 5 && c2_log_fs && c2_cur_fs == c2_log_fs) b = &ex->ubo[st][k5];
+            // KAR_C5_POKE=<word>=<value>[,...] (experiment, 2.6): that shader's bank 5 with these words replaced
+            static char poke[128] = "";
+            static int pk = -1;
+            if (pk < 0) {
+                const char *e = getenv("KAR_C5_POKE");
+                pk = e && strlen(e) < sizeof poke;
+                if (pk) strcpy(poke, e);
+            }
+            if (pk && slot == 5 && c2_log_fs && c2_cur_fs == c2_log_fs && b->addr && b->size && b->size <= 4096) {
+                VkBuffer sb;
+                VkDeviceSize so;
+                uint32_t *q = (uint32_t *)scratch(ex, b->size, &sb, &so);
+                memcpy(q, (const void *)(uintptr_t)b->addr, b->size);
+                for (const char *t = poke; t && *t;) {
+                    unsigned wi = (unsigned)strtoul(t, (char **)&t, 0);
+                    if (*t != '=') break;
+                    uint32_t v = (uint32_t)strtoul(t + 1, (char **)&t, 0);
+                    if (wi < b->size / 4) q[wi] = v;
+                    if (*t == ',') t++;
+                }
+                RS.volatile_ = 1;
+                return (VkDescriptorBufferInfo){sb, so, b->size};
+            }
+        }
         if (b->size && vk_usnap_find(b->addr, b->size < max ? b->size : max, align, &bi)) {   // as of the submit call
             count_use(VK_MCLS_SCRATCH, VK_MUSE_UBO, bi.range);
             return bi;
@@ -4091,7 +4139,9 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
         // every texture its fragment shader samples, to find which pass reads a given target
         static long at = -2;
         if (at == -2) at = getenv("KAR_SAMPLE_LOG") ? atol(getenv("KAR_SAMPLE_LOG")) : -1;
-        if (at >= 0 && fs && (long)gfx_counters.frames == at) {
+        static int c2_dims;   // KAR_C2_LOG=fs:<hash> also logs that shader's first 20 draws here
+        if (fs && ((at >= 0 && (long)gfx_counters.frames == at) ||
+                   (c2_log_fs && gfx_shader_spirv_fnv(fs) == c2_log_fs && c2_dims++ < 20))) {
             static int lines;
             const GfxShaderRes *res;
             int n = gfx_shader_resources(fs, GFX_RES_TEX, &res), st = nvn_stage_of(gfx_shader_stage(fs));
@@ -4105,6 +4155,14 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
                 int hv;
                 const VkTexImage *ti = th ? vk_texture_by_id_locked(&ex->tex_pool, (int)(th & 0xfffff), &v, &hv) : NULL;
                 w += snprintf(t + w, sizeof t - w, " s%d:%d:%ux%u", slot, (int)(th & 0xfffff), ti ? ti->width : 0,
+                              ti ? ti->height : 0);
+            }
+            for (int k = 0; k < 4 && st >= 0 && st < 6 && w < 440; k++) {   // handle slots 0-3 (pool arrays read them)
+                uint64_t th = ex->tex[st][k];
+                view_t v;
+                int hv;
+                const VkTexImage *ti = th ? vk_texture_by_id_locked(&ex->tex_pool, (int)(th & 0xfffff), &v, &hv) : NULL;
+                w += snprintf(t + w, sizeof t - w, " h%d:%d:%ux%u", k, (int)(th & 0xfffff), ti ? ti->width : 0,
                               ti ? ti->height : 0);
             }
             vk_texture_unlock();

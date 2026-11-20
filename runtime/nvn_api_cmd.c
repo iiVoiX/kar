@@ -804,13 +804,25 @@ static void bind_handles(cmd_t *o, uint32_t op, int st, int first, int n, const 
     memcpy(r->h, h, 8 * (size_t)n);
     hw_fix(o, hw_bytes ? hw_bytes : 16 + 4 * (size_t)n);   // macro 7 + method 0x1a2c + CB_POS + one word per binding
 }
+// KAR_TEXBIND_LOG=<n> (diagnostic, RELEASE_PLAN 2.6): the first n texture binds after frame 2200, with their kind
+// (C combined, S separate), to see whether combined and separate textures meet in the same slot
+static void texbind_log(char kind, int st, int first, int n, const uint64_t *h) {
+    static long lim = -2, told;
+    if (lim == -2) lim = getenv("KAR_TEXBIND_LOG") ? atol(getenv("KAR_TEXBIND_LOG")) : -1;
+    if (lim < 0 || told >= lim || __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) < 2200 || n <= 0) return;
+    told++;
+    rt_log("texbind %c st %d first %d n %d: %#llx %#llx %#llx", kind, st, first, n, (unsigned long long)h[0],
+           n > 1 ? (unsigned long long)h[1] : 0ull, n > 2 ? (unsigned long long)h[2] : 0ull);
+}
 static void bind_handle_array(const Cpu *c, uint32_t op, int deferred, int wide) {   // (cmd, stage, first, n, handles)
     int n = (int)arg_x(c, 3);
+    if (op == OP_BIND_TEX) texbind_log(wide ? 'S' : 'C', (int)arg_x(c, 1), (int)arg_x(c, 2), n, arg_p(c, 4));
     bind_handles(cmd_of(c), op, (int)arg_x(c, 1), (int)arg_x(c, 2), n, arg_p(c, 4), deferred,
                  wide && n >= 0 && n <= 32 ? 16 + 8 * (size_t)n : 0);
 }
 static void bind_one_handle(const Cpu *c, uint32_t op, size_t hw_bytes) {   // (cmd, stage, index, handle)
     uint64_t v = arg_x(c, 3);
+    if (op == OP_BIND_TEX) texbind_log(hw_bytes ? 'S' : 'C', (int)arg_x(c, 1), (int)arg_x(c, 2), 1, &v);
     bind_handles(cmd_of(c), op, (int)arg_x(c, 1), (int)arg_x(c, 2), 1, &v, 0, hw_bytes);
 }
 // Combined texture handles share the texture slots with separate textures (sampler id in bits 20 and up). Images
