@@ -95,3 +95,5 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - **Neue Host-Stubs (ov_system.c):** nn::ldn (lokal aus, Suche leer), nn::friends (leere Listen), account LoadProfileImage (profile_image.h) + Netzwerkkonto „keins“, nn::album (MovieWriter init ok, Speichern schlägt fehl; Replays laufen), nn::ngc (nichts maskiert), nfp-Aufrufe geloggt.
 - **Menü-Test-Rezept:** Profil `build/profile-kar-usercopy3` (für Modus-Einstiege Kopie nehmen), `TOTK_FPS_LIMIT=60`, Skript `500 A,560 A,700 A,950 B`, dann 4× DOWN (1700–1820) = Leiste; Hinweise: DOWN halten bis OK aktiv. Skripte `kirby/scripts/menu_*.txt`; Bildraster `tools/kar_shot_grid.py <run> <png>`; Dienste `tools/kar_service_audit.py`.
 - **Weiter mit 17.21** (Nutzer wählte Variante 2: Streifen/Hintergründe in Menüs, nicht Longshot 17.20): Messung und Plan stehen in der Planzeile; Pool-Arrays jetzt bindless (`KAR_POOL_BL`, 2.7 ✅), `KAR_AMIIBO=1` = Leser ohne Figur.
+
+- 2026-11-20: Alle 🔧-Zeilen aufgelöst (✅ belegt, ⬜ Rest offen, ⏸ wartet auf Nutzer: 9.5, 14.13). audout.c loggt Gain-Wechsel.

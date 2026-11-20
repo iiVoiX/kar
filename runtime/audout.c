@@ -121,6 +121,12 @@ static void apply_gain(AudioOut *o) {
 // Sends an appended buffer's samples to the device. AudioOutBuffer.samples is the data pointer, size the bytes of
 // sample data; a nonzero offset (not seen so far) skips that many bytes of it.
 static void play(AudioOut *o, const AudioOutBuffer *ab) {
+    static float last_gain = -1.0f;   // follow the menu slider while playing; also with TOTK_AUDIO=none, so a test run logs it
+    if (o->volume * menu_volume() != last_gain) {
+        last_gain = o->volume * menu_volume(), apply_gain(o);
+        static int told_gain;   // each change of the effective gain, so a run log shows the slider and the mute work
+        if (told_gain++ < 16) rt_log("audout: gain %.2f (game %.2f, menu %.2f)", last_gain, o->volume, menu_volume());
+    }
     if (!o->stream || !ab->samples || !ab->size || ab->offset >= ab->size || ab->size > (64u << 20)) return;
     uint64_t len = ab->size - ab->offset;
     const void *data = ipc_guest(ab->samples + ab->offset, len);
@@ -133,8 +139,6 @@ static void play(AudioOut *o, const AudioOutBuffer *ab) {
         static int told;
         if (told++ < 4) rt_log("audout: device behind by %d ms: queue dropped", queued / bytes_per_ms);
     }
-    static float last_gain = -1.0f;   // follow the menu slider while playing
-    if (o->volume * menu_volume() != last_gain) last_gain = o->volume * menu_volume(), apply_gain(o);
     SDL_PutAudioStreamData(o->stream, data, (int)len);
     static int heard;
     if (!heard) {   // the first buffer with sound in it (silence is all zero)
