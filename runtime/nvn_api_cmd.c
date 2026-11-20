@@ -466,6 +466,13 @@ NVN_API(nvnCommandBufferReportCounter) {
 // void nvnCommandBufferCopyBufferToBuffer(NVNcommandBuffer *cmd, NVNbufferAddress src, NVNbufferAddress dst,
 // size_t size, int flags)
 NVN_API(nvnCommandBufferCopyBufferToBuffer) {
+    {   // KAR_UPD_LOG also lists buffer copies after frame 2200
+        static long lim = -2, told;
+        if (lim == -2) lim = getenv("KAR_UPD_LOG") ? atol(getenv("KAR_UPD_LOG")) : -1;
+        if (lim >= 0 && told < lim && __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) >= 2200)
+            told++, rt_log("b2b %#llx -> %#llx size %#llx", (unsigned long long)arg_x(c, 1), (unsigned long long)arg_x(c, 2),
+                           (unsigned long long)arg_x(c, 3));
+    }
     *REC(cmd_of(c), OP_COPY_B2B, p_copy_b2b) = (p_copy_b2b){arg_x(c, 1), arg_x(c, 2), arg_x(c, 3)};
 }
 // void nvnCommandBufferUpdateUniformBuffer(NVNcommandBuffer *cmd, NVNbufferAddress buffer, size_t buffer_size,
@@ -475,6 +482,17 @@ NVN_API(nvnCommandBufferUpdateUniformBuffer) {
     uint64_t dst = arg_x(c, 1) + arg_x(c, 3), n = arg_x(c, 4);
     const void *data = arg_p(c, 5);
     if (n > (16u << 20)) rt_fatal("nvn: UpdateUniformBuffer of %#llx bytes", (unsigned long long)n);
+    {   // KAR_UPD_LOG=<n> (diagnostic, 2.6): the first n updates after frame 2200 with offset, size and first words
+        static long lim = -2, told;
+        if (lim == -2) lim = getenv("KAR_UPD_LOG") ? atol(getenv("KAR_UPD_LOG")) : -1;
+        if (lim >= 0 && told < lim && __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) >= 2200) {
+            told++;
+            const uint32_t *q = data;
+            rt_log("upd buf %#llx size %#llx off %#llx n %llu: %08x %08x %08x %08x", (unsigned long long)arg_x(c, 1),
+                   (unsigned long long)arg_x(c, 2), (unsigned long long)arg_x(c, 3), (unsigned long long)n,
+                   n > 0 ? q[0] : 0, n > 4 ? q[1] : 0, n > 8 ? q[2] : 0, n > 12 ? q[3] : 0);
+        }
+    }
     p_update_ub *r = rec(cmd_of(c), OP_UPDATE_UB, offsetof(p_update_ub, data) + n);
     r->dst = dst;
     r->size = n;

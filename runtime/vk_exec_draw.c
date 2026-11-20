@@ -1514,7 +1514,9 @@ static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
                 for (const char *t = poke; t && *t;) {
                     unsigned wi = (unsigned)strtoul(t, (char **)&t, 0);
                     if (*t != '=') break;
-                    uint32_t v = (uint32_t)strtoul(t + 1, (char **)&t, 0);
+                    uint32_t v;
+                    if (t[1] == 'h') v = (uint32_t)ex->tex[st][0] | (uint32_t)ex->samp[st][0], t += 2;   // "h": slot 0 handle
+                    else v = (uint32_t)strtoul(t + 1, (char **)&t, 0);
                     if (wi < b->size / 4) q[wi] = v;
                     if (*t == ',') t++;
                 }
