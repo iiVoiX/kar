@@ -97,3 +97,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - **Weiter mit 17.21** (Nutzer wählte Variante 2: Streifen/Hintergründe in Menüs, nicht Longshot 17.20): Messung und Plan stehen in der Planzeile; Pool-Arrays jetzt bindless (`KAR_POOL_BL`, 2.7 ✅), `KAR_AMIIBO=1` = Leser ohne Figur.
 
 - 2026-11-20: Alle 🔧-Zeilen aufgelöst (✅ belegt, ⬜ Rest offen, ⏸ wartet auf Nutzer: 9.5, 14.13). audout.c loggt Gain-Wechsel.
+- 2026-11-20: 3.2 ✅ (Road Trip gespielt). 7.6 Speichern-Einträge im Spiel ausgeblendet, Bedingung offen (Label-Wahl main+0x2ccf5e0).
