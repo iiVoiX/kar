@@ -98,3 +98,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 
 - 2026-11-20: Alle 🔧-Zeilen aufgelöst (✅ belegt, ⬜ Rest offen, ⏸ wartet auf Nutzer: 9.5, 14.13). audout.c loggt Gain-Wechsel.
 - 2026-11-20: 3.2 ✅ (Road Trip gespielt). 7.6 Speichern-Einträge im Spiel ausgeblendet, Bedingung offen (Label-Wahl main+0x2ccf5e0).
+- 2026-11-20: 7.3 City Trial Ruckler gemessen, Ursache Gast-Sync (siehe Planzeile), nicht Shader/Pipeline.
