@@ -1310,12 +1310,12 @@ static void limits_init(void) {
 // separate textures at 0x168, separate samplers at 0x568). Texture instructions take their handles from reflection,
 // but some shaders also load handle words as data: Kirby's menu bubble text (RELEASE_PLAN 2.6) reads the separate
 // texture word at 0x168 and the sampler word at 0x568, ORs them into an id and indexes a Direct pool array with it.
-// A zero bank gives id 0 there. Built from the handles bound to the stage with KAR_C2=1 (off by default until checked
-// in races and under validation; it alone did not bring back the bubble text).
+// A zero bank gives id 0 there. Built from the handles bound to the stage; KAR_C2=0 keeps the zero bank (RELEASE_PLAN
+// 18.11; it alone did not bring back the bubble text).
 static uint64_t c2_log_fs, c2_cur_fs;   // KAR_C2_LOG=fs:<hex>: the fragment shader hash to log (graphics draws)
 static int c2_on(void) {
     static int on = -1;
-    if (on < 0) on = getenv("KAR_C2") && *getenv("KAR_C2") == '1';
+    if (on < 0) on = !(getenv("KAR_C2") && *getenv("KAR_C2") == '0');
     return on;
 }
 static VkDescriptorBufferInfo c2_info(VkExec *ex, int st) {
