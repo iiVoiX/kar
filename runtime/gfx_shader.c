@@ -1045,10 +1045,15 @@ static void add_res(GfxShader *s, int kind, const char *o, const char *e) {
 static int pool_patch(GfxShader *s) {
     enum { OP_NAME_ = 5, OP_EXT_INST = 12, OP_CONST = 43, OP_VAR = 59, OP_ACCESS_CHAIN = 65, OP_BITCAST = 124,
            OP_BITWISE_AND = 199, OP_DECOR = 71, DEC_BINDING = 33, GLSL_UMIN = 38 };
-    int any = 0, c2_binding = -1;
-    for (int i = 0; i < s->nres[GFX_RES_TEX]; i++)
+    int any = 0, pool = 0, c2_binding = -1;
+    for (int i = 0; i < s->nres[GFX_RES_TEX]; i++) {
         any |= s->res[GFX_RES_TEX][i].pool_arr && !s->res[GFX_RES_TEX][i].pool_bl;   // pool_bl: done by pool_bindless_patch
-    if (!any) return 1;
+        pool |= s->res[GFX_RES_TEX][i].pool_arr;
+    }
+    if (!pool) return 1;
+    // With every array read through the bindless set (pool_bl) nothing is rewritten, but the c2 words the shader reads
+    // are still recorded: pool_fill puts those candidates in the global set (they stayed empty, RELEASE_PLAN 2.7).
+    int masks_only = !any;
     for (int i = 0; i < s->nres[GFX_RES_UBO]; i++)
         if (s->res[GFX_RES_UBO][i].slot == 2) c2_binding = s->res[GFX_RES_UBO][i].binding;
     const uint32_t *w = s->spirv;
@@ -1098,6 +1103,14 @@ static int pool_patch(GfxShader *s) {
             }
         }
         i += len;
+    }
+    if (masks_only) {
+        for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) {
+            GfxShaderRes *r = &s->res[GFX_RES_TEX][k];
+            if (r->pool_arr) r->pool_comb = comb, r->pool_samp = samp, r->pool_sep[0] = sep[0], r->pool_sep[1] = sep[1];
+        }
+        free(role), free(is_const), free(rewrite), free(val), free(cast), free(out);
+        return 1;
     }
     // The index becomes (id ^ (id >> 5)) & 31: plain id & 31 put the two candidates of a common shader (ids 321 and
     // 641, 320 apart) in one element. A constant 5 of the 31's type follows each such 31; new ids go past the bound.
@@ -1367,7 +1380,7 @@ static int pool_bindless_patch(GfxShader *s) {
            CAP_SAMPLED_NU = 5307, SC_UNIFORM_CONSTANT = 0, GLSL_UMIN = 38 };
     static int on = -1;
     if (on < 0) on = !(getenv("KAR_BINDLESS") && *getenv("KAR_BINDLESS") == '0') &&
-                     getenv("KAR_POOL_BL") && *getenv("KAR_POOL_BL") == '1';   // opt-in until tested in the game
+                     !(getenv("KAR_POOL_BL") && *getenv("KAR_POOL_BL") == '0');   // on (2.7); KAR_POOL_BL=0: 32-element arrays
     if (!on) return 0;
     int any = 0;
     for (int k = 0; k < s->nres[GFX_RES_TEX]; k++) any |= s->res[GFX_RES_TEX][k].pool_arr;

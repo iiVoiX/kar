@@ -2482,6 +2482,16 @@ static void pool_fill(VkExec *ex, int st, const GfxShaderRes *r, uint32_t cnt, V
             }
         }
         if (put) vk_bindless_flush();
+        static int pl_told;   // KAR_POOL_BL diagnostic (2.7): candidates per array and how many reached the set
+        if (pl_told < 30 && getenv("KAR_POOL_LOG")) {
+            pl_told++;
+            char t[200];
+            int o = 0;
+            for (int i = 0; i < nall && i < 8 && o < 180; i++) o += snprintf(t + o, sizeof t - (size_t)o, " %u", all[i]);
+            rt_log("pool_bl: %s array kind %u, %d candidates (masks comb %#x samp %#x sep %#llx), put %d:%s",
+                   sampler ? "sampler" : "image", (unsigned)r->pool_bl, nall, r->pool_comb, r->pool_samp,
+                   (unsigned long long)r->pool_sep[0], put, o ? t : " -");
+        }
     }
     for (uint32_t k = 0; k < cnt && k < 32; k++) {
         if (sampler) {
