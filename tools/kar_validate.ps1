@@ -16,7 +16,8 @@ foreach ($u in $Upscalers) {
     $log = Join-Path $dir 'run1.err'
     if (-not (Test-Path $log)) { Write-Host "${u}: no log"; $bad++; continue }
     $hits = Select-String -Path $log -Pattern 'VUID-|THREADING ERROR|vk validation error' | Measure-Object
-    $used = Select-String -Path $log -Pattern 'FSR 3.1 upscaling|upscaling 1|FSR 1 EASU' -Quiet
+    $want = @{ fsr = 'FSR 1 EASU'; fsr3 = 'FSR 3\.1 upscaling'; external = 'ext upscaler: .* ready' }[$u]
+    $used = $want -and (Select-String -Path $log -Pattern $want -Quiet)
     Write-Host ("{0}: {1} validation messages{2}" -f $u, $hits.Count, $(if ($used) { '' } else { ' (upscaler not seen in the log)' }))
     if ($hits.Count) { $bad++ }
 }

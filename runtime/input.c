@@ -622,7 +622,8 @@ static int kbd_script(void) {
     return on && fr >= lo && fr <= hi;
 }
 
-static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
+// ui: the port menu's poll, which always reads the keyboard (with kbd_split it is player 2's in the game only)
+static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry, int ui) {
     uint64_t b = 0;
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
     plat_mutex_lock(&lock);
@@ -631,7 +632,7 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
     if (state > 0) {
         binds_refresh();
         if (state == 1) pad_read(&b, sl, sr);
-        if (ikb_foreground() && !kbd_split()) keyboard_read(&b, sl, sr);
+        if (ikb_foreground() && (ui || !kbd_split())) keyboard_read(&b, sl, sr);
     }
     script_apply(&b, sl, sr);
     rec_apply(b, sl, sr);
@@ -715,14 +716,14 @@ static int blocked(volatile int32_t *flag, uint64_t buttons) {
 }
 
 void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
-    poll_merged(buttons, lx, ly, rx, ry);
+    poll_merged(buttons, lx, ly, rx, ry, 0);
     int text = blocked(&g_block, *buttons), menu = blocked(&g_menu, *buttons);
     if (!text && !menu) return;
     *buttons = 0; *lx = *ly = *rx = *ry = 0;
 }
 
 void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
-    poll_merged(buttons, lx, ly, rx, ry);
+    poll_merged(buttons, lx, ly, rx, ry, 1);
 }
 
 // ---- Players 2 to 4 (local splitscreen, RELEASE_PLAN 7.1): every further gamepad keeps a fixed slot (the lowest free
