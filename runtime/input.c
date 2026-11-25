@@ -456,6 +456,48 @@ static void test_pad_attach(void) {
     rt_log("input: test gamepad attached, sticks at %d,%d %d,%d", v[0], v[1], v[2], v[3]);
 }
 
+// KAR_VPAD_MIRROR=<lo>-<hi> (splitscreen test runs, RELEASE_PLAN 7.1): a second SDL virtual gamepad, attached after
+// player 1's gamepad is chosen (TOTK_TEST_PAD gives one), so it takes player 2's slot through scan_extra and is read
+// by input_poll_player like a real pad. From frame lo to hi it presses what player 1's poll reported (script
+// included), outside the window it rests. vpad_bits[p]: the Switch buttons gamepad input p gives (input_map).
+static SDL_Joystick *vpad;
+static unsigned long long vpad_lo, vpad_hi;
+
+static void vpad_attach(void) {
+    const char *e = cfg_get("KAR_VPAD_MIRROR");
+    if (!e || sscanf(e, "%llu-%llu", &vpad_lo, &vpad_hi) != 2 || vpad_lo > vpad_hi) return;
+    SDL_VirtualJoystickDesc d;
+    SDL_INIT_INTERFACE(&d);
+    d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    d.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    d.name = "KAR mirror gamepad";
+    SDL_JoystickID id = SDL_AttachVirtualJoystick(&d);
+    vpad = id ? SDL_OpenJoystick(id) : NULL;
+    rt_log(vpad ? "input: mirror gamepad attached, repeats player 1 in frames %llu-%llu"
+                : "input: mirror gamepad not attached (frames %llu-%llu)", vpad_lo, vpad_hi);
+}
+
+static void vpad_feed(uint64_t b, const int32_t sl[2], const int32_t sr[2]) {   // under lock
+    if (!vpad) return;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int on = fr >= vpad_lo && fr <= vpad_hi;
+    for (int p = PAD_SOUTH; p < PAD_COUNT; p++) {
+        uint8_t one[PAD_COUNT] = {0};
+        one[p] = 1;
+        uint64_t bits = input_map_pad_buttons(one, pad_layout_get());
+        int down = on && bits && (b & bits) == bits;
+        if (p == PAD_ZL || p == PAD_ZR)
+            SDL_SetJoystickVirtualAxis(vpad, p == PAD_ZL ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
+                                       down ? 32767 : 0);
+        else SDL_SetJoystickVirtualButton(vpad, pad_sdl[p], down);
+    }
+    const int32_t v[4] = {on ? sl[0] : 0, on ? -sl[1] : 0, on ? sr[0] : 0, on ? -sr[1] : 0};
+    static const SDL_GamepadAxis ax[4] = {SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, SDL_GAMEPAD_AXIS_RIGHTX,
+                                          SDL_GAMEPAD_AXIS_RIGHTY};
+    for (int i = 0; i < 4; i++) SDL_SetJoystickVirtualAxis(vpad, ax[i], (Sint16)(v[i] > 32767 ? 32767 : v[i] < -32767 ? -32767 : v[i]));
+}
+
 static void start(void) {
     binds_refresh();
     const char *e = cfg_get("TOTK_INPUT");
@@ -466,6 +508,7 @@ static void start(void) {
     if (state == 1) {
         scan_pads();
         if (!pad) rt_log("input: no gamepad (keyboard only until one is connected)");
+        vpad_attach();
     }
     if (state == -1) state = 2;   // keyboard only
 }
@@ -556,6 +599,7 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
     }
     script_apply(&b, sl, sr);
     rec_apply(b, sl, sr);
+    vpad_feed(b, sl, sr);
     // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game
     static int combo_held;
     int32_t st[4] = {sl[0], sl[1], sr[0], sr[1]};
