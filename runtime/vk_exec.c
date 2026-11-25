@@ -867,7 +867,7 @@ static uint64_t ui_frag_tex(VkExec *ex) {
     }
     return 0;
 }
-// KAR_UI_FULL=1 (17.18, off by default): a draw into the interface layer whose block is the whole 16:9 layout and
+// KAR_UI_FULL (17.18, on unless 0): a draw into the interface layer whose block is the whole 16:9 layout and
 // whose fragment texture is 1x1 (a flat fade, flash or dimmer: KAR_UI_FULL_LOG showed the fades and flashes as such
 // quads and the menu backgrounds with 1920x1080 textures) is drawn over the whole layer width. Returns that width, or 0.
 int vk_exec_fs_slots(uint64_t serial, int *stage, uint64_t mask[2]);
@@ -875,7 +875,7 @@ static int ui_full_why;   // KAR_UI_FULL_LOG: why ui_full_flat last refused (1 b
                          // 5 samples nothing)
 static uint32_t ui_full_flat(VkExec *ex) {
     static int on = -1;
-    if (on < 0) on = getenv("KAR_UI_FULL") && *getenv("KAR_UI_FULL") == '1';
+    if (on < 0) on = !(getenv("KAR_UI_FULL") && *getenv("KAR_UI_FULL") == '0');
     ui_full_why = 0;
     if (!on || !ui_block || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height))
         return 0;
