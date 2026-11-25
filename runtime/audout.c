@@ -52,6 +52,8 @@ typedef struct {
 } AudioOut;
 
 // The SDL stream of an AudioOut, or NULL (logged) when audio is off or no device opens.
+static int heard_once;   // the game has started its sound (stats count only from there)
+
 static SDL_AudioStream *open_stream(int channels) {
     const char *mode = cfg_get("TOTK_AUDIO");
     if ((mode && !strcmp(mode, "none")) || cfg_get("TOTK_AUDIO_OFF")) {
@@ -139,12 +141,31 @@ static void play(AudioOut *o, const AudioOutBuffer *ab) {
         static int told;
         if (told++ < 4) rt_log("audout: device behind by %d ms: queue dropped", queued / bytes_per_ms);
     }
+    {   // KAR_AUDIO_STATS=1 (RELEASE_PLAN 9.2): every 5 s, how often the queue ran dry before a buffer came (a gap the
+        // player hears) and the lowest fill seen, from the queue at each append
+        static int on = -1;
+        static uint64_t t0, appends, dry;
+        static int low = 1 << 30;
+        if (on < 0) on = getenv("KAR_AUDIO_STATS") && *getenv("KAR_AUDIO_STATS") == '1';
+        if (on && heard_once) {
+            uint64_t now = plat_now_ms();
+            if (!t0) t0 = now;
+            appends++, dry += queued == 0;
+            if (queued < low) low = queued;
+            if (now - t0 >= 5000) {
+                rt_log("audout: stats %llu buffers, %llu with the queue dry, lowest fill %.1f ms", (unsigned long long)appends,
+                       (unsigned long long)dry, low / (double)bytes_per_ms);
+                t0 = now, appends = dry = 0, low = 1 << 30;
+            }
+        }
+    }
     SDL_PutAudioStreamData(o->stream, data, (int)len);
     static int heard;
     if (!heard) {   // the first buffer with sound in it (silence is all zero)
         const int16_t *s = data;
         for (uint64_t i = 0; i < len / 2 && !heard; i++) heard = s[i] != 0;
         if (heard) rt_log("audout: first nonzero samples after %llu played", (unsigned long long)o->played_samples);
+        heard_once = heard;
     }
 }
 

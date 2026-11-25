@@ -2778,19 +2778,38 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             result.instructions.push_back(translated);
             break;
         }
-        case 0x387: case 0x983: { // Local spill at [Ra + immediate byte offset].
+        case 0x387: case 0x983: case 0x987: { // Local spill at [Ra + immediate byte offset].
+            // DKB Recomp: 0x987 is the store with a uniform register in the address too ([Ra + URb + imm], URb in bits
+            // 64-69, bit 91 set; Kirby Air Riders' geometry stages): URb is added into a scratch register first.
             // The size is bits 73-75 (0-3 = U8, S8, U16, S16, then 4, 5, 6 = 32, 64, 128 bits), as
             // Maxwell's; wider accesses become 32-bit ones. A load's bit 85 (.LU) is a cache hint.
-            const bool store = opcode == 0x387;
+            const bool store = opcode == 0x387 || opcode == 0x987;
             const u32 size = insn.Bits(73, 3);
-            const u32 data = insn.Bits(32, 8), offset = insn.Bits(40, 24), address = insn.Bits(24, 8);
+            // DKB Recomp: with bit 91 the load (0x983) has a uniform address register in bits 32-37 instead of data.
+            const bool uniform_load = opcode == 0x983 && insn.Bits(91, 1);
+            const u32 data = uniform_load ? 0U : insn.Bits(32, 8), offset = insn.Bits(40, 24);
+            u32 address = insn.Bits(24, 8);
+            u32 uniform_address = ~0U;
+            if (opcode == 0x987 || uniform_load) {
+                uniform_address = uniform_register(opcode == 0x987 ? insn.Bits(64, 6) : insn.Bits(32, 6));
+                if (uniform_address == ~0U || (opcode == 0x987 && insn.Bits(70, 2)) || (uniform_load && insn.Bits(38, 2)))
+                    return fail(index, "native local spill uniform address");
+            }
             const u32 words = size == 6 ? 4 : size == 5 ? 2 : 1, value = store ? data : static_cast<u32>(dest);
             const u32 alignment = size < 2 ? 1U : size < 4 ? 2U : 4U;
             if ((address != 255 && address >= 246) || (store && insn.Bits(16, 8)) || (!store && data) ||
                 (value != 255 && (value + words > 248 || (value & (words - 1)))) || (!store && value == 255) ||
                 (offset & (alignment - 1)) || offset + 4 * words > 0x800000 || size > 6 ||
-                (insn.words[2] & ~(store ? 0xe00U : 0x200e00U)) != 0x00100000U)
+                (insn.words[2] & ~(store ? 0xe00U : 0x200e00U) & ~(opcode == 0x987 ? 0x0800003fU : uniform_load ? 0x08000000U : 0U)) !=
+                    0x00100000U)
                 return fail(index, "native local scalar spill mode");
+            if (uniform_address != ~0U) {   // address = Ra + URb (scratch R250), or URb alone with Ra = RZ
+                if (address == 255) address = uniform_address;
+                else {
+                    emit(0x5c10000000000000ULL | predicate | 250 | (u64{uniform_address} << 8) | (u64{address} << 20));
+                    address = 250;
+                }
+            }
             for (u32 word = 0; word < words; ++word)
                 emit((store ? 0xef50000000000000ULL : 0xef40000000000000ULL) | predicate |
                      (value == 255 ? 255U : value + word) | (u64{address} << 8) |
