@@ -287,8 +287,9 @@ NVN_API(nvnTextureInitialize) {
     }
     o->serial = nvn_new_serial();
     if (sw_on)
-        rt_log("size watch: texture serial %llu %ux%u < %#llx < %#llx < %#llx < %#llx", (unsigned long long)o->serial,
-               o->d.width, o->d.height, (unsigned long long)sw_ra[0], (unsigned long long)sw_ra[1],
+        rt_log("size watch: texture serial %llu %ux%u at %#llx+%#llx < %#llx < %#llx < %#llx < %#llx",
+               (unsigned long long)o->serial, o->d.width, o->d.height, (unsigned long long)(uintptr_t)o->mem,
+               (unsigned long long)o->L.size, (unsigned long long)sw_ra[0], (unsigned long long)sw_ra[1],
                (unsigned long long)sw_ra[2], (unsigned long long)sw_ra[3]);
     live_put(o);
     NVN_LOG("Texture %p %ux%ux%u lv%u fmt=%#x tgt=%d flags=%#x size=%#llx", (void *)o, o->d.width, o->d.height,

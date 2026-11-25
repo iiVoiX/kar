@@ -27,6 +27,7 @@ enum { STICK_MAX = 32767, STICK_DIR = 16384, TRIGGER_ON = 16384, RESCAN_MS = 100
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static int state;                    // 0 not started, 1 running, -1 disabled or SDL failed
 static SDL_Gamepad *pad;
+static SDL_Gamepad *xpad[INPUT_EXTRA_PLAYERS];   // players 2-4 (input_poll_player)
 static uint64_t next_scan;
 static int pad_rumble;               // the open gamepad has rumble motors
 static volatile int32_t pad_labels[4];  // ... and the labels of its south, east, west, north buttons (PAD_LABEL_*), any thread
@@ -361,7 +362,11 @@ static void scan_pads(void) {
     }
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n && !pad; i++) pad = SDL_OpenGamepad(ids[i]);
+    for (int i = 0; ids && i < n && !pad; i++) {
+        int extra = 0;   // a gamepad already playing as player 2-4 keeps its slot
+        for (int k = 0; k < INPUT_EXTRA_PLAYERS; k++) extra |= xpad[k] && SDL_GetGamepadID(xpad[k]) == ids[i];
+        if (!extra) pad = SDL_OpenGamepad(ids[i]);
+    }
     SDL_free(ids);
     if (!pad) return;
     pad_rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
@@ -645,7 +650,6 @@ void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int
 // script and the recording. The extra players use player 1's layout and bindings (mixed pad types: RELEASE_PLAN 8.3),
 // have no rumble or motion, and read neutral while the text entry or the menu is open (only player 1 ends that state).
 // Under lock.
-static SDL_Gamepad *xpad[INPUT_EXTRA_PLAYERS];
 static uint64_t xnext_scan;
 
 static void scan_extra(void) {

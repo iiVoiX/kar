@@ -101,3 +101,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - 2026-11-20: 7.3 City Trial Ruckler gemessen, Ursache Gast-Sync (siehe Planzeile), nicht Shader/Pipeline.
 - 2026-11-20 7.3: Ursache = Gast-Arbeit + Host-Submit; VirtualQuery-Cache + Log-Drossel committed, offen nvn2_lower-Exceptions, disk_load_from im Submit.
 - 2026-11-25 7.1: Splitscreen-Eingabe fertig (P2 tritt bei, Rennen läuft), obere Hälfte 3D schwarz → nächster Schritt. Navigation heute: Menü startet auf Fahrschule, Popup schließt B@950, UP→Air Ride; Skriptzeiten = Ticks (~2,4 Frames).
+- 2026-11-25 7.1: Splitscreen-Schwarz = Komposit-fs (nvn2 a6791d21435a041b) sampelt nur für y>0,5; Dump E:\kirby\sp20, GLSL sp20\comp_fs.glsl.
