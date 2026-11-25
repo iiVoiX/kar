@@ -179,7 +179,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 | # | Punkt | Art | Status |
 |---|---|---|---|
 | 10.1 | Speicherort, Journal-Speichern und 3 Backups in `docs/kirby-running.md` dokumentiert | OHNE | ✅ |
-| 10.2 | Absturz während des Speicherns: Spielstand bleibt heil (Journal-Prinzip testen) | SPIEL | ⬜ |
+| 10.2 | Absturz während des Speicherns: Spielstand bleibt heil (Journal-Prinzip testen) | SPIEL | ✅ 2026-11-25: kar.exe mitten im Commit hart beendet (Wächter auf `save-tx/new`, 19 von 41 Dateien kopiert) → nächster Start: „rolled back an unfinished commit“, Spielstand lädt, Rennen läuft, weitere Commits normal |
 | 10.3 | Profil-Ordner portabel (neben der Exe) für Release: vorhanden, Paket-Skript für kar.exe angepasst (Plan P4) | OHNE | ✅ |
 | 10.4 | Falsche Spielversion: Hash-Prüfung gab es, Meldung nennt jetzt die passende Version | OHNE | ✅ |
 
