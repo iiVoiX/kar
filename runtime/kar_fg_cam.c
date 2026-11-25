@@ -32,7 +32,8 @@ static SceneCam hist[HIST];   // by frame % HIST
 
 // FSR 3 (RELEASE_PLAN.md 17.5): the game renders without jitter, so the scene camera's projection, view-projection and
 // its inverse get FSR's subpixel offset here, before the GPU reads the block. The kept matrices (motion vectors) stay
-// without it. Only while FSR 3 dispatched in the last frames (vk_fsr3_last_key); KAR_FSR3_JITTER=0 turns it off,
+// without it. Only while FSR 3 dispatched in the last frames (vk_fsr3_last_key); KAR_FSR3_JITTER=1 turns it on (off by
+// default: a 60 px offset in the block did not move the scene, whose geometry reads the camera elsewhere),
 // KAR_FSR3_JSX / KAR_FSR3_JSY = -1 flip a direction (diagnostic).
 int vk_fsr3_jitter(uint64_t index, int rw, int dw, float *x, float *y);
 uint64_t vk_fsr3_last_key(void);
@@ -41,8 +42,9 @@ volatile uint32_t kar_fsr3_size[4];   // render width, height, output width, hei
 static int jitter_cfg(int *sx, int *sy) {
     static int on = -1, jx = 1, jy = 1;
     if (on < 0) {
+        // off until the jitter reaches the drawn scene: the block's matrices alone do not move it (60 px test, 17.5)
         const char *e = getenv("KAR_FSR3_JITTER");
-        on = !(e && *e == '0');
+        on = e && *e == '1';
         jx = getenv("KAR_FSR3_JSX") && atoi(getenv("KAR_FSR3_JSX")) < 0 ? -1 : 1;
         jy = getenv("KAR_FSR3_JSY") && atoi(getenv("KAR_FSR3_JSY")) < 0 ? -1 : 1;
     }
@@ -61,12 +63,19 @@ static void jitter_inverse(float *m, float dx, float dy) {
 static void apply_jitter(float *b, uint64_t fr, SceneCam *e) {
     int sx, sy;
     if (!jitter_cfg(&sx, &sy)) return;
-    uint64_t last = vk_fsr3_last_key();
-    if (!last || last + 8 < fr) return;
+    static float joff = -1;   // KAR_FSR3_JOFFSET=<px> (diagnostic): a fixed offset, x in one 64-frame block, y in the next
+    if (joff < 0) joff = getenv("KAR_FSR3_JOFFSET") ? (float)atof(getenv("KAR_FSR3_JOFFSET")) : 0;
     uint32_t rw = kar_fsr3_size[0], rh = kar_fsr3_size[1], ow = kar_fsr3_size[2];
-    if (!rw || !rh || !ow) return;
     float px, py;
-    if (!vk_fsr3_jitter(fr, (int)rw, (int)ow, &px, &py)) return;
+    if (joff > 0) {
+        rw = (uint32_t)b[0x1e0 / 4], rh = (uint32_t)b[0x1e4 / 4];
+        px = (fr / 64) % 2 ? 0 : joff, py = (fr / 64) % 2 ? joff : 0;
+    } else {
+        uint64_t last = vk_fsr3_last_key();
+        if (!last || last + 8 < fr) return;
+        if (!rw || !rh || !ow) return;
+        if (!vk_fsr3_jitter(fr, (int)rw, (int)ow, &px, &py)) return;
+    }
     static int cycle = -1;   // KAR_FSR3_JCYCLE=1 (diagnostic): the four sign pairs in turn, 32 frames each
     if (cycle < 0) cycle = getenv("KAR_FSR3_JCYCLE") && *getenv("KAR_FSR3_JCYCLE") == '1';
     if (cycle) sx = (fr / 32) % 2 ? -1 : 1, sy = (fr / 64) % 2 ? -1 : 1;
