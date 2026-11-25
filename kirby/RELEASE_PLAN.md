@@ -170,7 +170,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 | 9.1 | Ton funktioniert (AudioOut → SDL3, 6 Kanäle) | — | ✅ |
 | 9.2 | Knackser/Aussetzer bei Rucklern (Puffer 250 ms) messen | SPIEL | ⬜ |
 | 9.3 | Lautstärke-Regler im Port-Menü wirkt jetzt auch bei Kirby (AudioOut) | OHNE + SPIEL | ✅ 2026-11-20: TOTK_VOLUME=30 → Log „audout: gain 0.30“.  |
-| 9.4 | Ton läuft bei Alt-Tab/minimiert weiter oder pausiert sauber | SPIEL | ⬜ |
+| 9.4 | Ton läuft bei Alt-Tab/minimiert weiter oder pausiert sauber | SPIEL | ⬜ Nutzertest (Testaufbau läuft stumm, `TOTK_AUDIO=none`); Minimieren selbst stabil (11.2) |
 | 9.5 | Ton-Tab: „Im Hintergrund stumm“ (`TOTK_MUTE_UNFOCUSED`, sofort): AudioOut- und Renderer-Pegel × 0, solange das Fenster keinen Fokus hat. Warum: heute läuft der Ton bei Alt-Tab voll weiter (9.4). Hilft: übliche PC-Option, auch für 9.4 | OHNE + SPIEL | ⏸ wartet auf Nutzer (Fokuswechsel von Hand). gebaut, im Menü sichtbar (menutest4); Tastendruck/Gerätewechsel noch von Hand testen |
 | 9.6 | Ton-Tab: „Ausgabegerät“ (`TOTK_AUDIO_DEVICE`, Gerätename, Standard = Windows-Standard, nach Neustart): Liste aus SDL3 `SDL_GetAudioPlaybackDevices`, beim Öffnen gesuchtes Gerät statt Default. Warum: Headset/Lautsprecher wählen ohne Windows umzustellen | OHNE + SPIEL | ✅ getestet (`d7`): unbekannter Name → Log „not found: system default“, Wiedergabe auf dem Standardgerät |
 
@@ -188,7 +188,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 | # | Punkt | Art | Status |
 |---|---|---|---|
 | 11.1 | Vollbild/Fenster wechseln (Alt+Enter), Größe ändern, mehrere Monitore | SPIEL | ⬜ |
-| 11.2 | Alt-Tab, Minimieren, Energiesparmodus/Standby | SPIEL | ⬜ |
+| 11.2 | Alt-Tab, Minimieren, Energiesparmodus/Standby | SPIEL | ✅ Minimieren 2026-11-25: Fenster mitten im Rennen 10 s minimiert (ShowWindow), danach weiter, kein FATAL, Fokus geht ans Spiel (nn::oe); Present pausiert minimiert (gfx_present.c). Standby = Nutzertest |
 | 11.3 | Andere GPUs: AMD und Intel (bisher nur NVIDIA getestet) | SPIEL (andere PCs) | ⬜ |
 | 11.4 | Mindestanforderungen festlegen (RAM, VRAM, GPU) nach Messungen | OHNE nach SPIEL | ⬜ Messung (ein PC, 5950X/4090/32 GB, 2026-11-18): privat 16–18 GB im Rennen, 10–13 GB im Menü; Anforderung noch nicht festgelegt |
 | 11.5 | Windows 10 prüfen | SPIEL (anderer PC) | ⬜ |
