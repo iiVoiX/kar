@@ -29,7 +29,24 @@ STATE = 'dkb-install.json'
 OWNER = '.dkb-setup-owner.json'
 DEST_OWNER = '.dkb-install-owner.json'
 GAME = 'dkb100'
-TARGETS = (GAME, 'dkb458752')   # 1.0.0 and 3.2.0 (title version 458752); tools/data/expected-<target>.json
+TARGETS = (GAME, 'dkb458752', 'kar458752')   # tools/data/expected-<target>.json, recognised by main's hash
+# What differs per game (RELEASE_PLAN.md 13.2): the exe's name, the lifted modules, NROs lifted from the RomFS
+# (name, RomFS path) and whether the installer translates the game's shaders ahead (Bananza: census of its RomFS;
+# Kirby Air Riders builds its shaders in the background at run time).
+GAMES = {
+    'dkb100': {'exe': 'dkb', 'modules': 'main,sdk', 'nros': (), 'shaders': True},
+    'dkb458752': {'exe': 'dkb', 'modules': 'main,sdk', 'nros': (), 'shaders': True},
+    'kar458752': {'exe': 'kar', 'modules': 'main,sdk,subsdk0,subsdk1',
+                  'nros': (('effectscript', 'Bin/Module/EffectScript.nro'),), 'shaders': False},
+}
+
+
+def game_spec(game):
+    return GAMES.get(game, GAMES[GAME])
+
+
+def exe_of(game):
+    return game_spec(game)['exe'] + EXE
 NUP_SELECT = ('latest', 'base')
 EXE = '.exe' if os.name == 'nt' else ''
 CHUNK = 8 << 20
@@ -81,7 +98,8 @@ def plain_tree(root):
 def plain_destination(dest, dlls=()):
     # profile/ and caches belong to the player and are never traversed or written by setup.
     files = (STATE, STATE + '.tmp', DEST_OWNER, '.dkb-setup.lock', 'dkb.ini', 'dkb.ini.tmp', 'totk.ini',
-             'totk.ini.tmp', 'romfs-index.bin', 'seed-nvn2.bin', 'dkb' + EXE, 'totk_xlate' + EXE, 'totk_xlate.id', *(p.name for p in dlls))
+             'totk.ini.tmp', 'romfs-index.bin', 'seed-nvn2.bin', 'dkb' + EXE, 'kar' + EXE, 'totk_xlate' + EXE,
+             'totk_xlate.id', *(p.name for p in dlls))
     for name in ('exefs', 'romfs', *files, *(name + '.setup-part' for name in files)):
         plain_tree(dest / name)
 
@@ -119,6 +137,25 @@ def inventory(root, reporter):
     return result
 
 
+def romfs_file(folder, path, out):
+    """Copy the file at RomFS path `path` out of the packed image in `folder` (romfs.bin + index.json) to `out`."""
+    index = json.loads((folder / 'index.json').read_text(encoding='utf-8'))
+    for entry in index['files']:
+        if entry['path'].lstrip('/').lower() == path.lower():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with (folder / 'romfs.bin').open('rb') as src, out.open('wb') as dst:
+                src.seek(entry['offset'])
+                remaining = entry['size']
+                while remaining:
+                    block = src.read(min(CHUNK, remaining))
+                    if not block:
+                        raise InstallError('dkb.pack_invalid', path=str(folder), detail='short file')
+                    dst.write(block)
+                    remaining -= len(block)
+            return out
+    raise InstallError('dkb.pack_invalid', path=str(folder), detail=f'{path} missing')
+
+
 def pack_manifest(folder):
     try:
         m = json.loads((folder / 'index.json').read_text(encoding='utf-8'))
@@ -150,7 +187,7 @@ def expected_exefs(layout, exefs, game=GAME):
         ensure_plain(p)
         if not p.is_file() or sha256(p) != value:
             raise InstallError('dkb.exefs_invalid', path=str(p))
-    if any(exefs.glob('subsdk*')):
+    if any(p.name not in hashes for p in exefs.glob('subsdk*')):   # Kirby lists its subsdks; Bananza has none
         raise InstallError('dkb.update_unsupported')
     return hashes
 
@@ -628,7 +665,7 @@ class Lift(Step):
     def current(self, ctx, record):
         gen = ctx.temp / 'gen'
         try:
-            for name in ('main', 'sdk'):
+            for name in game_spec(ctx.info['game'])['modules'].split(','):
                 m = json.loads((gen / name / 'manifest.json').read_text(encoding='utf-8'))
                 if not m['chunks'] or not all((gen / name / chunk).is_file() for chunk in m['chunks']):
                     return False
@@ -641,9 +678,15 @@ class Lift(Step):
         gen = ctx.temp / 'gen'
         plain_outputs(ctx)
         gen.mkdir(parents=True, exist_ok=True)
+        spec = game_spec(ctx.info['game'])
+        nro_args = []
+        for name, path in spec['nros']:
+            nro = ctx.temp / 'nro' / f'{name}.nro'
+            romfs_file(ctx.dest / 'romfs', path, nro)
+            nro_args += ['--nro', f'{name}={nro}']
         run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.recomp / 'gen.py', '--exefs', ctx.dest / 'exefs',
-                                 '--out', gen, '--modules', 'main,sdk', '--jobs', ctx.options.jobs,
-                                 '--patches', ctx.layout.recomp / f"patches-{ctx.info['game']}.txt"])
+                                 '--out', gen, '--modules', spec['modules'], '--jobs', ctx.options.jobs,
+                                 '--patches', ctx.layout.recomp / f"patches-{ctx.info['game']}.txt", *nro_args])
         manifest = json.loads((gen / 'main' / 'manifest.json').read_text(encoding='utf-8'))
         if ctx.info['game'] == GAME and manifest.get('stats', {}).get('patched_sites', 0) < 1:
             raise InstallError('dkb.patches_missing')
@@ -661,7 +704,7 @@ class Compile(Step):
                       [(str(p), sha256(p)) for p in ctx.layout.dlls])
 
     def current(self, ctx, record):
-        exe = ctx.dest / ('dkb' + EXE)
+        exe = ctx.dest / exe_of(ctx.info['game'])
         try:
             return (exe.is_file() and sha256(exe) == record.get('sha256') and
                     sha256(ctx.dest / 'romfs-index.bin') == record.get('index_sha256') and
@@ -674,17 +717,20 @@ class Compile(Step):
         game = ctx.info['game']
         args = [ctx.layout.python, ctx.layout.tools / 'build_game.py', '--version', game, '--expected',
                 ctx.layout.tools / 'data' / f'expected-{game}.json', '--gen', ctx.temp / 'gen', '--out', out,
-                '--modules', 'main,sdk', '--exefs', ctx.dest / 'exefs', '--romfs', ctx.dest / 'romfs',
+                '--modules', game_spec(game)['modules'], '--exefs', ctx.dest / 'exefs', '--romfs', ctx.dest / 'romfs',
                 '--profile', ctx.dest / 'profile', '--runtime', ctx.layout.runtime, '--toolchain', ctx.layout.llvm,
                 '--ninja', ctx.layout.ninja, '--jobs', ctx.options.jobs, '--full-build']
         if ctx.layout.deps:
             args += ['--deps', ctx.layout.deps]
         if ctx.layout.sysroot:
             args += ['--sysroot', ctx.layout.sysroot]
-        run_tool(ctx, self.id, args)
-        for p in (out / ('dkb' + EXE), out / 'romfs-index.bin', *ctx.layout.dlls):
+        # llvm-windres starts the preprocessor by name: the toolchain's bin goes first on PATH (with a toolchain given
+        # by --toolchain the build otherwise stopped at the resource file, ninja reporting "ReadFile: The handle is invalid")
+        path = str(Path(ctx.layout.llvm) / 'bin') + os.pathsep + os.environ.get('PATH', '')
+        run_tool(ctx, self.id, args, env={'PATH': path})
+        for p in (out / exe_of(game), out / 'romfs-index.bin', *ctx.layout.dlls):
             copy_file(p, ctx.dest / p.name)
-        return {'sha256': sha256(ctx.dest / ('dkb' + EXE)), 'index_sha256': sha256(ctx.dest / 'romfs-index.bin')}
+        return {'sha256': sha256(ctx.dest / exe_of(game)), 'index_sha256': sha256(ctx.dest / 'romfs-index.bin')}
 
 
 class Shaders(Step):
@@ -699,21 +745,25 @@ class Shaders(Step):
                       sha256(ctx.layout.tools / 'dkb_shader_census.py'))
 
     def current(self, ctx, record):
+        if not game_spec(ctx.info['game'])['shaders']:   # built at run time (Kirby)
+            return True
         return record.get('prepared') is True and (ctx.dest / 'shader-cache').exists()
 
     def run(self, ctx):
+        if not game_spec(ctx.info['game'])['shaders']:
+            return {}
         pack = ctx.dest / 'seed-nvn2.bin'
         run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.tools / 'dkb_shader_census.py', '--version', ctx.info['game'],
                                 '--romfs', ctx.dest / 'romfs', '--out', ctx.dest], name=f'{self.id}-census')
         try:
-            run_tool(ctx, self.id, [ctx.dest / ('dkb' + EXE), '--translate-shaders'], cwd=ctx.dest)
+            run_tool(ctx, self.id, [ctx.dest / exe_of(ctx.info['game']), '--translate-shaders'], cwd=ctx.dest)
         finally:
             pack.unlink(missing_ok=True)
         # The driver pipeline libraries are an optimisation: a driver that crashes building them (nvgpucomp64.dll on
         # NVIDIA 621.01) must not fail the step, or every retry would crash again.
         libraries = True
         try:
-            run_tool(ctx, self.id, [ctx.dest / ('dkb' + EXE), '--warm-shaders'], cwd=ctx.dest,
+            run_tool(ctx, self.id, [ctx.dest / exe_of(ctx.info['game']), '--warm-shaders'], cwd=ctx.dest,
                      name=f'{self.id}-warm')
         except InstallError as error:
             if error.id != 'dkb.tool_failed':   # a path-safety rejection still stops the install
@@ -739,7 +789,7 @@ class Prepare(Step):
         for name in ('dkb.ini', 'dkb.ini.tmp', 'totk.ini'):
             ensure_plain(ctx.dest / name)
         ini.write(ctx.dest, ctx.state['lang'], ctx.layout.ini_example, 'dkb.ini', fallback='totk.ini')
-        run_tool(ctx, self.id, [ctx.dest / ('dkb' + EXE), '--selftest'])
+        run_tool(ctx, self.id, [ctx.dest / exe_of(ctx.info['game']), '--selftest'])
         return {'selftest': True}
 
 
@@ -822,7 +872,7 @@ def main(options):
         ctx.state['lang'] = ini.canonical_language(options.lang or ctx.state.get('lang') or 'en-US')
         steps = all_steps()
         rep.emit('start', release=layout.release, mode=ctx.mode, dev=layout.dev, dest=str(dest), log=str(log),
-                 game=info['game'], game_exe='dkb' + EXE, steps=[s.id for s in steps])
+                 game=info['game'], game_exe=exe_of(info['game']), steps=[s.id for s in steps])
         result = run_steps(steps, ctx)
     except InstallError as e:
         rep.error(e.id, e.params)
