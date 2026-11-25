@@ -456,30 +456,34 @@ static void test_pad_attach(void) {
     rt_log("input: test gamepad attached, sticks at %d,%d %d,%d", v[0], v[1], v[2], v[3]);
 }
 
-// KAR_VPAD_MIRROR=<lo>-<hi> (splitscreen test runs, RELEASE_PLAN 7.1): a second SDL virtual gamepad, attached after
-// player 1's gamepad is chosen (TOTK_TEST_PAD gives one), so it takes player 2's slot through scan_extra and is read
+// KAR_VPAD_MIRROR=<lo>-<hi>[,<n>] (splitscreen test runs, RELEASE_PLAN 7.1): n (1-3) more SDL virtual gamepads, attached after
+// player 1's gamepad is chosen (TOTK_TEST_PAD gives one), so they take players 2.. slots through scan_extra and are read
 // by input_poll_player like a real pad. From frame lo to hi it presses what player 1's poll reported (script
 // included), outside the window it rests. vpad_bits[p]: the Switch buttons gamepad input p gives (input_map).
-static SDL_Joystick *vpad;
+static SDL_Joystick *vpads[INPUT_EXTRA_PLAYERS];
+static int nvpad;
 static unsigned long long vpad_lo, vpad_hi;
 
 static void vpad_attach(void) {
     const char *e = cfg_get("KAR_VPAD_MIRROR");
-    if (!e || sscanf(e, "%llu-%llu", &vpad_lo, &vpad_hi) != 2 || vpad_lo > vpad_hi) return;
-    SDL_VirtualJoystickDesc d;
-    SDL_INIT_INTERFACE(&d);
-    d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
-    d.naxes = SDL_GAMEPAD_AXIS_COUNT;
-    d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
-    d.name = "KAR mirror gamepad";
-    SDL_JoystickID id = SDL_AttachVirtualJoystick(&d);
-    vpad = id ? SDL_OpenJoystick(id) : NULL;
-    rt_log(vpad ? "input: mirror gamepad attached, repeats player 1 in frames %llu-%llu"
-                : "input: mirror gamepad not attached (frames %llu-%llu)", vpad_lo, vpad_hi);
+    int n = 1;
+    if (!e || sscanf(e, "%llu-%llu,%d", &vpad_lo, &vpad_hi, &n) < 2 || vpad_lo > vpad_hi) return;
+    if (n < 1 || n > INPUT_EXTRA_PLAYERS) n = 1;
+    for (int i = 0; i < n; i++) {
+        SDL_VirtualJoystickDesc d;
+        SDL_INIT_INTERFACE(&d);
+        d.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        d.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        d.name = "KAR mirror gamepad";
+        SDL_JoystickID id = SDL_AttachVirtualJoystick(&d);
+        if ((vpads[nvpad] = id ? SDL_OpenJoystick(id) : NULL)) nvpad++;
+    }
+    rt_log("input: %d mirror gamepad(s) attached, repeat player 1 in frames %llu-%llu", nvpad, vpad_lo, vpad_hi);
 }
 
 static void vpad_feed(uint64_t b, const int32_t sl[2], const int32_t sr[2]) {   // under lock
-    if (!vpad) return;
+    if (!nvpad) return;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     int on = fr >= vpad_lo && fr <= vpad_hi;
     for (int p = PAD_SOUTH; p < PAD_COUNT; p++) {
@@ -487,15 +491,19 @@ static void vpad_feed(uint64_t b, const int32_t sl[2], const int32_t sr[2]) {   
         one[p] = 1;
         uint64_t bits = input_map_pad_buttons(one, pad_layout_get());
         int down = on && bits && (b & bits) == bits;
-        if (p == PAD_ZL || p == PAD_ZR)
-            SDL_SetJoystickVirtualAxis(vpad, p == PAD_ZL ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
-                                       down ? 32767 : 0);
-        else SDL_SetJoystickVirtualButton(vpad, pad_sdl[p], down);
+        for (int k = 0; k < nvpad; k++) {
+            if (p == PAD_ZL || p == PAD_ZR)
+                SDL_SetJoystickVirtualAxis(vpads[k], p == PAD_ZL ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
+                                                                 : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, down ? 32767 : 0);
+            else SDL_SetJoystickVirtualButton(vpads[k], pad_sdl[p], down);
+        }
     }
     const int32_t v[4] = {on ? sl[0] : 0, on ? -sl[1] : 0, on ? sr[0] : 0, on ? -sr[1] : 0};
     static const SDL_GamepadAxis ax[4] = {SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, SDL_GAMEPAD_AXIS_RIGHTX,
                                           SDL_GAMEPAD_AXIS_RIGHTY};
-    for (int i = 0; i < 4; i++) SDL_SetJoystickVirtualAxis(vpad, ax[i], (Sint16)(v[i] > 32767 ? 32767 : v[i] < -32767 ? -32767 : v[i]));
+    for (int k = 0; k < nvpad; k++)
+        for (int i = 0; i < 4; i++)
+            SDL_SetJoystickVirtualAxis(vpads[k], ax[i], (Sint16)(v[i] > 32767 ? 32767 : v[i] < -32767 ? -32767 : v[i]));
 }
 
 static void start(void) {

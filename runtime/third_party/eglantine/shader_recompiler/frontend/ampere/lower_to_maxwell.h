@@ -2595,25 +2595,29 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const u32 binding = insn.Bits(54, 5);
                 const bool second_buffer = !bindless && !bind_texture_buffer(binding);
                 const bool tex_b = bindless || second_buffer;
+                const auto copy = [&](u32 target, u32 source) {
+                    emit(0x5c98000000000000ULL | predicate | target | (u64{15} << 39) | (u64{source} << 20));
+                };
                 // DKB Recomp: the copies into the lowering's scratch registers run unpredicated. A predicated
                 // copy feeding a predicated TEX.B left the translator a phi of the handle with the scratch
                 // register's undefined earlier value, and its bindless pass resolved the handle to that (Kirby
                 // Air Riders' splitscreen composite: @!P0 TEX.B read zero, the upper view black). Scratch values
-                // are dead outside this sequence, so writing them on both paths changes nothing else.
-                const auto copy = [&](u32 target, u32 source) {
+                // are dead outside this sequence, so writing them on both paths changes nothing else. The
+                // results still go to their destinations under the predicate (copy).
+                const auto stage = [&](u32 target, u32 source) {
                     emit(0x5c98000000000000ULL | (u64{7} << 16) | target | (u64{15} << 39) | (u64{source} << 20));
                 };
                 // Coordinates to R250.., then LOD/bias, offsets and reference to R246...
-                for (u32 i = 0; i < coordinates; ++i) copy(250 + i, value(i));
+                for (u32 i = 0; i < coordinates; ++i) stage(250 + i, value(i));
                 u32 meta = 246;
                 u32 next = coordinates + handle_slot;
-                if (bindless) copy(meta++, texture_handle);
+                if (bindless) stage(meta++, texture_handle);
                 else if (second_buffer)
                     emit(0x4c98000000070000ULL | meta++ | (u64{15} << 39) | (u64{insn.Bits(40, 14)} << 20) |
                          (u64{binding} << 34));
-                if (has_lod) copy(meta++, value(next++));
-                if (offsets) copy(meta++, value(next++));
-                if (depth_compare) copy(meta++, value(next++));
+                if (has_lod) stage(meta++, value(next++));
+                if (offsets) stage(meta++, value(next++));
+                if (depth_compare) stage(meta++, value(next++));
                 if (tex_b) {
                     // Maxwell TEX.B: AOFFI at 36 and the LOD mode at 37 instead of 54 and 55.
                     emit(0xde80000000000000ULL | predicate | 250 | (u64{250} << 8) | (u64{246} << 20) |
