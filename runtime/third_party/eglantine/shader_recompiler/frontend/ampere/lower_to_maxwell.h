@@ -112,6 +112,11 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x823: operand(16); operand(24); operand(64); break;
     case 0x245: operand(16); operand(32); break;
     case 0xc45: operand(16); break;   // DKB Recomp: I2FP with a uniform source
+    // DKB Recomp: TEX with the handle in a uniform register. The destination, coordinate and meta registers are listed
+    // as pairs (two destination halves, coordinate pairs): a register listed but not written keeps its value.
+    case 0xf60: operand(16, 2); operand(24, 2); operand(32, 2); operand(64, 2); break;
+    case 0xc0c: operand(24); break;                    // DKB Recomp: ISETP with a uniform b (predicate results)
+    case 0x811: operand(16); operand(24); operand(64); break;   // DKB Recomp: LEA with an immediate shift
     case 0x810: operand(16); operand(24); operand(64); break;
     case 0x210: case 0x223: operand(16); operand(24); operand(32); operand(64); break;
     case 0x233: operand(16); operand(24); operand(32); break;
