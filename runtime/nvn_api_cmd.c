@@ -671,6 +671,14 @@ NVN_API(nvnCommandBufferBindProgram) {
     // KAR_CS_SEED (13.3): a compute stage bound here dispatches when the submit replays this buffer; its translation
     // starts now, on the seed threads, in parallel with the other programs this frame binds.
     const prog_t *p = arg_p(c, 1);
+    {   // programs with a stage that did not lower (nvn_api_obj.c): how often they are bound
+        extern uint32_t nvn_prog_dropped(const void *p);
+        uint32_t m = nvn_prog_dropped(p);
+        static int64_t binds;
+        if (m && plat_inc64(&binds) <= 20)
+            rt_log("nvn2: bind of program %p without stage(s) %#x, stage bits %#x, frame %llu", (const void *)p, m,
+                   (unsigned)arg_x(c, 2), (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+    }
     if (p && ((int)arg_x(c, 2) & (1 << 5)))
         for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
             const uint8_t *ctl = p->sd[i].control;

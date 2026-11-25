@@ -502,6 +502,26 @@ NVN_API(nvnProgramFinalize) {
     prog_release(o);
     o->magic = 0;
 }
+// Programs that lost a stage because its Ampere code did not lower (nvn2_lower.cpp): nvnCommandBufferBindProgram
+// counts their binds (nvn_prog_dropped), to tell whether such a program is used at all. Diagnostic, logged.
+static struct { const prog_t *p; uint32_t mask; } dropped[256];
+static PlatMutex dropped_lock = PLAT_MUTEX_INIT;
+static void nvn_prog_note_dropped(const prog_t *o, int stage, int n) {
+    plat_mutex_lock(&dropped_lock);
+    int k = -1;
+    for (int i = 0; i < 256 && k < 0; i++)
+        if (dropped[i].p == o || !dropped[i].p) k = i;
+    if (k >= 0) dropped[k].p = o, dropped[k].mask |= 1u << stage;
+    plat_mutex_unlock(&dropped_lock);
+    rt_log("nvn2: program %p drops stage %d of %d (its code did not lower)", (const void *)o, stage, n);
+}
+uint32_t nvn_prog_dropped(const void *p) {
+    if (!p) return 0;
+    for (int i = 0; i < 256 && dropped[i].p; i++)
+        if (dropped[i].p == p) return dropped[i].mask;
+    return 0;
+}
+
 static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
     if (n < 0 || n > 6 || (n && !sd)) {
         rt_log("nvn: ProgramSetShaders with %d stages at %p", n, (const void *)sd);
@@ -525,7 +545,7 @@ static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
             // A stage that does not lower is dropped: its raw control is ~0xd8 bytes, and every reader of
             // sd[].control (vk_exec_draw.c find_stage) takes the NVN 1 shape, reading +0x704 and +0x714 past its end.
             if (nvn2_lower(ctl, code, &nctl, &ncode)) next[i] = (NVNshaderData){(NVNbufferAddress)(uintptr_t)ncode, nctl};
-            else next[i] = (NVNshaderData){0, NULL};
+            else next[i] = (NVNshaderData){0, NULL}, nvn_prog_note_dropped(o, i, n);
         }
         ctl = next[i].control;
         code = (const uint8_t *)(uintptr_t)next[i].data;

@@ -16,3 +16,5 @@ Kurz testen, Ergebnis einfach in den Chat schreiben (z. B. „3.5 ok, 9.4 Ton l�
 | 17.5 | FSR 3.1 / DLSS | Overlay → Skalierung → „AMD FSR 3.1“ bzw. „NVIDIA DLSS“: Bild ruhig, scharf, kein Wackeln? |
 | 11.3 / 16.8 | AMD/Intel-GPU, Linux | Falls du Zugriff auf so einen PC hast |
 | 11.5 | Windows 10 | Falls du einen Windows-10-PC hast |
+| 1.11 | Konsolenvergleich Schatten | Konsole: Foto/Video einer Stelle unter einer Überdachung oder Brücke im Rennen (Air Ride, z. B. Floria-Felder Tunnel) – fallen dort Umgebungsschatten? |
+| 3.10 | Amiibo (optional) | Falls du ein echtes amiibo + Lesegerät/Dump hast: sag Bescheid |
