@@ -8,12 +8,14 @@
 // the gamepad's gyro and accelerometer (TOTK_MOTION=0, live: reads at rest). State layouts follow libnx HID.
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cfg.h"
 #include "host.h"
 #include "input.h"
+#include "nvn_api.h"
 #include "ov.h"
 #include "platform/platform.h"
 
@@ -32,6 +34,39 @@ static int enabled, allowed = 1, mouse_ready, keyboard_ready;
 static int64_t sample;
 
 static uint32_t pad_id(void) { return ov_handheld() ? 0x20u : 0u; }
+
+// KAR_P2_MIRROR=<lo>-<hi> (splitscreen probe, RELEASE_PLAN 7.1): a second full-key controller as player 2 (id 1),
+// docked only. From frame lo to hi it repeats player 1's state, so a test script presses for both; outside the window
+// it is connected and idle. Only while no second gamepad is player 2. supported: the ids 0-7 the game listed in
+// SetSupportedNpadIdType (bit per id).
+static uint32_t supported;
+static int p2_window(uint64_t *lo, uint64_t *hi) {
+    static int parsed, on;
+    static unsigned long long l, h;
+    if (!parsed) {
+        const char *e = cfg_get("KAR_P2_MIRROR");
+        on = e && sscanf(e, "%llu-%llu", &l, &h) == 2 && l <= h;
+        parsed = 1;
+        if (on) rt_log("hid: player 2 probe: connected, mirrors player 1 in frames %llu-%llu", l, h);
+    }
+    if (lo) *lo = l, *hi = h;
+    return on && !ov_handheld();
+}
+static int p2_probe(uint32_t id) { return id == 1 && p2_window(NULL, NULL) && !input_player_connected(2); }
+
+// Players 2 to 4 (local splitscreen, RELEASE_PLAN 7.1): ids 1-3 are full-key controllers fed by the host's second to
+// fourth gamepad (input_poll_player), docked only, once the game lists the id as supported.
+static int extra_live(uint32_t id) {
+    if (id < 1 || id > INPUT_EXTRA_PLAYERS || ov_handheld() || !(supported >> id & 1)) return 0;
+    return input_player_connected((int)id + 1) || p2_probe(id);
+}
+
+// Logs the first query of each controller id (ids 0-8 and 0x10, 0x20), to see which players the game polls.
+static void note_id(uint32_t id, const char *fn) {
+    static volatile int32_t seen;
+    int bit = id < 9 ? (int)id : id == 0x10 ? 9 : id == 0x20 ? 10 : 11;
+    if (!(__atomic_fetch_or(&seen, 1 << bit, __ATOMIC_RELAXED) & (1 << bit))) rt_log("hid: the game first asks for controller id %#x (%s)", id, fn);
+}
 static uint32_t pad_style(void) { return ov_handheld() ? STYLE_HANDHELD : STYLE_FULL_KEY; }
 
 static const uint32_t *need_id(Cpu *c, int i, const char *fn) {
@@ -56,9 +91,17 @@ static void ov_supported_ids(Cpu *c) {
     uint64_t n = arg_x(c, 1);
     if (n > 10 || (!ids && n)) rt_fatal("nn::hid::SetSupportedNpadIdType: invalid id list (%llu ids)", (unsigned long long)n);
     int ok = 0;
-    for (uint64_t i = 0; i < n; i++) ok |= ids[i] == pad_id();
+    uint32_t mask = 0;
+    char list[10 * 6 + 1] = "";
+    for (uint64_t i = 0; i < n; i++) {
+        ok |= ids[i] == pad_id();
+        if (ids[i] < 8) mask |= 1u << ids[i];
+        snprintf(list + strlen(list), sizeof list - strlen(list), " %#x", ids[i]);
+    }
+    static int told;
+    if (told++ < 4) rt_log("hid: supported controller ids:%s", list);
     plat_mutex_lock(&lock);
-    allowed = ok;
+    allowed = ok, supported = mask;
     plat_mutex_unlock(&lock);
 }
 
@@ -73,8 +116,11 @@ static void ov_supported_styles(Cpu *c) {
 static void ov_style_set(Cpu *c) {
     uint32_t id = *need_id(c, 0, "GetNpadStyleSet");
     plat_mutex_lock_shared(&lock);
+    note_id(id, "GetNpadStyleSet");
     uint32_t v = enabled && allowed && id == pad_id() ? styles & pad_style() : 0;
+    int extra = enabled && id != pad_id() && (styles & STYLE_FULL_KEY);
     plat_mutex_unlock_shared(&lock);
+    if (extra && extra_live(id)) v = STYLE_FULL_KEY;   // outside the lock: input_player_connected takes input.c's
     ret_x(c, v);
 }
 
@@ -90,14 +136,38 @@ static void npad_states(Cpu *c, uint32_t want) {
     if (max <= 0) { ret_x(c, 0); return; }
     if (!out) rt_fatal("nn::hid::GetNpadStates: null output");
     plat_mutex_lock(&lock);
+    static NpadState p1_last;   // player 1's newest state, for the player 2 probe
     NpadState s = {.sampling = ++sample};
     int live = want && enabled && allowed && id == pad_id() && want == pad_style() && (styles & want);
+    int extra = !live && want && enabled && want == STYLE_FULL_KEY && (styles & want);
     plat_mutex_unlock(&lock);
+    note_id(id, "GetNpadStates");
+    if (extra && extra_live(id) && input_poll_player((int)id + 1, &s.buttons, &s.lx, &s.ly, &s.rx, &s.ry)) {
+        s.attributes = ATTR_CONNECTED;
+        *out = s;
+        ret_x(c, 1);
+        return;
+    }
+    if (extra && p2_probe(id) && (supported >> 1 & 1)) {
+        uint64_t lo, hi, fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        p2_window(&lo, &hi);
+        plat_mutex_lock(&lock);
+        if (fr >= lo && fr <= hi) s.buttons = p1_last.buttons, s.lx = p1_last.lx, s.ly = p1_last.ly, s.rx = p1_last.rx,
+                                  s.ry = p1_last.ry;
+        plat_mutex_unlock(&lock);
+        s.attributes = ATTR_CONNECTED;
+        *out = s;
+        ret_x(c, 1);
+        return;
+    }
     if (live) {
         s.attributes = ATTR_CONNECTED;
         input_poll(&s.buttons, &s.lx, &s.ly, &s.rx, &s.ry);
+        plat_mutex_lock(&lock);
+        p1_last = s;
+        plat_mutex_unlock(&lock);
     }
-    __atomic_store_n(&game_buttons, s.buttons, __ATOMIC_RELAXED);
+    if (id == pad_id()) __atomic_store_n(&game_buttons, s.buttons, __ATOMIC_RELAXED);
     *out = s;
     ret_x(c, 1);
 }
@@ -152,7 +222,14 @@ static void ov_disconnect(Cpu *c) {
 // is already connected, so the applet returns at once with one player on it.
 static void ov_controller_support(Cpu *c) {
     ControllerSupportResult *out = arg_p(c, 0);
-    if (out) *out = (ControllerSupportResult){.players = 1, .selected = pad_id()};
+    const uint8_t *arg = arg_p(c, 1);
+    static int told;
+    if (arg && told++ < 8)
+        rt_log("hid: ShowControllerSupport arg %02x %02x %02x %02x %02x %02x %02x %02x", arg[0], arg[1], arg[2], arg[3],
+               arg[4], arg[5], arg[6], arg[7]);
+    int players = 1;
+    for (uint32_t id = 1; id <= INPUT_EXTRA_PLAYERS; id++) players += extra_live(id);
+    if (out) *out = (ControllerSupportResult){.players = (int8_t)players, .selected = pad_id()};
     ret_x(c, 0);
 }
 

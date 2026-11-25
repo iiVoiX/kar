@@ -100,3 +100,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - 2026-11-20: 3.2 ✅ (Road Trip gespielt). 7.6 Speichern-Einträge im Spiel ausgeblendet, Bedingung offen (Label-Wahl main+0x2ccf5e0).
 - 2026-11-20: 7.3 City Trial Ruckler gemessen, Ursache Gast-Sync (siehe Planzeile), nicht Shader/Pipeline.
 - 2026-11-20 7.3: Ursache = Gast-Arbeit + Host-Submit; VirtualQuery-Cache + Log-Drossel committed, offen nvn2_lower-Exceptions, disk_load_from im Submit.
+- 2026-11-25 7.1: Splitscreen-Eingabe fertig (P2 tritt bei, Rennen läuft), obere Hälfte 3D schwarz → nächster Schritt. Navigation heute: Menü startet auf Fahrschule, Popup schließt B@950, UP→Air Ride; Skriptzeiten = Ticks (~2,4 Frames).

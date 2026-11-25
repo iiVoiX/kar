@@ -345,9 +345,10 @@ static float stick_dead_get(void) {
 }
 
 // One gamepad stick through the dead zone; SDL's Y grows downwards, the Switch's upwards.
-static void stick(SDL_GamepadAxis ax, SDL_GamepadAxis ay, float dead, int32_t out[2]) {
-    input_pad_stick(SDL_GetGamepadAxis(pad, ax), -(int32_t)SDL_GetGamepadAxis(pad, ay), dead, out);
+static void stick_of(SDL_Gamepad *g, SDL_GamepadAxis ax, SDL_GamepadAxis ay, float dead, int32_t out[2]) {
+    input_pad_stick(SDL_GetGamepadAxis(g, ax), -(int32_t)SDL_GetGamepadAxis(g, ay), dead, out);
 }
+static void stick(SDL_GamepadAxis ax, SDL_GamepadAxis ay, float dead, int32_t out[2]) { stick_of(pad, ax, ay, dead, out); }
 
 // Open the first gamepad when none is open or the open one went away; logs once per change.
 static void scan_pads(void) {
@@ -637,6 +638,82 @@ void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_
 
 void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     poll_merged(buttons, lx, ly, rx, ry);
+}
+
+// ---- Players 2 to 4 (local splitscreen, RELEASE_PLAN 7.1): every further gamepad keeps a fixed slot (the lowest free
+// one when it connects; nothing moves up when another goes). Player 1 stays the first gamepad plus the keyboard, the
+// script and the recording. The extra players use player 1's layout and bindings (mixed pad types: RELEASE_PLAN 8.3),
+// have no rumble or motion, and read neutral while the text entry or the menu is open (only player 1 ends that state).
+// Under lock.
+static SDL_Gamepad *xpad[INPUT_EXTRA_PLAYERS];
+static uint64_t xnext_scan;
+
+static void scan_extra(void) {
+    uint64_t ms = plat_now_ns() / 1000000u;
+    if (ms < xnext_scan) return;
+    xnext_scan = ms + RESCAN_MS;
+    for (int i = 0; i < INPUT_EXTRA_PLAYERS; i++)
+        if (xpad[i] && !SDL_GamepadConnected(xpad[i])) {
+            SDL_CloseGamepad(xpad[i]), xpad[i] = NULL;
+            rt_log("input: player %d's gamepad disconnected", i + 2);
+        }
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    SDL_JoystickID p1 = pad ? SDL_GetGamepadID(pad) : 0;
+    for (int k = 0; ids && k < n; k++) {
+        int taken = ids[k] == p1;
+        for (int i = 0; i < INPUT_EXTRA_PLAYERS && !taken; i++) taken = xpad[i] && SDL_GetGamepadID(xpad[i]) == ids[k];
+        for (int i = 0; i < INPUT_EXTRA_PLAYERS && !taken; i++)
+            if (!xpad[i] && (xpad[i] = SDL_OpenGamepad(ids[k]))) {
+                taken = 1;
+                rt_log("input: gamepad \"%s\" is player %d", SDL_GetGamepadName(xpad[i]), i + 2);
+            }
+    }
+    SDL_free(ids);
+}
+
+int input_player_connected(int player) {
+    if (player < 2 || player > INPUT_EXTRA_PLAYERS + 1) return 0;
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    if (state == 1 && pad) scan_extra();   // the first gamepad is always player 1
+    SDL_Gamepad *g = state == 1 ? xpad[player - 2] : NULL;
+    int on = g && SDL_GamepadConnected(g);
+    plat_mutex_unlock(&lock);
+    return on;
+}
+
+int input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
+    uint64_t b = 0;
+    int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
+    *buttons = 0, *lx = *ly = *rx = *ry = 0;
+    if (player < 2 || player > INPUT_EXTRA_PLAYERS + 1) return 0;
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    SDL_Gamepad *g = NULL;
+    if (state == 1 && pad) {
+        binds_refresh();
+        scan_extra();
+        pad_update();
+        g = xpad[player - 2];
+    }
+    int on = g && SDL_GamepadConnected(g);
+    if (on && !g_block && !g_menu) {
+        uint8_t pd[PAD_COUNT] = {0};
+        for (int p = PAD_SOUTH; p < PAD_ZL; p++) pd[p] = SDL_GetGamepadButton(g, pad_sdl[p]);
+        pd[PAD_ZL] = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > TRIGGER_ON;
+        pd[PAD_ZR] = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > TRIGGER_ON;
+        for (int p = PAD_ZR + 1; p < PAD_COUNT; p++) pd[p] = SDL_GetGamepadButton(g, pad_sdl[p]);
+        b = input_map_pad_buttons(pd, pad_layout_get());
+        float dead = stick_dead_get();
+        stick_of(g, SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, dead, sl);
+        stick_of(g, SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, dead, sr);
+    }
+    plat_mutex_unlock(&lock);
+    stick_bits(&b, sl[0], sl[1], B_SL_LEFT);
+    stick_bits(&b, sr[0], sr[1], B_SR_LEFT);
+    *buttons = b, *lx = sl[0], *ly = sl[1], *rx = sr[0], *ry = sr[1];
+    return on;
 }
 
 int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly) {

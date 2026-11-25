@@ -6,6 +6,12 @@
 // Down=15) and the stick directions (StickLLeft..Down 16-19, StickRLeft..Down 20-23, derived from the sticks).
 // Sticks are -32767..32767, up is +y. TOTK_INPUT=none reports no input. Callable from any thread.
 void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+// Players 2 to 4 (local splitscreen): the second, third and fourth gamepad, each in a fixed slot while connected. No
+// keyboard, script or recording; neutral while the text entry or the menu is open. input_poll_player returns 1 and
+// the state like input_poll when that player's gamepad is connected, 0 and a neutral state otherwise. Any thread.
+#define INPUT_EXTRA_PLAYERS 3
+int input_player_connected(int player);
+int input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
 // The same for host UI (the text entry): never blocked. input_block(1) while a text entry is open: input_poll then
 // reports nothing; input_block(0) when it closes: nothing until all buttons and stick directions are released.
 void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
