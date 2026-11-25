@@ -34,6 +34,8 @@ std::unordered_map<const uint8_t *, uint64_t> origins;
 
 void put32(std::vector<uint8_t> &c, size_t at, uint32_t v) { std::memcpy(c.data() + at, &v, 4); }
 
+extern "C" int rt_game_is_kar(void);
+
 Lowered *lower(const uint8_t *control, const uint8_t *code) {
     uint32_t code_len, w0;
     std::memcpy(&code_len, control + 0x38, 4), std::memcpy(&w0, code, 4);
@@ -58,10 +60,14 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
     // A geometry stage (SPH shader type 4) takes the lowering's geometry forms: OUT, LEPC (its own code address) and the
     // native exit stub. Without them Kirby Air Riders' geometry stages failed at their first instruction (LEPC) and were
     // dropped, so ~60 programs drew without their geometry shader (RELEASE_PLAN.md 1.12). KAR_NATIVE_GS_LOWER=0: off.
-    static const int gs_lower = !(std::getenv("KAR_NATIVE_GS_LOWER") && *std::getenv("KAR_NATIVE_GS_LOWER") == '0');
+    // Kirby Air Riders only (Bananza's geometry stages lower without it). LEPC's address is a fixed stand-in, not the
+    // code's host address: the host runs geometry without the native exit stub that reads it, and a per-run address
+    // would change the lowered code, its cache key and so its translation at every start.
+    static const int gs_lower = rt_game_is_kar() &&
+                                !(std::getenv("KAR_NATIVE_GS_LOWER") && *std::getenv("KAR_NATIVE_GS_LOWER") == '0');
     if (gfx && ((w0 >> 10) & 15) == 4 && gs_lower) {
         options.geometry = true;
-        options.native_code_address = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(code + hdr));
+        options.native_code_address = 0x10000000ull;
     }
     const auto lowered = Shader::Ampere::LowerToMaxwell(native, options);
     if (!lowered) {

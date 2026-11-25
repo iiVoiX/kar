@@ -112,9 +112,24 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x823: operand(16); operand(24); operand(64); break;
     case 0x245: operand(16); operand(32); break;
     case 0xc45: operand(16); break;   // DKB Recomp: I2FP with a uniform source
-    // DKB Recomp: TEX with the handle in a uniform register. The destination, coordinate and meta registers are listed
-    // as pairs (two destination halves, coordinate pairs): a register listed but not written keeps its value.
-    case 0xf60: operand(16, 2); operand(24, 2); operand(32, 2); operand(64, 2); break;
+    // DKB Recomp: TEX with the handle in a uniform register, counted as its lowering reads it (the TEX case): the
+    // destination holds the masked components (two in Rd and the rest in the second destination when split), the
+    // coordinate list (coordinates, LOD, offsets, depth reference) sits as halves of Ra and Rb up to four values and as
+    // Ra quartet plus Rb beyond.
+    case 0xf60: {
+        const u32 mask = input.Bits(72, 4), comps = static_cast<u32>(__builtin_popcount(mask));
+        const bool split = input.Bits(64, 8) != 255;
+        constexpr std::array<u32, 8> coordinate_count{1, 2, 3, 3, 2, 3, 0, 4};
+        const u32 lod = input.Bits(87, 3);
+        const u32 n = coordinate_count[input.Bits(61, 3)] + (lod == 2 || lod == 3 || lod == 6 || lod == 7 ? 1 : 0) +
+                      input.Bits(76, 1) + input.Bits(78, 1);
+        const u32 ra = n <= 4 ? (n + 1) / 2 : 4, rb = n - ra;
+        operand(16, split ? 2 : (comps ? comps : 1));
+        if (split && comps > 2) operand(64, comps - 2);
+        if (ra) operand(24, ra);
+        if (rb) operand(32, rb);
+        break;
+    }
     case 0xc0c: operand(24); break;                    // DKB Recomp: ISETP with a uniform b (predicate results)
     case 0x811: operand(16); operand(24); operand(64); break;   // DKB Recomp: LEA with an immediate shift
     case 0x810: operand(16); operand(24); operand(64); break;
