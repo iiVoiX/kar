@@ -79,6 +79,7 @@ const GfxShader *gfx_shader_load_input(const uint8_t iid[32], int xlate);
 // Compute prefetch: a program's compute stage (lowered control and code, kept for the process) is loaded from its
 // stored input in the background; each loaded shader goes to the sink, which starts its pipeline (gfx_shader.c).
 void gfx_shader_prefetch_cs(const uint8_t *control, const uint8_t *code);
+void gfx_shader_seed_bound_cs(const uint8_t *control, const uint8_t *code);   // KAR_CS_SEED: a bound compute program
 void gfx_shader_set_prefetch_sink(void (*sink)(const GfxShader *));
 // Frees a compute shader's SPIR-V once its pipeline is built; gfx_shader_spirv loads it again when asked.
 void gfx_shader_drop_spirv(const GfxShader *cs);

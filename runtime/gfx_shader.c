@@ -412,6 +412,10 @@ static int child_start(Svc *v) {
         else rt_log("gfx_shader: %s is not executable and chmod failed", xlate_exe);
     }
 #endif
+    // The translator is a .NET program: its background (concurrent) garbage collector made many translators running at
+    // once slow each other down (14 at once: 15% fewer shaders per second with it). The children inherit this.
+    static int gc_env;
+    if (!gc_env++ && !getenv("DOTNET_gcConcurrent")) plat_setenv("DOTNET_gcConcurrent", "0");
     v->child = plat_child_start(xlate_exe, "--serve", &err);
     if (!v->child) {
         rt_log("gfx_shader: cannot start %s (error %lu)", xlate_exe, (unsigned long)err);
@@ -4398,27 +4402,37 @@ static void pf_index(void) {
            PF.n, (plat_now_ns() - t0) / 1e6, CSU.session, CSU.n_file);
 }
 
-// KAR_CS_SEED=<threads> (13.3): a compute program with no stored input (a fresh install) is translated in the background
-// from the moment the game creates it, with the default answers: its local size from the control section, no texture
-// types. Nearly every Kirby compute shader queries no texture slot (2990 of 3000 .res.json), so its input id is that of
-// the first dispatch, which then loads it from the cache instead of translating it inside the replay. The game creates
-// its ~5500 compute programs at boot and in the menus, minutes before City Trial dispatches them. The seed threads get
-// translator children of their own (the run-time limit is raised by their count) and give the SPIR-V back after each
-// translation (the dispatch loads it again, gfx_shader_spirv). Only translation: no pipelines are built here.
+// Compute seed (13.3, KAR_CS_SEED threads, on by default): on a fresh install every compute shader was translated inside
+// the replay on its first dispatch, one after another, and the first City Trial visit ran at 1-4 fps for minutes. The
+// seed threads translate a compute program as soon as the game binds it into a command buffer (gfx_shader_seed_bound_cs),
+// before the submit replays it, so the programs of a frame translate in parallel, and hand it to the pipeline builders.
+// They use the default answers: the local size from the control section, no texture types. Nearly every Kirby compute
+// shader queries no texture slot (2990 of 3000 .res.json), so the dispatch's input id is the same and it finds the
+// translation done or in flight; a shader that does query one translates again in the replay as before. The seed
+// threads get translator children of their own (the run-time limit is raised by their count, SVC_SEED_RESERVE stay for
+// the rest). KAR_CS_SEED_ALL=1 also queues every created program without a stored input (the game creates ~5500 at boot
+// and in the menus); that took longer than the menus last and slowed them, so it is off.
 static struct {
     PlatMutex m;
     PlatCond c;
     const uint8_t *(*q)[2];
     uint32_t head, tail, cap;
+    const uint8_t *(*u)[2];                                // bound programs (gfx_shader_seed_bound_cs): taken first
+    uint32_t uhead, utail, ucap;
+    const uint8_t **seen;                                  // controls already queued from a bind (open addressing)
+    uint32_t nseen;
     int threads;
-    int64_t done, xlated, failed, ns;
+    int64_t done, xlated, failed, ns, bound;
 } SD = {.m = PLAT_MUTEX_INIT, .c = PLAT_COND_INIT};
+#define SD_SEEN (1u << 16)
 
+// KAR_CS_SEED=<threads>, 0 off; unset: half the logical CPUs, at most 14.
 static int seed_threads(void) {
     static int n = -1;
     if (n < 0) {
         const char *e = getenv("KAR_CS_SEED");
-        n = e && *e ? atoi(e) : 0;
+        int cpus = (int)plat_cpu_count();
+        n = e && *e ? atoi(e) : (cpus / 2 > 14 ? 14 : cpus / 2);
         if (n < 0) n = 0;
         if (n > 16) n = 16;
     }
@@ -4431,10 +4445,12 @@ static void seed_worker(void *arg) {
     svc_is_seed = 1;
     for (;;) {
         plat_mutex_lock(&SD.m);
-        while (SD.head == SD.tail) plat_cond_wait(&SD.c, &SD.m);
-        const uint8_t *control = SD.q[SD.head][0], *code = SD.q[SD.head][1];
-        SD.head++;
-        uint32_t left = SD.tail - SD.head;
+        while (SD.head == SD.tail && SD.uhead == SD.utail) plat_cond_wait(&SD.c, &SD.m);
+        int urgent = SD.uhead != SD.utail;
+        const uint8_t *control, *code;
+        if (urgent) control = SD.u[SD.uhead][0], code = SD.u[SD.uhead][1], SD.uhead++;
+        else control = SD.q[SD.head][0], code = SD.q[SD.head][1], SD.head++;
+        uint32_t left = SD.tail - SD.head + SD.utail - SD.uhead;
         plat_mutex_unlock(&SD.m);
         GfxShaderAnswers a;
         memset(&a, 0, sizeof a);
@@ -4450,20 +4466,83 @@ static void seed_worker(void *arg) {
         plat_add64(&SD.ns, (int64_t)(plat_now_ns() - t0));
         if (!s) plat_inc64(&SD.failed);
         else {
-            if ((uint64_t)n_xlated != x0) plat_inc64(&SD.xlated);
-            gfx_shader_drop_spirv(s);
+            int fresh = (uint64_t)n_xlated != x0;
+            if (fresh) plat_inc64(&SD.xlated);
+            // Translated just now and about to dispatch: its pipeline is built next, as the prefetch does it. One that
+            // was already in a cache is left to the dispatch and the compute prefetch, as without the seed (a second
+            // pipeline job for it cost frames in warm play).
+            if (urgent && fresh && pf_sink) {
+                if (s->spirv) plat_add64(&pf_resident, (int64_t)(s->words * 4));
+                pf_sink(s);
+            } else {
+                gfx_shader_drop_spirv(s);
+            }
         }
         int64_t d = plat_inc64(&SD.done);
         if (d % 256 == 0 || !left)
-            rt_log("gfx_shader: compute seed: %lld done (%lld translated, %lld failed), %.0f ms each, %u queued, frame %llu",
-                   (long long)d, (long long)SD.xlated, (long long)SD.failed, SD.ns / 1e6 / (double)d, left,
+            rt_log("gfx_shader: compute seed: %lld done (%lld translated, %lld failed, %lld from binds), %.0f ms each, %u queued, frame %llu",
+                   (long long)d, (long long)SD.xlated, (long long)SD.failed, (long long)SD.bound, SD.ns / 1e6 / (double)d, left,
                    (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
     }
 }
 
+static void seed_start_locked(int n) {
+    if (SD.threads) return;
+    SD.threads = n;
+    plat_mutex_lock(&S.lock);
+    if (!S.limit) S.limit = svc_runtime_limit();
+    plat_mutex_unlock(&S.lock);
+    plat_xchg32(&svc_seed_extra, n);
+    svc_set_limit(svc_runtime_limit());
+    rt_log("gfx_shader: compute seed: %d threads, translator children raised to %d (%d kept for the rest)", n,
+           svc_runtime_limit(), SVC_SEED_RESERVE);
+    for (int i = 0; i < n; i++) plat_thread_spawn(seed_worker, NULL, "shader seed", 0);
+}
+
+// KAR_CS_SEED: a compute program the game binds into a command buffer is translated on the seed threads ahead of the
+// queue of created programs, once per control section (the binds of later frames cost a lookup). The dispatch that
+// replays it then finds the translation done or in flight, and several programs of one frame translate in parallel
+// instead of one after another inside the replay.
+void gfx_shader_seed_bound_cs(const uint8_t *control, const uint8_t *code) {
+    int n = seed_threads();
+    if (!n || !control || !code) return;
+    if (__atomic_load_n(&PF.indexed, __ATOMIC_ACQUIRE) && PF.n) {
+        // A program with a stored input has been translated before: the compute prefetch and the dispatch load it,
+        // as without the seed (seeding those too cost frames in warm play: their SPIR-V loaded twice).
+        uint32_t length;
+        memcpy(&length, control + 0x704, 4);
+        PfEnt k = {.h = pf_hash(control, code, length)};
+        if (bsearch(&k, PF.ix, PF.n, sizeof k, pf_cmp)) return;
+    }
+    uint64_t h = (uint64_t)(uintptr_t)control * 0x9E3779B97F4A7C15ull;
+    plat_mutex_lock(&SD.m);
+    if (!SD.seen && !(SD.seen = calloc(SD_SEEN, sizeof *SD.seen))) { plat_mutex_unlock(&SD.m); return; }
+    for (uint32_t i = (uint32_t)(h >> 40) & (SD_SEEN - 1);; i = (i + 1) & (SD_SEEN - 1)) {
+        if (SD.seen[i] == control) { plat_mutex_unlock(&SD.m); return; }
+        if (!SD.seen[i]) {
+            if (SD.nseen >= SD_SEEN / 2) { plat_mutex_unlock(&SD.m); return; }   // full: the replay translates later ones
+            SD.seen[i] = control, SD.nseen++;
+            break;
+        }
+    }
+    if (SD.utail == SD.ucap) {
+        uint32_t c2 = SD.ucap ? SD.ucap * 2 : 1024;
+        const uint8_t *(*t)[2] = realloc(SD.u, (size_t)c2 * sizeof *t);
+        if (t) SD.u = t, SD.ucap = c2;
+    }
+    if (SD.utail < SD.ucap) {
+        SD.u[SD.utail][0] = control, SD.u[SD.utail][1] = code, SD.utail++, SD.bound++;
+        seed_start_locked(n);
+        plat_cond_signal(&SD.c);
+    }
+    plat_mutex_unlock(&SD.m);
+}
+
 static void seed_push(const uint8_t *control, const uint8_t *code) {
     int n = seed_threads();
-    if (!n) return;
+    static int all = -1;
+    if (all < 0) all = getenv("KAR_CS_SEED_ALL") && *getenv("KAR_CS_SEED_ALL") == '1';
+    if (!n || !all) return;   // KAR_CS_SEED_ALL=1: also every created program, in creation order
     plat_mutex_lock(&SD.m);
     if (SD.tail == SD.cap) {
         uint32_t c = SD.cap ? SD.cap * 2 : 4096;
@@ -4473,17 +4552,7 @@ static void seed_push(const uint8_t *control, const uint8_t *code) {
     if (SD.tail < SD.cap) {
         SD.q[SD.tail][0] = control, SD.q[SD.tail][1] = code;
         SD.tail++;
-        if (!SD.threads) {
-            SD.threads = n;
-            plat_mutex_lock(&S.lock);
-            if (!S.limit) S.limit = svc_runtime_limit();
-            plat_mutex_unlock(&S.lock);
-            plat_xchg32(&svc_seed_extra, n);
-            svc_set_limit(svc_runtime_limit());
-            rt_log("gfx_shader: compute seed: %d threads, translator children raised to %d (%d kept for the rest)", n,
-                   svc_runtime_limit(), SVC_SEED_RESERVE);
-            for (int i = 0; i < n; i++) plat_thread_spawn(seed_worker, NULL, "shader seed", 0);
-        }
+        seed_start_locked(n);
         plat_cond_signal(&SD.c);
     }
     plat_mutex_unlock(&SD.m);
@@ -4497,6 +4566,7 @@ static void pf_worker(void *arg) {
     if (cache_dir[0] && !CSU.loaded) csu_load();   // the cold-driver prebuild may have loaded it (gfx_shader_cs_used_iids)
     plat_mutex_unlock(&CSU.m);
     if (cache_dir[0]) pf_index();
+    __atomic_store_n(&PF.indexed, 1, __ATOMIC_RELEASE);   // PF.ix is fixed from here (gfx_shader_seed_bound_cs reads it)
     for (;;) {
         plat_mutex_lock(&PF.m);
         while (PF.head == PF.tail) {

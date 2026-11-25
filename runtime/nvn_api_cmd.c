@@ -668,6 +668,17 @@ NVN_API(nvnCommandBufferBindProgram) {
         }
     }
     *REC(cmd_of(c), OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){arg_p(c, 1), (int)arg_x(c, 2)};
+    // KAR_CS_SEED (13.3): a compute stage bound here dispatches when the submit replays this buffer; its translation
+    // starts now, on the seed threads, in parallel with the other programs this frame binds.
+    const prog_t *p = arg_p(c, 1);
+    if (p && ((int)arg_x(c, 2) & (1 << 5)))
+        for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
+            const uint8_t *ctl = p->sd[i].control;
+            uint32_t st;
+            if (!ctl || !p->sd[i].data) continue;
+            memcpy(&st, ctl + 0x714, 4);
+            if (st == 5) gfx_shader_seed_bound_cs(ctl, (const uint8_t *)(uintptr_t)p->sd[i].data);
+        }
 }
 // void nvnCommandBufferBind{Blend,Color,ChannelMask,Multisample,Polygon,DepthStencil}State(NVNcommandBuffer *cmd,
 // const NVN*State *state): the state object's bytes are copied (p_bind_state.kind order)
