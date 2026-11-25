@@ -279,6 +279,42 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 
+
+// Monitor n (1-based, in EnumDisplayMonitors order): its work area and a name for the menu ("1: 2560x1440 *").
+// 0 when there is no such monitor. gfx_window_monitor_count gives how many there are.
+typedef struct { int want, seen; RECT work; char name[64]; } MonPick;
+static BOOL CALLBACK mon_pick(HMONITOR m, HDC dc, LPRECT r, LPARAM lp) {
+    (void)dc, (void)r;
+    MonPick *p = (MonPick *)lp;
+    if (++p->seen != p->want) return TRUE;
+    MONITORINFOEXA mi = {.cbSize = sizeof mi};
+    if (!GetMonitorInfoA(m, (MONITORINFO *)&mi)) return FALSE;
+    p->work = mi.rcWork;
+    snprintf(p->name, sizeof p->name, "%d: %ldx%ld%s", p->want, mi.rcMonitor.right - mi.rcMonitor.left,
+             mi.rcMonitor.bottom - mi.rcMonitor.top, mi.dwFlags & MONITORINFOF_PRIMARY ? " *" : "");
+    return FALSE;
+}
+int gfx_window_monitor_rect(int n, RECT *work, char *name, size_t name_size) {
+    if (n < 1) return 0;
+    MonPick p = {.want = n};
+    EnumDisplayMonitors(NULL, NULL, mon_pick, (LPARAM)&p);
+    if (p.seen < n || !p.name[0]) return 0;
+    if (work) *work = p.work;
+    if (name && name_size) snprintf(name, name_size, "%s", p.name);
+    return 1;
+}
+int gfx_window_monitor_count(void) {
+    MonPick p = {.want = -1};
+    EnumDisplayMonitors(NULL, NULL, mon_pick, (LPARAM)&p);
+    return p.seen;
+}
+// The menu's name of monitor n, or NULL.
+const char *gfx_window_monitor_name(int n) {
+    static char names[8][64];
+    if (n < 1 || n > 8 || !gfx_window_monitor_rect(n, NULL, names[n - 1], sizeof names[n - 1])) return NULL;
+    return names[n - 1];
+}
+
 static void window_main(void *arg) {
     (void)arg;
     HINSTANCE inst = GetModuleHandleW(NULL);
@@ -299,7 +335,13 @@ static void window_main(void *arg) {
     // button flashes until it is brought up, and TOTK_FULLSCREEN waits for that first activation.
     // TOTK_BACKGROUND_WINDOW=1 (test runs): no flashing, never fullscreen at start, and F11 keeps the window's place.
     int background = g_background = cfg_get("TOTK_BACKGROUND_WINDOW") && atoi(cfg_get("TOTK_BACKGROUND_WINDOW"));
-    g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"Kirby Air Riders Recomp", WND_STYLE, CW_USEDEFAULT, CW_USEDEFAULT, ow, oh, NULL,
+    // TOTK_MONITOR=<n> (settings: monitor, 1 = the first one Windows lists; 0 or unset: let Windows place it): the
+    // window opens centred on that monitor, so fullscreen (MonitorFromWindow) covers it as well
+    int px = CW_USEDEFAULT, py = CW_USEDEFAULT;
+    RECT mon;
+    if (gfx_window_monitor_rect(cfg_get("TOTK_MONITOR") ? atoi(cfg_get("TOTK_MONITOR")) : 0, &mon, NULL, 0))
+        px = mon.left + ((mon.right - mon.left) - ow) / 2, py = mon.top + ((mon.bottom - mon.top) - oh) / 2;
+    g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"Kirby Air Riders Recomp", WND_STYLE, px, py, ow, oh, NULL,
                              NULL, inst, NULL);
     if (!g_hwnd) {
         rt_log("gfx: CreateWindowEx failed (%lu)", GetLastError());

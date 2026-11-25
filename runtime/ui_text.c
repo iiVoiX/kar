@@ -88,6 +88,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS] = "FSR sharpness",
     [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling; 0 turns it off.",
     [UI_MENU_FRAME_GEN] = "Frame generation",
+    [UI_MENU_MONITOR] = "Monitor", [UI_MENU_MONITOR_AUTO] = "Automatic",
+    [UI_MENU_MONITOR_DESC] = "The monitor the window opens on; fullscreen covers that monitor. Restart to apply.",
     [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 inserts a generated picture between two real ones: about twice the frames shown. "
                                "The game itself keeps its own pace. Best with a frame rate limit of at least 60. Restart to apply.",
     [UI_MENU_COLOR] = "Colour",
@@ -112,7 +114,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FPS_LIMIT_DESC] = "The most frames per second the game draws. Above 60 is experimental and needs Game speed "
                                "follows the clock.",
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
-    [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
+    [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS", [UI_MENU_FPS_165] = "165 FPS", [UI_MENU_FPS_240] = "240 FPS", [UI_MENU_FPS_UNLIMITED] = "Unlimited",
     // the monitor's refresh rate; printf format with the rate in Hz when it is known
     [UI_MENU_FPS_DISPLAY] = "Monitor rate", [UI_MENU_FPS_DISPLAY_HZ] = "Monitor rate (%.0f Hz)",
     [UI_MENU_REALTIME] = "Game speed follows the clock",
@@ -386,6 +388,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS] = "Резкость FSR",
     [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR; 0 выключает его.",
     [UI_MENU_FRAME_GEN] = "Генерация кадров",
+    [UI_MENU_MONITOR] = "Монитор", [UI_MENU_MONITOR_AUTO] = "Автоматически",
+    [UI_MENU_MONITOR_DESC] = "Монитор, на котором открывается окно; полный экран занимает этот монитор. Действует после перезапуска.",
     [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 вставляет созданный кадр между двумя настоящими: примерно вдвое больше кадров на экране. "
                                "Сама игра идёт в своём темпе. Лучше с ограничением кадров от 60. Действует после перезапуска.",
     [UI_MENU_COLOR] = "Цвет",
@@ -411,7 +415,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_FPS_LIMIT_DESC] = "Наибольшее число кадров в секунду. Выше 60 — экспериментальный режим, нужна «Скорость "
                                "игры по часам».",
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
-    [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
+    [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS", [UI_MENU_FPS_165] = "165 FPS", [UI_MENU_FPS_240] = "240 FPS", [UI_MENU_FPS_UNLIMITED] = "Без ограничения",
     [UI_MENU_FPS_DISPLAY] = "Как у монитора", [UI_MENU_FPS_DISPLAY_HZ] = "Как у монитора (%.0f Гц)",
     [UI_MENU_REALTIME] = "Скорость игры по часам",
     [UI_MENU_REALTIME_DESC] = "Игра идёт по реальному времени, медленный кадр её не замедляет.",
@@ -676,6 +680,8 @@ static const char *const text_de[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS] = "Schärfe",
     [UI_MENU_SHARPNESS_DESC] = "Nachschärfen nach der Skalierung; 0 schaltet es aus.",
     [UI_MENU_FRAME_GEN] = "Bildgenerierung",
+    [UI_MENU_MONITOR] = "Monitor", [UI_MENU_MONITOR_AUTO] = "Automatisch",
+    [UI_MENU_MONITOR_DESC] = "Der Monitor, auf dem das Fenster öffnet; Vollbild füllt diesen Monitor. Wirkt nach Neustart.",
     [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 fügt zwischen zwei echten Bildern ein berechnetes ein: etwa doppelt so viele Bilder. "
                                "Das Spiel selbst läuft im eigenen Takt. Am besten mit einem FPS-Limit ab 60. Wirkt nach Neustart.",
     [UI_MENU_COLOR] = "Farbe",
@@ -697,7 +703,7 @@ static const char *const text_de[UI_TEXT_COUNT] = {
     [UI_MENU_DKB_FPS_LIMIT_DESC] = "Über 60 ist experimentell und braucht genug CPU- und GPU-Leistung.",
     [UI_MENU_FPS_LIMIT_DESC] = "Höchstens so viele Bilder pro Sekunde. Über 60 ist experimentell.",
     [UI_MENU_FPS_30] = "30 FPS", [UI_MENU_FPS_40] = "40 FPS", [UI_MENU_FPS_45] = "45 FPS",
-    [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS",
+    [UI_MENU_FPS_60] = "60 FPS", [UI_MENU_FPS_90] = "90 FPS", [UI_MENU_FPS_120] = "120 FPS", [UI_MENU_FPS_144] = "144 FPS", [UI_MENU_FPS_165] = "165 FPS", [UI_MENU_FPS_240] = "240 FPS", [UI_MENU_FPS_UNLIMITED] = "Unbegrenzt",
     [UI_MENU_FPS_DISPLAY] = "Monitorfrequenz", [UI_MENU_FPS_DISPLAY_HZ] = "Monitorfrequenz (%.0f Hz)",
     [UI_MENU_REALTIME] = "Spieltempo nach Uhr",
     [UI_MENU_REALTIME_DESC] = "Lässt das Spiel nach echter Zeit laufen, damit ein langsames Bild es nicht bremst.",

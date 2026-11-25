@@ -140,6 +140,7 @@ static int limit_parse(void) {
     const char *e = cfg_get("TOTK_FPS_LIMIT"), *old = cfg_get("TOTK_FPS60");
     if (!e || !*e) return old && !strcmp(old, "0") ? 30 : 60;
     if (!strcmp(e, "display")) return 0;
+    if (!strcmp(e, "unlimited")) return LIMIT_MAX_HZ;   // the pacer's ceiling: as fast as the game and GPU run
     char *end;
     long n = strtol(e, &end, 10);
     if (!*end && n >= LIMIT_MIN_HZ && n <= LIMIT_MAX_HZ) return (int)n;

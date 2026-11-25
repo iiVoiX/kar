@@ -59,7 +59,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"REALTIME", "frame rate"}, {"CLOTH_REALTIME", "frame rate"}, {"HIGHFPS_FIX", "frame rate"},
     {"FULLSCREEN", "display"}, {"WINDOW_SIZE", "display"}, {"PERF_OVERLAY", "display"}, {"VK_PRESENT", "display"},
     {"GPU_INDEX", "display"}, {"OUTPUT_RES", "display"}, {"RENDER_SCALE", "display"}, {"UPSCALER", "display"},
-    {"ULTRAWIDE", "display"}, {"HUD_POSITION", "display"}, {"FRAME_GEN", "display"},
+    {"ULTRAWIDE", "display"}, {"HUD_POSITION", "display"}, {"FRAME_GEN", "display"}, {"MONITOR", "display"},
     {"SHARPNESS", "display"}, {"ASPECT", "display"}, {"FOV", "display"}, {"COLOR_PRESET", "display"},
     {"COLOR_BRIGHTNESS", "display"}, {"COLOR_CONTRAST", "display"}, {"COLOR_SATURATION", "display"},
     {"COLOR_GAMMA", "display"},
@@ -105,7 +105,8 @@ static const CfgMeta metas[] = {
     {"UPSCALER", "fsr", "fsr|bilinear|fsr3|external", LIVE}, {"SHARPNESS", "80", "0..100", LIVE},
     {"ASPECT", "fit", "fit|stretch", LIVE}, {"FOV", "100", "70..140", LIVE},
     {"ULTRAWIDE", "0", "0|1", RESTART},
-    {"FRAME_GEN", "0", "0|1", RESTART},   // Kirby: AMD FSR 3 frame generation (vk_fg.cpp)
+    {"FRAME_GEN", "0", "0|1", RESTART},
+    {"MONITOR", "0", NULL, RESTART},   // 0: Windows places the window; n: centred on monitor n (gfx_window_win.c)   // Kirby: AMD FSR 3 frame generation (vk_fg.cpp)
     // the menu's video preset: writes RENDER_SCALE, UPSCALER and SHARPNESS; moving one of them makes it custom
     {"VIDEO_PRESET", "balanced", "performance|balanced|quality|ultra|custom", LIVE},
     {"SCREENSHOT_KEY", "1", "0|1", LIVE},
@@ -116,7 +117,7 @@ static const CfgMeta metas[] = {
     {"COLOR_GAMMA", "1", "0.8..1.2", LIVE},
     {"DEVICE_PROFILE", "auto", "auto|desktop|deck", RESTART},
     // Game
-    {"FPS_LIMIT", "60", "30|40|45|60|90|120|144|display", LIVE}, {"FPS60", "1", "0|1", LIVE},
+    {"FPS_LIMIT", "60", "30|40|45|60|90|120|144|165|240|unlimited|display", LIVE}, {"FPS60", "1", "0|1", LIVE},
     {"REALTIME", "1", "0|1", RESTART}, {"CLOTH_REALTIME", "1", "0|1", RESTART},
     {"HIGHFPS_FIX", "1", "0|1", RESTART},
     {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR", RESTART},

@@ -193,7 +193,7 @@ int vk_kar_jitter_viewport(uint32_t w, uint32_t h, uint32_t dw, uint32_t dh, flo
 static int fsr3_record(int backend, VkCtx *c, VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32_t sw, uint32_t sh,
                        VkImageView out, uint32_t dw, uint32_t dh, int sharp, int decode) {
     static uint64_t last_frame;
-    static uint32_t miss, exact_miss, runs;
+    static uint32_t miss;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (!U.rcas || !mid_image(c, dw, dh)) return 0;
     kar_fsr3_size[0] = sw, kar_fsr3_size[1] = sh, kar_fsr3_size[2] = dw, kar_fsr3_size[3] = dh;
@@ -201,8 +201,6 @@ static int fsr3_record(int backend, VkCtx *c, VkCommandBuffer cb, VkImage src, V
     if (!vk_fg_mv_compute(cb, sw, sh, &mv)) return miss++, 0;   // FSR 1 for this frame; the history resets after it
     float jit[2] = {0, 0};
     if (!jitter_of(fr, &jit[0], &jit[1])) jit[0] = jit[1] = 0;
-    runs++;
-    (void)exact_miss;
     int reset = !last_frame || last_frame + 1 != fr || miss;
     miss = 0, last_frame = fr;
     if (U.mid.fresh) {
