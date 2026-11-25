@@ -105,3 +105,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - 2026-11-25 7.1: Splitscreen 2P läuft (Lowering-Fix TEX.B-Scratch-Kopien unprädiziert). Offline-Kette: DKB_SHADER_DUMP → build/dkb_lower_test.exe → totk_xlate jobs.json (DMSH_STACK=1 zeigt 'Failed to find handle').
 - 2026-11-25: -O2 A/B gemessen (≤10 % Gast, Rauschen) → bleibt -O1; Frame-Zeit = Submit-Wartezeit. EP-Regression nach Lowering-Fix OK.
 - 2026-11-25: 7.4 ✅ (Top Ride + Road Trip 1. Etappe, Skripte angepasst).
+- 2026-11-25: 18.6 ✅ (Rennuhr = Wandzeit bei 130 fps).
