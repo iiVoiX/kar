@@ -871,29 +871,32 @@ static uint64_t ui_frag_tex(VkExec *ex) {
 // whose fragment texture is 1x1 (a flat fade, flash or dimmer: KAR_UI_FULL_LOG showed the fades and flashes as such
 // quads and the menu backgrounds with 1920x1080 textures) is drawn over the whole layer width. Returns that width, or 0.
 int vk_exec_fs_slots(uint64_t serial, int *stage, uint64_t mask[2]);
+static int ui_full_why;   // KAR_UI_FULL_LOG: why ui_full_flat last refused (1 block, 2 program not noted, 3 slot unbound, 4 not 1x1,
+                         // 5 samples nothing)
 static uint32_t ui_full_flat(VkExec *ex) {
     static int on = -1;
     if (on < 0) on = getenv("KAR_UI_FULL") && *getenv("KAR_UI_FULL") == '1';
+    ui_full_why = 0;
     if (!on || !ui_block || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height))
         return 0;
     const float *f = (const float *)(uintptr_t)ui_block;
-    if (f[0] != 1920.0f || f[3] != 0.0f || f[5] != -1080.0f || f[7] != 0.0f) return 0;
+    if (f[0] != 1920.0f || f[3] != 0.0f || f[5] != -1080.0f || f[7] != 0.0f) return ui_full_why = 1, 0;
     // flat only if every texture slot its fragment shader samples (reflection, noted at an earlier draw of the program:
     // vk_exec_draw.c vk_exec_fs_slots) holds a 1x1 texture; a program not drawn before, or sampling nothing, stays
     int stage;
     uint64_t mask[2];
-    if (!ex->prog || !vk_exec_fs_slots(ex->prog->serial, &stage, mask) || stage < 0 || stage >= 6 || !(mask[0] | mask[1]))
-        return 0;
+    if (!ex->prog || !vk_exec_fs_slots(ex->prog->serial, &stage, mask) || stage < 0 || stage >= 6) return ui_full_why = 2, 0;
+    if (!(mask[0] | mask[1])) return ui_full_why = 5, 0;
     int bound = 0;
     vk_texture_lock();
     for (int sl = 0; sl < 128; sl++) {
         if (!(mask[sl >> 6] >> (sl & 63) & 1)) continue;
         uint64_t th = ex->tex[stage][sl];
-        if (!th) { vk_texture_unlock(); return 0; }
+        if (!th) { vk_texture_unlock(); return ui_full_why = 3, 0; }
         view_t v;
         int hv;
         const VkTexImage *ti = vk_texture_by_id_locked(&ex->tex_pool, (int)(th & 0xfffff), &v, &hv);
-        if (!ti || ti->width != 1 || ti->height != 1) { vk_texture_unlock(); return 0; }
+        if (!ti || ti->width != 1 || ti->height != 1) { vk_texture_unlock(); return ui_full_why = 4, 0; }
         bound++;
     }
     vk_texture_unlock();
@@ -974,35 +977,36 @@ static void ui_full_log(VkExec *ex, int op, const void *a) {
     static int on = -1;
     if (on < 0) on = getenv("KAR_UI_FULL_LOG") && *getenv("KAR_UI_FULL_LOG") == '1';
     if (!on) return;
-    static struct { uint64_t k, h; int cnt; float hgt; uint64_t last, first; int stretched; } sig[64];
+    static struct { uint64_t k, h; int cnt; float hgt, x, y; uint64_t last, first; int stretched, why; } sig[512];
     static int nsig;
     static uint64_t fr_cur = ~0ull;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (fr != fr_cur) {
         for (int i = 0; i < nsig; i++)
             if (sig[i].last != ~0ull && sig[i].last + 1 < fr) {   // not drawn in the frame before: it ended
-                rt_log("ui full: key %016llx tex %ux%u fmt %u count %d h %.1f stretched %d frames %llu-%llu", (unsigned long long)sig[i].k,
-                       (unsigned)(sig[i].h >> 32), (unsigned)(sig[i].h >> 8 & 0xffffff), (unsigned)(sig[i].h & 0xff), sig[i].cnt, sig[i].hgt,
-                       sig[i].stretched, (unsigned long long)sig[i].first, (unsigned long long)sig[i].last);
+                rt_log("ui full: key %016llx tex %ux%u fmt %u count %d h %.1f x %.1f y %.1f stretched %d why %d frames %llu-%llu",
+                       (unsigned long long)sig[i].k, (unsigned)(sig[i].h >> 32), (unsigned)(sig[i].h >> 8 & 0xffffff),
+                       (unsigned)(sig[i].h & 0xff), sig[i].cnt, sig[i].hgt, sig[i].x, sig[i].y, sig[i].stretched, sig[i].why,
+                       (unsigned long long)sig[i].first, (unsigned long long)sig[i].last);
                 sig[i].last = ~0ull;
             }
         fr_cur = fr;
     }
     if (!ui_block || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
     const float *f = (const float *)(uintptr_t)ui_block;
-    if (f[0] != 1920.0f || f[3] != 0.0f) return;
+    if (f[0] != 1920.0f) return;   // full layout width, any x offset (a wipe slides)
     int cnt = op == OP_DRAW ? ((const p_draw *)a)->count : op == OP_DRAW_IDX ? ((const p_draw_idx *)a)->count : -1;
     uint64_t k = ui_cur_key(ex), h = ui_frag_tex(ex);
     int i = 0;
     while (i < nsig && !(sig[i].k == k && sig[i].h == h && sig[i].cnt == cnt && sig[i].hgt == f[5])) i++;
     if (i == nsig) {
-        if (nsig == 64) return;
+        if (nsig == 512) return;
         sig[i].k = k, sig[i].h = h, sig[i].cnt = cnt, sig[i].hgt = f[5], sig[i].last = ~0ull, nsig++;
         __atomic_store_n(&ui_dump_auto_at, fr + 1, __ATOMIC_RELAXED);
     }
     if (sig[i].last == ~0ull) sig[i].first = fr, sig[i].stretched = 0;
-    sig[i].last = fr;
-    if (ui_full_flat(ex)) sig[i].stretched = 1;
+    sig[i].last = fr, sig[i].x = f[3], sig[i].y = f[7];
+    if (ui_full_flat(ex)) sig[i].stretched = 1; else sig[i].why = ui_full_why;
 }
 static int ui_dump_frame(void);
 static int ui_probe_offset(VkExec *ex);
