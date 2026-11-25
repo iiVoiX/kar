@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "ext_upscaler.h"
 #include "cfg.h"
 #include "host.h"
 #include "vk.h"
@@ -71,7 +72,7 @@ static int instance_ext_present(const char *name) {
 
 static int create_instance(void) {
     mesa_cache_beside_exe();
-    const char *ext[12];
+    const char *ext[20];
     uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 8);
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     int validate = cfg_bool("TOTK_VK_VALIDATION");
@@ -105,6 +106,7 @@ static int create_instance(void) {
         flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     }
 #endif
+    n_ext += ext_upscaler_instance_ext(ext + n_ext, 20 - n_ext);   // the optional upscaler add-on (ext_upscaler.c)
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "TotK Recomp",
                              .pEngineName = "TotK Recomp", .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
@@ -265,7 +267,7 @@ static int create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[28];
+    const char *ext[44];
     uint32_t n_ext = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
     // A portability implementation (MoltenVK) requires this one on every device it exposes; no feature of it is needed
@@ -397,11 +399,26 @@ static int create_device(void) {
                                           .queueFamilyIndex = g_vk.xfer_family, .queueCount = 1, .pQueuePriorities = &prio};
         nqi = 2;
     }
+    {   // the optional upscaler add-on's extensions, those not enabled already
+        const char *more[16];
+        uint32_t nx = 0;
+        vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &nx, NULL);
+        VkExtensionProperties *xp = calloc(nx ? nx : 1, sizeof *xp);
+        vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &nx, xp);
+        uint32_t nm = xp ? ext_upscaler_device_ext(g_vk.instance, g_vk.phys, xp, nx, more, 16) : 0;
+        free(xp);   // the names in more[] belong to the add-on
+        for (uint32_t i = 0; i < nm && n_ext < 44; i++) {
+            int dup = 0;
+            for (uint32_t j = 0; j < n_ext && !dup; j++) dup = !strcmp(ext[j], more[i]);
+            if (!dup) ext[n_ext++] = more[i];
+        }
+    }
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &c->f2, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VkResult r = vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.device);
     free(c);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateDevice failed (%d)", (int)r); return 0; }
+    ext_upscaler_device_ready(g_vk.instance, g_vk.phys, g_vk.device);
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }

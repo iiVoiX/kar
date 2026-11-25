@@ -58,6 +58,7 @@ extern const char rt_port_version[];
 extern const char rt_game_display[];
 extern const char rt_game_target[];
 int rt_game_is_kar(void);
+const char *ext_upscaler_name(void);   // ext_upscaler.c: the loaded upscaler add-on, or NULL
 }
 
 // Roboto Medium (Apache-2.0, ui/fonts/LICENSE-Roboto.txt) with Latin and Cyrillic glyphs.
@@ -707,9 +708,14 @@ static void rows_video_preset(void) {
             }
     }
     bool moved = row_render_scale();
-    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR, UI_MENU_UPSCALER_FSR3};
-    // FSR 3.1 (vk_kar_upscale.c) exists for Kirby only
-    moved |= opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, rt_game_is_kar() ? 3 : 2, UI_MENU_UPSCALER_DESC);
+    // FSR 3.1 (vk_kar_upscale.c) exists for Kirby only; the upscaler add-on (ext_upscaler.c) shows by its own name
+    // when one is loaded
+    static const char *const upv[] = {"fsr", "bilinear", "fsr3", "external"};
+    const char *ext = ext_upscaler_name();
+    const char *upn[] = {menu_text(UI_MENU_UPSCALER_FSR), menu_text(UI_MENU_UPSCALER_BILINEAR),
+                         menu_text(UI_MENU_UPSCALER_FSR3), ext ? ext : ""};
+    moved |= opt_choice_list("TOTK_UPSCALER", UI_MENU_UPSCALER, upv, upn, !rt_game_is_kar() ? 2 : ext ? 4 : 3,
+                             UI_MENU_UPSCALER_DESC);
     moved |= opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
     if (rt_game_is_kar()) opt_toggle("TOTK_FRAME_GEN", UI_MENU_FRAME_GEN, UI_MENU_FRAME_GEN_DESC);   // vk_fg.cpp
     if (moved && strcmp(cfg_value("TOTK_VIDEO_PRESET"), "custom")) {

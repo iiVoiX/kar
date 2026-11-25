@@ -20,6 +20,7 @@
 #include "host.h"
 #include "cfg.h"
 #include "nvn_api.h"
+#include "ext_upscaler.h"
 #include "kar_easu16_spv.h"
 #include "kar_rcas_spv.h"
 #include "kar_upscale_spv.h"
@@ -149,13 +150,16 @@ int vk_fsr3_jitter(uint64_t index, int rw, int dw, float *x, float *y);
 uint64_t vk_fsr3_last_key(void);
 static volatile uint32_t kar_fsr3_size[4];   // render width, height, output width, height of the last FSR 3 dispatch
 
-// UPSCALER = fsr3 (port menu, live) or KAR_UPSCALE=fsr3: FSR 3.1 (vk_fg.cpp) instead of EASU.
+// UPSCALER = fsr3 (port menu, live) or KAR_UPSCALE=fsr3: FSR 3.1 (vk_fg.cpp) instead of EASU; = external: the
+// upscaler add-on (ext_upscaler.c) when one is loaded, else FSR 3.1. 0 off, 1 FSR 3.1, 2 add-on.
 static int fsr3_mode(void) {
-    const char *e = getenv("KAR_UPSCALE");
-    if (e && *e) return !strcmp(e, "fsr3");
-    const char *c = cfg_get("TOTK_UPSCALER");
-    return c && !strcmp(c, "fsr3");
+    const char *e = getenv("KAR_UPSCALE"), *c = cfg_get("TOTK_UPSCALER");
+    const char *v = e && *e ? e : c;
+    if (!v) return 0;
+    if (!strcmp(v, "external")) return ext_upscaler_name() ? 2 : 1;
+    return !strcmp(v, "fsr3");
 }
+static uint64_t last_temporal;   // the frame of the newest FSR 3 or add-on upscale (the jitter runs while they do)
 
 // FSR 3 jitter (RELEASE_PLAN.md 17.5). The game renders without one, and its camera matrices could not be found where
 // the geometry reads them (the constant block and the camera's own offset fields moved nothing), so the replay shifts
@@ -171,7 +175,7 @@ static int jitter_of(uint64_t fr, float *jx, float *jy) {
         joff = getenv("KAR_FSR3_JOFFSET") ? (float)atof(getenv("KAR_FSR3_JOFFSET")) : 0;
     }
     if (joff > 0) return *jx = (fr / 64) % 2 ? 0 : joff, *jy = (fr / 64) % 2 ? joff : 0, 1;
-    uint64_t last = vk_fsr3_last_key();
+    uint64_t last = last_temporal;
     if (!on || !last || last + 8 < fr || !kar_fsr3_size[0] || !kar_fsr3_size[2]) return 0;
     return vk_fsr3_jitter(fr, (int)kar_fsr3_size[0], (int)kar_fsr3_size[2], jx, jy);
 }
@@ -186,7 +190,7 @@ int vk_kar_jitter_viewport(uint32_t w, uint32_t h, uint32_t dw, uint32_t dh, flo
 
 // FSR 3.1 into the intermediate, then the RCAS pass decodes (and with the menu's sharpness sharpens) into dst. 0 when
 // there is no scene camera pair (menus, loading): the caller runs FSR 1. The history resets after such frames.
-static int fsr3_record(VkCtx *c, VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32_t sw, uint32_t sh,
+static int fsr3_record(int backend, VkCtx *c, VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32_t sw, uint32_t sh,
                        VkImageView out, uint32_t dw, uint32_t dh, int sharp, int decode) {
     static uint64_t last_frame;
     static uint32_t miss, exact_miss, runs;
@@ -213,9 +217,26 @@ static int fsr3_record(VkCtx *c, VkCommandBuffer cb, VkImage src, VkFormat sfmt,
         vkCmdPipelineBarrier2(cb, &di);
         U.mid.fresh = 0;
     }
-    if (!vk_fsr3_dispatch(cb, src, sfmt, sw, sh, mv.depth, mv.mv, U.mid.image, VK_FORMAT_R16G16B16A16_SFLOAT, dw, dh,
-                          jit[0], jit[1], reset, mv.nearv, mv.farv, mv.fov, fr))
+    if (backend == 2) {   // the add-on records its own commands: after every call the recorder thread has queued
+        extern void rec_drain(void);
+        static uint64_t t0;
+        uint64_t t = kern_now_ns();
+        ExtUpscalerFrame f = {.cb = cb, .color = src, .color_format = sfmt, .depth = mv.depth, .motion = mv.mv,
+                              .output = U.mid.image, .output_format = VK_FORMAT_R16G16B16A16_SFLOAT, .render_w = sw,
+                              .render_h = sh, .output_w = dw, .output_h = dh, .jitter_x = jit[0], .jitter_y = jit[1],
+                              .motion_scale_x = 1, .motion_scale_y = 1, .reset = reset, .depth_inverted = 1,
+                              .frame_ms = t0 && t > t0 ? (float)((t - t0) / 1e6) : 16.7f, .near_z = mv.nearv,
+                              .far_z = mv.farv, .fov_y = mv.fov};
+        t0 = t;
+        rec_drain();
+        if (!ext_upscaler_evaluate(&f)) return 0;
+        static int told;
+        if (!told++) rt_log("vk: %s upscaling %ux%u -> %ux%u", ext_upscaler_name(), sw, sh, dw, dh);
+    } else if (!vk_fsr3_dispatch(cb, src, sfmt, sw, sh, mv.depth, mv.mv, U.mid.image, VK_FORMAT_R16G16B16A16_SFLOAT, dw,
+                                 dh, jit[0], jit[1], reset, mv.nearv, mv.farv, mv.fov, fr)) {
         return 0;
+    }
+    last_temporal = fr;
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
@@ -250,7 +271,8 @@ int vk_kar_upscale_record(VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32
     const char *sv = cfg_get("TOTK_SHARPNESS");
     int sharp = sv && *sv ? cfg_int("TOTK_SHARPNESS") : 0;
     sharp = sharp < 0 ? 0 : sharp > 100 ? 100 : sharp;
-    if (fsr3_mode() && fsr3_record(c, cb, src, sfmt, sw, sh, out, dw, dh, sharp, decode)) return 1;
+    int temporal = fsr3_mode();
+    if (temporal && fsr3_record(temporal, c, cb, src, sfmt, sw, sh, out, dw, dh, sharp, decode)) return 1;
     int two = sharp > 0 && U.easu16 && U.rcas && mid_image(c, dw, dh);
     float pc[8] = {(float)sw, (float)sh, (float)sw, (float)sh, (float)dw, (float)dh, (float)decode, 0};
     if (two && U.mid.fresh) {   // the intermediate's first use: from UNDEFINED to GENERAL

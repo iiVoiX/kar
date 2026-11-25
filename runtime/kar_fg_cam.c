@@ -179,7 +179,8 @@ void kar_fg_cam_init(void) {
     extern int vk_fg_on(void);
     // frame generation or FSR 3 (dkb.ini or the environment at start) turn the camera hook on too
     const char *up = getenv("KAR_UPSCALE"), *cu = cfg_get("TOTK_UPSCALER");
-    int fsr3 = (up && !strcmp(up, "fsr3")) || (cu && !strcmp(cu, "fsr3"));
+    const char *v = up && *up ? up : cu;   // FSR 3.1 or the upscaler add-on: both need the camera motion vectors
+    int fsr3 = v && (!strcmp(v, "fsr3") || !strcmp(v, "external"));
     if (vk_fg_on() || fsr3) rt_patch_switch(set, 1);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_CAMERA, cam_hook);
 }
