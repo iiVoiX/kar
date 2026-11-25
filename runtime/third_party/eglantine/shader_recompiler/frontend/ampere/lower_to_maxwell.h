@@ -2595,8 +2595,13 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const u32 binding = insn.Bits(54, 5);
                 const bool second_buffer = !bindless && !bind_texture_buffer(binding);
                 const bool tex_b = bindless || second_buffer;
+                // DKB Recomp: the copies into the lowering's scratch registers run unpredicated. A predicated
+                // copy feeding a predicated TEX.B left the translator a phi of the handle with the scratch
+                // register's undefined earlier value, and its bindless pass resolved the handle to that (Kirby
+                // Air Riders' splitscreen composite: @!P0 TEX.B read zero, the upper view black). Scratch values
+                // are dead outside this sequence, so writing them on both paths changes nothing else.
                 const auto copy = [&](u32 target, u32 source) {
-                    emit(0x5c98000000000000ULL | predicate | target | (u64{15} << 39) | (u64{source} << 20));
+                    emit(0x5c98000000000000ULL | (u64{7} << 16) | target | (u64{15} << 39) | (u64{source} << 20));
                 };
                 // Coordinates to R250.., then LOD/bias, offsets and reference to R246...
                 for (u32 i = 0; i < coordinates; ++i) copy(250 + i, value(i));
