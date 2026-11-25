@@ -87,6 +87,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_FOV_DESC] = "How much of the world the camera shows, in percent of the game's own. Game version 1.4.3 only.",
     [UI_MENU_SHARPNESS] = "FSR sharpness",
     [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling; 0 turns it off.",
+    [UI_MENU_FRAME_GEN] = "Frame generation",
+    [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 inserts a generated picture between two real ones: about twice the frames shown. "
+                               "The game itself keeps its own pace. Best with a frame rate limit of at least 60. Restart to apply.",
     [UI_MENU_COLOR] = "Colour",
     [UI_MENU_COLOR_PRESET] = "Colour profile",
     [UI_MENU_COLOR_PRESET_DESC] = "Sets the four values below. Vivid: more contrast and saturation, shadows opened a "
@@ -382,6 +385,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_FOV_DESC] = "Сколько мира показывает камера, в процентах от игрового. Только для версии игры 1.4.3.",
     [UI_MENU_SHARPNESS] = "Резкость FSR",
     [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR; 0 выключает его.",
+    [UI_MENU_FRAME_GEN] = "Генерация кадров",
+    [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 вставляет созданный кадр между двумя настоящими: примерно вдвое больше кадров на экране. "
+                               "Сама игра идёт в своём темпе. Лучше с ограничением кадров от 60. Действует после перезапуска.",
     [UI_MENU_COLOR] = "Цвет",
     [UI_MENU_COLOR_PRESET] = "Цветовой профиль",
     [UI_MENU_COLOR_PRESET_DESC] = "Задаёт четыре значения ниже. «Яркий»: больше контраста и насыщенности, тени немного "
@@ -669,6 +675,9 @@ static const char *const text_de[UI_TEXT_COUNT] = {
     [UI_MENU_FOV_DESC] = "Wie viel von der Welt die Kamera zeigt, in Prozent des Originals.",
     [UI_MENU_SHARPNESS] = "Schärfe",
     [UI_MENU_SHARPNESS_DESC] = "Nachschärfen nach der Skalierung; 0 schaltet es aus.",
+    [UI_MENU_FRAME_GEN] = "Bildgenerierung",
+    [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 fügt zwischen zwei echten Bildern ein berechnetes ein: etwa doppelt so viele Bilder. "
+                               "Das Spiel selbst läuft im eigenen Takt. Am besten mit einem FPS-Limit ab 60. Wirkt nach Neustart.",
     [UI_MENU_COLOR] = "Farbe",
     [UI_MENU_COLOR_PRESET] = "Farbprofil",
     [UI_MENU_COLOR_PRESET_DESC] = "Setzt die vier Werte darunter. Lebendig: mehr Kontrast und Sättigung, etwas hellere "
