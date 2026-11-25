@@ -1,0 +1,111 @@
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs
+@@ -22,6 +22,9 @@
+         {
+             StructuredProgramContext context = new(attributeUsage, definitions, resourceManager, debugMode);
+ 
++            // DKB Recomp: see GetVarTypeFromUses; the kept answers belong to this program.
++            _varTypeCache = new Dictionary<Operand, AggregateType>();
++
+             for (int funcIndex = 0; funcIndex < functions.Count; funcIndex++)
+             {
+                 Function function = functions[funcIndex];
+@@ -342,28 +345,50 @@
+             }
+         }
+ 
++        // DKB Recomp: the search below follows a path, not a tree: each operand it reaches either ends it (its first use
++        // that is not a copy into a local variable gives the type) or hands it on to the first local variable a copy writes
++        // that the walk has not passed yet. Searched again from every copy's destination, a long chain of copies (the
++        // copies that leave SSA form in 11,000-instruction compute shaders) cost quadratic time: most of a 2.5 s
++        // translation. When a walk never met an operand it had passed, a walk started from any operand on its path takes
++        // the same steps from there, so all of them get its answer; other walks keep theirs to themselves.
++        [ThreadStatic]
++        private static Dictionary<Operand, AggregateType> _varTypeCache;
++
+         private static AggregateType GetVarTypeFromUses(Operand dest)
+         {
+-            HashSet<Operand> visited = [];
++            Dictionary<Operand, AggregateType> cache = _varTypeCache;
+ 
+-            Queue<Operand> pending = new();
++            if (cache != null && cache.TryGetValue(dest, out AggregateType known))
++            {
++                return known;
++            }
++
++            HashSet<Operand> visited = [];
++            List<Operand> path = [];
++            bool metPassed = false;
+ 
+-            bool Enqueue(Operand operand)
++            AggregateType Done(AggregateType type)
+             {
+-                if (visited.Add(operand))
++                if (cache != null && !metPassed)
+                 {
+-                    pending.Enqueue(operand);
+-
+-                    return true;
++                    foreach (Operand operand in path)
++                    {
++                        cache.TryAdd(operand, type);
++                    }
+                 }
+ 
+-                return false;
++                return type;
+             }
+ 
+-            Enqueue(dest);
++            Operand current = dest;
++            visited.Add(dest);
+ 
+-            while (pending.TryDequeue(out Operand operand))
++            while (current != null)
+             {
++                Operand operand = current;
++                current = null;
++                path.Add(operand);
++
+                 foreach (INode useNode in operand.UseOps)
+                 {
+                     if (useNode is not Operation operation)
+@@ -375,14 +400,18 @@
+                     {
+                         if (operation.Dest.Type == OperandType.LocalVariable)
+                         {
+-                            if (Enqueue(operation.Dest))
++                            if (visited.Add(operation.Dest))
+                             {
++                                current = operation.Dest;
++
+                                 break;
+                             }
++
++                            metPassed = true;
+                         }
+                         else
+                         {
+-                            return OperandInfo.GetVarType(operation.Dest.Type);
++                            return Done(OperandInfo.GetVarType(operation.Dest.Type));
+                         }
+                     }
+                     else
+@@ -391,14 +420,14 @@
+                         {
+                             if (operation.GetSource(index) == operand)
+                             {
+-                                return InstructionInfo.GetSrcVarType(operation.Inst, index);
++                                return Done(InstructionInfo.GetSrcVarType(operation.Inst, index));
+                             }
+                         }
+                     }
+                 }
+             }
+ 
+-            return AggregateType.S32;
++            return Done(AggregateType.S32);
+         }
+ 
+         private static bool AreAllSourceTypesEqual(IAstNode[] sources, AggregateType type)

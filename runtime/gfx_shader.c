@@ -2994,7 +2994,18 @@ static const GfxShader *translate_one(const Req *r, int stage, const uint8_t *co
     char *req = malloc(cap), reply[LINE_MAX_LEN];
     if (!req) return plat_file_delete(code_path), fail("out of memory", hex);
     build_request(req, hex, r->stage_name, code_path, r->c1, r->c1_len, a, control);
+    // KAR_XLATE_SAMPLE_CS=<n> (diagnostic, 13.3): the first n compute requests are written like failed ones (into
+    // DKB_SHADER_FAILURE_DUMP, for timing totk_xlate alone) and their round trip is logged.
+    static int sample_n = -1;
+    static volatile int64_t sampled;
+    if (sample_n < 0) sample_n = getenv("KAR_XLATE_SAMPLE_CS") ? atoi(getenv("KAR_XLATE_SAMPLE_CS")) : 0;
+    int sample = stage == GFX_STAGE_CS && sample_n > 0 && plat_inc64(&sampled) <= sample_n;
+    if (sample) dump_failed_request(hex, req, "sample", code + skip, (size_t)(r->length - skip));
+    uint64_t sample_t0 = plat_now_ns();
     int ok = svc_request(req, reply, sizeof reply);
+    if (sample)
+        rt_log("gfx_shader: sample cs %.16s: %llu bytes of code, %.0f ms", hex, (unsigned long long)(r->length - skip),
+               (plat_now_ns() - sample_t0) / 1e6);
     if (ok && strncmp(reply, "ok ", 3)) dump_failed_request(hex, req, reply, code + skip, (size_t)(r->length - skip));
     free(req);
     plat_file_delete(code_path);
