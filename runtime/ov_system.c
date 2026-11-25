@@ -22,6 +22,7 @@
 #include "aoc_romfs.h"
 #include "cfg.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "ov.h"
 #include "platform/platform.h"
 
@@ -374,7 +375,184 @@ static void ov_nfp_no_device(Cpu *c) {
     if (told++ < 40) rt_log("nfp: call from %s -> no device", caller(c, lr, sizeof lr));
     ret_x(c, NFP_R_DEVICE_NOT_FOUND);
 }
-static void ov_nfp_device_state(Cpu *c) { ret_x(c, nfp_reader() ? (uint64_t)nfp_dev_state : 0); }   // GetDeviceState
+// KAR_AMIIBO_FIGURE=<amiibo id, 16 hex digits>@<frame> (RELEASE_PLAN 3.10, virtual figure; needs KAR_AMIIBO=1):
+// from that frame a figure lies on the reader. Its tag, model, common and register info are made up here (the game
+// sees only these answers); its application area lives in amiibo_area.bin beside the exe (the player's data, never
+// part of the repository). Calls the figure does not answer yet are logged by name.
+static uint64_t fig_id, fig_frame;
+static int fig_on = -1;
+static uint8_t fig_area[4096];
+static uint32_t fig_area_size, fig_area_id;
+static int fig_area_have;
+static int nfp_figure(void) {
+    if (fig_on < 0) {
+        const char *e = getenv("KAR_AMIIBO_FIGURE");
+        unsigned long long id = 0, fr = 0;
+        fig_on = nfp_reader() && e && sscanf(e, "%llx@%llu", &id, &fr) == 2;
+        fig_id = id, fig_frame = fr;
+        if (fig_on) {
+            FILE *f = fopen("amiibo_area.bin", "rb");
+            if (f) {
+                uint32_t hdr[2];
+                if (fread(hdr, 4, 2, f) == 2 && hdr[1] <= sizeof fig_area && fread(fig_area, 1, hdr[1], f) == hdr[1])
+                    fig_area_id = hdr[0], fig_area_size = hdr[1], fig_area_have = 1;
+                fclose(f);
+            }
+            rt_log("nfp: virtual figure %016llx from frame %llu (application area %s)", id, fr,
+                   fig_area_have ? "kept" : "not created yet");
+        }
+    }
+    return fig_on;
+}
+static void fig_tick(void) {   // the figure arrives: Search -> Active, the game's activate event fires
+    if (!nfp_figure() || nfp_dev_state != 1) return;
+    if (__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) < fig_frame) return;
+    plat_xchg32(&nfp_dev_state, 2);
+    rt_log("nfp: virtual figure placed on the reader");
+    if (nfp_ev_activate) kern_signal_system_event(nfp_ev_activate);
+}
+static void ov_nfp_device_state(Cpu *c) {   // GetDeviceState
+    fig_tick();
+    ret_x(c, nfp_reader() ? (uint64_t)nfp_dev_state : 0);
+}
+static void fig_log(Cpu *c, const char *what, uint64_t r) {
+    static int told;
+    char lr[96];
+    if (told++ < 60) rt_log("nfp: %s from %s -> %#llx", what, caller(c, lr, sizeof lr), (unsigned long long)r);
+}
+#define FIG_OR_NONE(c) do { if (!nfp_figure() || nfp_dev_state < 2) { ov_nfp_no_device(c); return; } } while (0)
+#define NFP_R_AREA_NOT_INIT ((128u << 9) | 115u)   // application area not created yet
+// Result GetTagInfo(TagInfo *, const DeviceHandle &): TagInfo 0x58 bytes (uuid[10], length, ..., protocol, type)
+static void ov_nfp_tag(Cpu *c) {
+    FIG_OR_NONE(c);
+    uint8_t *t = arg_p(c, 0);
+    if (t) {
+        memset(t, 0, 0x58);
+        for (int i = 0; i < 7; i++) t[i] = (uint8_t)((0x04 + 0x11 * i) ^ (uint8_t)(fig_id >> (i * 8)));
+        t[10] = 7;
+        uint32_t proto = 1, type = 2;   // NFC-A, type 2 tag (NTAG215)
+        memcpy(t + 0x20, &proto, 4), memcpy(t + 0x24, &type, 4);
+    }
+    fig_log(c, "GetTagInfo", 0);
+    ret_x(c, 0);
+}
+static void ov_nfp_mount(Cpu *c) {
+    FIG_OR_NONE(c);
+    plat_xchg32(&nfp_dev_state, 4);
+    fig_log(c, "Mount", 0);
+    ret_x(c, 0);
+}
+static void ov_nfp_unmount(Cpu *c) {
+    FIG_OR_NONE(c);
+    plat_xchg32(&nfp_dev_state, 2);
+    fig_log(c, "Unmount", 0);
+    ret_x(c, 0);
+}
+// ModelInfo 0x40: character id (u16), variant, type, model number (u16), series, constant 2; from the amiibo id's bytes
+static void ov_nfp_model(Cpu *c) {
+    FIG_OR_NONE(c);
+    uint8_t *m = arg_p(c, 0);
+    if (m) {
+        uint8_t b[8];
+        for (int i = 0; i < 8; i++) b[i] = (uint8_t)(fig_id >> (56 - 8 * i));
+        memset(m, 0, 0x40);
+        uint16_t ch = (uint16_t)(b[0] << 8 | b[1]), model = (uint16_t)(b[4] << 8 | b[5]);
+        memcpy(m, &ch, 2), m[2] = b[2], m[3] = b[3], memcpy(m + 4, &model, 2), m[6] = b[6], m[7] = b[7];
+    }
+    fig_log(c, "GetModelInfo", 0);
+    ret_x(c, 0);
+}
+// CommonInfo 0x40: last write date (year u16, month, day), write counter, version, application area size
+static void ov_nfp_common(Cpu *c) {
+    FIG_OR_NONE(c);
+    uint8_t *m = arg_p(c, 0);
+    if (m) {
+        memset(m, 0, 0x40);
+        uint16_t y = 2026, n = 1, v = 0;
+        uint32_t sz = 0xd8;
+        memcpy(m, &y, 2), m[2] = 11, m[3] = 25, memcpy(m + 4, &n, 2), memcpy(m + 6, &v, 2), memcpy(m + 8, &sz, 4);
+    }
+    fig_log(c, "GetCommonInfo", 0);
+    ret_x(c, 0);
+}
+// RegisterInfo 0x100: Mii (0x58, left empty), creation date, amiibo name (UTF-8), font region
+static void ov_nfp_register(Cpu *c) {
+    FIG_OR_NONE(c);
+    uint8_t *m = arg_p(c, 0);
+    if (m) {
+        memset(m, 0, 0x100);
+        uint16_t y = 2026;
+        memcpy(m + 0x58, &y, 2), m[0x5a] = 11, m[0x5b] = 25;
+        memcpy(m + 0x5c, "Kirby", 5);
+    }
+    fig_log(c, "GetRegisterInfo", 0);
+    ret_x(c, 0);
+}
+static void fig_area_save(void) {
+    FILE *f = fopen("amiibo_area.bin", "wb");
+    if (!f) return;
+    uint32_t hdr[2] = {fig_area_id, fig_area_size};
+    fwrite(hdr, 4, 2, f), fwrite(fig_area, 1, fig_area_size, f);
+    fclose(f);
+}
+// Result OpenApplicationArea(const DeviceHandle &, uint32_t access id)
+static void ov_nfp_open_area(Cpu *c) {
+    FIG_OR_NONE(c);
+    uint32_t id = (uint32_t)arg_x(c, 1);
+    static int64_t miss = -1;   // KAR_AMIIBO_OPEN=<result> (diagnostic): the answer for a figure without this game's area
+    if (miss < 0) miss = getenv("KAR_AMIIBO_OPEN") ? strtoll(getenv("KAR_AMIIBO_OPEN"), NULL, 0) : NFP_R_AREA_NOT_INIT;
+    uint64_t r = fig_area_have && fig_area_id == id ? 0 : (uint64_t)miss;
+    fig_log(c, "OpenApplicationArea", r);
+    ret_x(c, r);
+}
+// Result CreateApplicationArea(const DeviceHandle &, const ApplicationAreaCreateInfo &{u32 access id; void *data; u64 size})
+static void ov_nfp_create_area(Cpu *c) {
+    FIG_OR_NONE(c);
+    const uint8_t *ci = arg_p(c, 1);
+    uint32_t id = 0;
+    uint64_t data = 0, size = 0;
+    if (ci) memcpy(&id, ci, 4), memcpy(&data, ci + 8, 8), memcpy(&size, ci + 16, 8);
+    if (size > sizeof fig_area) size = sizeof fig_area;
+    memset(fig_area, 0, sizeof fig_area);
+    if (data && size) memcpy(fig_area, (const void *)(uintptr_t)data, (size_t)size);
+    fig_area_id = id, fig_area_size = (uint32_t)size, fig_area_have = 1;
+    fig_area_save();
+    rt_log("nfp: CreateApplicationArea id %#x, %llu bytes", id, (unsigned long long)size);
+    ret_x(c, 0);
+}
+// Result GetApplicationArea(void *, size_t *out, const DeviceHandle &, size_t) (also the extended one)
+static void ov_nfp_get_area(Cpu *c) {
+    FIG_OR_NONE(c);
+    uint8_t *dst = arg_p(c, 0);
+    uint64_t *outn = arg_p(c, 1), room = arg_x(c, 3);
+    uint64_t n = fig_area_size < room ? fig_area_size : room;
+    if (dst && n) memcpy(dst, fig_area, (size_t)n);
+    if (outn) *outn = n;
+    fig_log(c, "GetApplicationArea", fig_area_have ? 0 : NFP_R_AREA_NOT_INIT);
+    ret_x(c, fig_area_have ? 0 : NFP_R_AREA_NOT_INIT);
+}
+// Result SetApplicationArea(const DeviceHandle &, const void *, size_t) (also the extended one)
+static void ov_nfp_set_area(Cpu *c) {
+    FIG_OR_NONE(c);
+    const uint8_t *src = arg_p(c, 1);
+    uint64_t n = arg_x(c, 2);
+    if (n > sizeof fig_area) n = sizeof fig_area;
+    if (src) memcpy(fig_area, src, (size_t)n);
+    if (n > fig_area_size) fig_area_size = (uint32_t)n;
+    fig_log(c, "SetApplicationArea", 0);
+    ret_x(c, 0);
+}
+static void ov_nfp_flush(Cpu *c) {
+    FIG_OR_NONE(c);
+    fig_area_save();
+    fig_log(c, "Flush", 0);
+    ret_x(c, 0);
+}
+static void ov_nfp_ext_info(Cpu *c) {   // GetExtendedApplicationAreaInfo: layout unknown, logged
+    FIG_OR_NONE(c);
+    fig_log(c, "GetExtendedApplicationAreaInfo (not answered)", NFP_R_AREA_NOT_INIT);
+    ret_x(c, NFP_R_AREA_NOT_INIT);
+}
 // Result GetNpadId(uint32_t *out, const DeviceHandle &): the controller in use
 static void ov_nfp_npad(Cpu *c) {
     if (!nfp_reader()) { ov_nfp_no_device(c); return; }
@@ -395,8 +573,9 @@ static void ov_nfp_attach_activate(Cpu *c) { ov_nfp_attach(c, &nfp_ev_activate);
 static void ov_nfp_attach_deactivate(Cpu *c) { ov_nfp_attach(c, &nfp_ev_deactivate); }
 static void ov_nfp_start_detection(Cpu *c) {
     if (!nfp_reader()) { ov_nfp_no_device(c); return; }
-    rt_log("nfp: StartDetection (no figure on the virtual reader)");
+    rt_log("nfp: StartDetection (%s)", nfp_figure() ? "virtual figure" : "no figure on the virtual reader");
     plat_xchg32(&nfp_dev_state, 1);
+    fig_tick();
     ret_x(c, 0);
 }
 static void ov_nfp_stop_detection(Cpu *c) {
@@ -1286,28 +1465,28 @@ HOST_OVERRIDE("_ZN2nn3ldn16CloseAccessPointEv", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3ldn11SetProtocolENS0_8ProtocolE", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3ldn16SetAdvertiseDataEPKvm", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", ov_result_ok);
-HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", ov_nfp_mount);
 HOST_OVERRIDE("_ZN2nn3nfp9GetNpadIdEPjRKNS0_12DeviceHandleE", ov_nfp_npad);
 HOST_OVERRIDE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_attach_activate);
 HOST_OVERRIDE("_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", ov_nfp_attach_deactivate);
 // Kirby Air Riders' amiibo forms: the extended-area initialisation as Initialize; with no reader, every device
 // operation and amiibo settings applet answers "device not found", as the others above.
 HOST_OVERRIDE("_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv", ov_nfp_initialize);
-HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp18SetApplicationAreaERKNS0_12DeviceHandleEPKvm", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeE", ov_nfp_mount);
+HOST_OVERRIDE("_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE", ov_nfp_unmount);
+HOST_OVERRIDE("_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj", ov_nfp_open_area);
+HOST_OVERRIDE("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", ov_nfp_get_area);
+HOST_OVERRIDE("_ZN2nn3nfp18SetApplicationAreaERKNS0_12DeviceHandleEPKvm", ov_nfp_set_area);
 HOST_OVERRIDE("_ZN2nn3nfp30GetExtendedApplicationAreaInfoEPNS0_27ExtendedApplicationAreaInfoERKNS0_12DeviceHandleE",
-              ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp26GetExtendedApplicationAreaEPvPmRKNS0_12DeviceHandleEm", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp26SetExtendedApplicationAreaERKNS0_12DeviceHandleEPKvm", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp5FlushERKNS0_12DeviceHandleE", ov_nfp_no_device);
+              ov_nfp_ext_info);
+HOST_OVERRIDE("_ZN2nn3nfp26GetExtendedApplicationAreaEPvPmRKNS0_12DeviceHandleEm", ov_nfp_get_area);
+HOST_OVERRIDE("_ZN2nn3nfp26SetExtendedApplicationAreaERKNS0_12DeviceHandleEPKvm", ov_nfp_set_area);
+HOST_OVERRIDE("_ZN2nn3nfp5FlushERKNS0_12DeviceHandleE", ov_nfp_flush);
 HOST_OVERRIDE("_ZN2nn3nfp7RestoreERKNS0_12DeviceHandleE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp21CreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE",
-              ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp13GetCommonInfoEPNS0_10CommonInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
+              ov_nfp_create_area);
+HOST_OVERRIDE("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE", ov_nfp_register);
+HOST_OVERRIDE("_ZN2nn3nfp13GetCommonInfoEPNS0_10CommonInfoERKNS0_12DeviceHandleE", ov_nfp_common);
 HOST_OVERRIDE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_"
               "24AmiiboSettingsStartParamERKNS0_7TagInfoE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_"
@@ -1318,8 +1497,8 @@ HOST_OVERRIDE("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24Amiib
               ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3nfp14StartDetectionERKNS0_12DeviceHandleE", ov_nfp_start_detection);
 HOST_OVERRIDE("_ZN2nn3nfp13StopDetectionERKNS0_12DeviceHandleE", ov_nfp_stop_detection);
-HOST_OVERRIDE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
-HOST_OVERRIDE("_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", ov_nfp_no_device);
+HOST_OVERRIDE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", ov_nfp_tag);
+HOST_OVERRIDE("_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", ov_nfp_model);
 HOST_OVERRIDE("_ZN2nn3err9ShowErrorENS_6ResultE", ov_show_error);
 
 HOST_OVERRIDE("nndiagStartup", ov_diag_startup);
