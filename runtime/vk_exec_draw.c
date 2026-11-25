@@ -3704,6 +3704,13 @@ static void record_fixed(VkExec *ex) {
         }
         if (w < 1) w = 1;
         if (h < 1) h = 1;
+        {   // FSR 3 jitter (vk_kar_upscale.c): a whole-pass viewport into the scene's depth target moves by the subpixel offset
+            extern int vk_kar_jitter_viewport(uint32_t w, uint32_t h, uint32_t dw, uint32_t dh, float *jx, float *jy);
+            float jx, jy;
+            if (ex->depth.image && x == 0 && y == 0 && w == (float)ex->pass_w && h == (float)ex->pass_h &&
+                vk_kar_jitter_viewport(ex->pass_w, ex->pass_h, ex->depth.width, ex->depth.height, &jx, &jy))
+                x += jx, y += jy;
+        }
         VkViewport v = {x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};   // the y flip: negative height
         vkCmdSetViewportWithCount(cb, 1, &v);
         ex->recorded++;

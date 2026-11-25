@@ -114,3 +114,11 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - 2026-11-25: Patch 0028 (Übersetzer 2–5x schneller bei großen CS, bytegleich) committet; build/xlate nicht neu gebaut.
 - 2026-11-25: 13.3 Bind-Seed Standard an: Erstbesuch City Trial 0–78 s <20 fps statt 250–270 s (mit Patch 0028).
 - 2026-11-25: 10.2 ✅ (Kill mitten im Commit → Rollback, Spielstand heil).
+
+## Stand 2026-11-25 (Loop: Liste, Weekly ≤ 80 %)
+- **Nutzerentscheide:** Einstellungen nur im Port-Overlay (ImGui), keine eigenen Einträge im Kirby-Optionsmenü (`karmenu` aus, `KAR_MENU=1` an); Blöcke 14 (offene Punkte) und 15 gestrichen/zurückgestellt.
+- **FSR 3.1** (`upscaler = fsr3`, Overlay „AMD FSR 3.1“): läuft ohne Jitter (zeitliche Glättung). Jitter im Kamerablock und in den Kamera-Versatzfeldern (+0x200/+0x204) verschiebt die Szene nicht → nächster Versuch: Viewport-Versatz im Replay. FFX braucht `rec_drain` vor dem Aufruf.
+- **Bildgenerierung:** Overlay-Schalter (`frame_gen`, Neustart); MV-Abdeckung im Rennen 95 %.
+- **DLSS:** SDK v310.9.16 in `refs/dlss` (ignoriert). Lizenz 4e → nie in die GPL-exe. Plan: neutrale Upscaler-Schnittstelle im Repo, DLSS-Zusatz-DLL in eigenem Ordner außerhalb (eigener Code, MIT, Nutzer baut selbst, SDK lädt das Build-Skript). Keine NVIDIA-Dateien/-Namen im Repo; `package_build.py` darf sie nie einpacken.
+- **Soak:** `kirby/scripts/soak_loop.txt` (A-Schleife, alle 1800 Ticks DOWN×8/A/B/UP×8).
+- **Shader:** Patch 0028 nur in `build/xlate-t`; Umstellen von `build/xlate` = Nutzerfrage (warmer Cache neu).

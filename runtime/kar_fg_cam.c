@@ -30,65 +30,6 @@ typedef struct { float vp[16], ivp[16], dz[2], fov, nearv, farv, jit[2]; uint32_
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static SceneCam hist[HIST];   // by frame % HIST
 
-// FSR 3 (RELEASE_PLAN.md 17.5): the game renders without jitter, so the scene camera's projection, view-projection and
-// its inverse get FSR's subpixel offset here, before the GPU reads the block. The kept matrices (motion vectors) stay
-// without it. Only while FSR 3 dispatched in the last frames (vk_fsr3_last_key); KAR_FSR3_JITTER=1 turns it on (off by
-// default: a 60 px offset in the block did not move the scene, whose geometry reads the camera elsewhere),
-// KAR_FSR3_JSX / KAR_FSR3_JSY = -1 flip a direction (diagnostic).
-int vk_fsr3_jitter(uint64_t index, int rw, int dw, float *x, float *y);
-uint64_t vk_fsr3_last_key(void);
-volatile uint32_t kar_fsr3_size[4];   // render width, height, output width, height of the last FSR 3 dispatch
-
-static int jitter_cfg(int *sx, int *sy) {
-    static int on = -1, jx = 1, jy = 1;
-    if (on < 0) {
-        // off until the jitter reaches the drawn scene: the block's matrices alone do not move it (60 px test, 17.5)
-        const char *e = getenv("KAR_FSR3_JITTER");
-        on = e && *e == '1';
-        jx = getenv("KAR_FSR3_JSX") && atoi(getenv("KAR_FSR3_JSX")) < 0 ? -1 : 1;
-        jy = getenv("KAR_FSR3_JSY") && atoi(getenv("KAR_FSR3_JSY")) < 0 ? -1 : 1;
-    }
-    *sx = jx, *sy = jy;
-    return on;
-}
-
-// rows r0, r1 += d * row 3 of a 4x4 (projection, view-projection); the inverse gets column 3 -= dx col 0 + dy col 1
-static void jitter_rows(float *m, float dx, float dy) {
-    for (int k = 0; k < 4; k++) m[k] += dx * m[12 + k], m[4 + k] += dy * m[12 + k];
-}
-static void jitter_inverse(float *m, float dx, float dy) {
-    for (int r = 0; r < 4; r++) m[r * 4 + 3] -= dx * m[r * 4 + 0] + dy * m[r * 4 + 1];
-}
-
-static void apply_jitter(float *b, uint64_t fr, SceneCam *e) {
-    int sx, sy;
-    if (!jitter_cfg(&sx, &sy)) return;
-    static float joff = -1;   // KAR_FSR3_JOFFSET=<px> (diagnostic): a fixed offset, x in one 64-frame block, y in the next
-    if (joff < 0) joff = getenv("KAR_FSR3_JOFFSET") ? (float)atof(getenv("KAR_FSR3_JOFFSET")) : 0;
-    uint32_t rw = kar_fsr3_size[0], rh = kar_fsr3_size[1], ow = kar_fsr3_size[2];
-    float px, py;
-    if (joff > 0) {
-        rw = (uint32_t)b[0x1e0 / 4], rh = (uint32_t)b[0x1e4 / 4];
-        px = (fr / 64) % 2 ? 0 : joff, py = (fr / 64) % 2 ? joff : 0;
-    } else {
-        uint64_t last = vk_fsr3_last_key();
-        if (!last || last + 8 < fr) return;
-        if (!rw || !rh || !ow) return;
-        if (!vk_fsr3_jitter(fr, (int)rw, (int)ow, &px, &py)) return;
-    }
-    static int cycle = -1;   // KAR_FSR3_JCYCLE=1 (diagnostic): the four sign pairs in turn, 32 frames each
-    if (cycle < 0) cycle = getenv("KAR_FSR3_JCYCLE") && *getenv("KAR_FSR3_JCYCLE") == '1';
-    if (cycle) sx = (fr / 32) % 2 ? -1 : 1, sy = (fr / 64) % 2 ? -1 : 1;
-    float dx = sx * 2.0f * px / (float)rw, dy = sy * -2.0f * py / (float)rh;
-    int same4 = !memcmp(b + 0xe0 / 4, b + 0x160 / 4, 64), same5 = !memcmp(b + 0x120 / 4, b + 0x1a0 / 4, 64);
-    jitter_rows(b + 0x60 / 4, dx, dy);
-    jitter_rows(b + 0xe0 / 4, dx, dy);
-    jitter_inverse(b + 0x120 / 4, dx, dy);
-    if (same4) memcpy(b + 0x160 / 4, b + 0xe0 / 4, 64);
-    if (same5) memcpy(b + 0x1a0 / 4, b + 0x120 / 4, 64);
-    if (e) e->jit[0] = px, e->jit[1] = py, e->jittered = 1;
-}
-
 static void keep_scene_camera(Cpu *c, uint64_t fr) {
     const float *cam = (const float *)(uintptr_t)c->x[0];
     const float *b = (const float *)(uintptr_t)c->x[1];
@@ -108,7 +49,6 @@ static void keep_scene_camera(Cpu *c, uint64_t fr) {
         e->fov = fov, e->nearv = b[0x1e8 / 4], e->farv = b[0x1ec / 4], e->w = (uint32_t)w, e->h = (uint32_t)h;
         e->frame = fr, e->ok = 1, e->jittered = 0, e->jit[0] = e->jit[1] = 0;
     }
-    apply_jitter((float *)(uintptr_t)c->x[1], fr, keep ? e : NULL);
     plat_mutex_unlock(&lock);
 }
 

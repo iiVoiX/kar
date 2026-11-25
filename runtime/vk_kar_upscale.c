@@ -145,8 +145,9 @@ int vk_fsr3_dispatch(VkCommandBuffer cb, VkImage color, VkFormat cf, uint32_t sw
                      VkImage out, VkFormat of, uint32_t dw, uint32_t dh, float jx, float jy, int reset, float nearv,
                      float farv, float fov, uint64_t key);
 int vk_fg_mv_compute(VkCommandBuffer cb, uint32_t w, uint32_t h, VkFgMv *out);
-int kar_fg_last_jitter(float px[2]);
-extern volatile uint32_t kar_fsr3_size[4];
+int vk_fsr3_jitter(uint64_t index, int rw, int dw, float *x, float *y);
+uint64_t vk_fsr3_last_key(void);
+static volatile uint32_t kar_fsr3_size[4];   // render width, height, output width, height of the last FSR 3 dispatch
 
 // UPSCALER = fsr3 (port menu, live) or KAR_UPSCALE=fsr3: FSR 3.1 (vk_fg.cpp) instead of EASU.
 static int fsr3_mode(void) {
@@ -154,6 +155,33 @@ static int fsr3_mode(void) {
     if (e && *e) return !strcmp(e, "fsr3");
     const char *c = cfg_get("TOTK_UPSCALER");
     return c && !strcmp(c, "fsr3");
+}
+
+// FSR 3 jitter (RELEASE_PLAN.md 17.5). The game renders without one, and its camera matrices could not be found where
+// the geometry reads them (the constant block and the camera's own offset fields moved nothing), so the replay shifts
+// the viewport of every pass into a depth target of the scene's render size by FSR's subpixel offset of this frame:
+// the same as jittering the projection, and the replay knows its frame. KAR_FSR3_JITTER=0 turns it off;
+// KAR_FSR3_JOFFSET=<px> (diagnostic) shifts by a fixed amount, x in one 64-frame block and y in the next, also with FSR 1.
+static int jitter_of(uint64_t fr, float *jx, float *jy) {
+    static int on = -1;
+    static float joff;
+    if (on < 0) {
+        const char *e = getenv("KAR_FSR3_JITTER");
+        on = !(e && *e == '0');
+        joff = getenv("KAR_FSR3_JOFFSET") ? (float)atof(getenv("KAR_FSR3_JOFFSET")) : 0;
+    }
+    if (joff > 0) return *jx = (fr / 64) % 2 ? 0 : joff, *jy = (fr / 64) % 2 ? joff : 0, 1;
+    uint64_t last = vk_fsr3_last_key();
+    if (!on || !last || last + 8 < fr || !kar_fsr3_size[0] || !kar_fsr3_size[2]) return 0;
+    return vk_fsr3_jitter(fr, (int)kar_fsr3_size[0], (int)kar_fsr3_size[2], jx, jy);
+}
+
+// The viewport shift in pixels for a pass of w x h with a depth target of dw x dh (vk_exec_draw.c record_fixed).
+int vk_kar_jitter_viewport(uint32_t w, uint32_t h, uint32_t dw, uint32_t dh, float *jx, float *jy) {
+    static uint32_t sw = 1536, sh = 864;   // the scene's render size: the upscale source's, once seen
+    if (kar_fsr3_size[0]) sw = kar_fsr3_size[0], sh = kar_fsr3_size[1];
+    if (w != sw || h != sh || dw != sw || dh != sh) return 0;
+    return jitter_of(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), jx, jy);
 }
 
 // FSR 3.1 into the intermediate, then the RCAS pass decodes (and with the menu's sharpness sharpens) into dst. 0 when
@@ -167,10 +195,10 @@ static int fsr3_record(VkCtx *c, VkCommandBuffer cb, VkImage src, VkFormat sfmt,
     kar_fsr3_size[0] = sw, kar_fsr3_size[1] = sh, kar_fsr3_size[2] = dw, kar_fsr3_size[3] = dh;
     VkFgMv mv;
     if (!vk_fg_mv_compute(cb, sw, sh, &mv)) return miss++, 0;   // FSR 1 for this frame; the history resets after it
-    float jit[2];
-    int exact = kar_fg_last_jitter(jit);
-    exact_miss += !exact, runs++;
-    if (runs % 600 == 0) rt_log("vk: FSR 3.1: %u frames, %u without the frame's own camera", runs, exact_miss);
+    float jit[2] = {0, 0};
+    if (!jitter_of(fr, &jit[0], &jit[1])) jit[0] = jit[1] = 0;
+    runs++;
+    (void)exact_miss;
     int reset = !last_frame || last_frame + 1 != fr || miss;
     miss = 0, last_frame = fr;
     if (U.mid.fresh) {
