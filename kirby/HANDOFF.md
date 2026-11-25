@@ -110,3 +110,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - 2026-11-25: 14.5 ✅, 14.10 ✅.
 - 2026-11-25: 14.10 nachgeprüft (Vollbild 3440/2560, Top-Ride-HUD mittig → 14.10b); toRace/soak60 an Fahrschul-Menü angepasst.
 - 2026-11-25: 13.3 Release-Blocker: frischer Nutzer 4–5 min <3 fps beim ersten City Trial (Compute-Treiberbau 650-KB-Shader, synchron).
+- 2026-11-25: 13.3 Seed-Prototyp (KAR_CS_SEED, aus): CS-Übersetzung ~0,8 CPU-s je Shader = Engpass → Übersetzer profilieren.
