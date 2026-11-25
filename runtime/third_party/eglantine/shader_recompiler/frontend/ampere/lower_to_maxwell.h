@@ -114,7 +114,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x810: operand(16); operand(24); operand(64); break;
     case 0x210: case 0x223: operand(16); operand(24); operand(32); operand(64); break;
     case 0x233: operand(16); operand(24); operand(32); break;
-    case 0xa20: case 0x621: case 0x808: case 0x923: operand(16); operand(24); break;
+    case 0xa20: case 0x621: case 0x808: case 0xc08: case 0x923: operand(16); operand(24); break;   // DKB Recomp: + 0xc08 (FSEL, uniform b)
     case 0x209: operand(16); operand(24); operand(32); break;
     case 0xa23: case 0x623: case 0x423: operand(16); operand(24); operand(64); break;
     case 0x321: operand(16, input.Bits(74, 2) + 1); operand(24); operand(32); break;
@@ -239,7 +239,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         const u32 op = instruction.Bits(0, 12);
         uses_uniform_bank |= op == 0x4a4 || op == 0x2bf || op == 0x499;
         uses_uniform_bank |= op == 0x3c4 || op == 0x2bd || op == 0x896 || op == 0xf60 || op == 0xc11 || op == 0xd08 || op == 0xc0c || op == 0x986 || op == 0x9a8 || op == 0xc12 || op == 0xc17 || op == 0xe24 || op == 0xc24 || op == 0xd00 || op == 0xd09 || op == 0x9c3 || op == 0xc45 || op == 0x2a4 || op == 0x891 || op == 0x890 || op == 0x290 || op == 0x28c || op == 0x88c || op == 0x287 || op == 0x887 || op == 0x958 || op == 0xab9 || op == 0xabb || op == 0x899 || op == 0xc20 || op == 0xe21 || op == 0xe23 || op == 0xc02 ||
-                             op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || (op == 0x988 && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xf63 || op == 0xf66 || op == 0xf69 || op == 0xc0b || op == 0x8a5 || op == 0x299 || op == 0xc09 || op == 0xc07 || op == 0xf6c || (op == 0x81c && instruction.Bits(67, 1)) || op == 0xc0a ||
+                             op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || (op == 0x988 && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xf63 || op == 0xf66 || op == 0xf69 || op == 0xc0b || op == 0x8a5 || op == 0x299 || op == 0xc09 || op == 0xc07 || op == 0xf6c || (op == 0x81c && instruction.Bits(67, 1)) || op == 0xc0a || op == 0xc08 ||
                              (op == 0x83b && instruction.Bits(91, 1));
     }
     const auto address_of = [](u32 index) { return 0x50U + index * 8 + ((index + 1) / 3) * 8; };
@@ -3006,7 +3006,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             break;
         }
         case 0x207: case 0x807: case 0xa07: case 0xc07:
-        case 0x208: case 0x808: case 0xa08: { // Bitwise SEL / FSEL
+        case 0x208: case 0x808: case 0xa08: case 0xc08: { // Bitwise SEL / FSEL (DKB Recomp: + 0xc08, uniform b)
             // FSEL applies the floating operand modifiers (negate/absolute) before selecting.
             const bool floating = (opcode & 0x1ff) == 0x008;
             const u32 a = operand(0, floating), b = operand(1, floating);
@@ -3181,7 +3181,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 emit(base(0x3828000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) | (u64{insn.words[1]} << 20));
                 break;
             }
-            if ((insn.Bits(73, 2) != 3 && !is_signed) || insn.Bits(75, 1) || !insn.Bits(80, 1) || insn.words[1] > 32) return fail(index, "native funnel-shift mode");
+            // DKB Recomp: SHF.L.U64.HI with a shift below 32 (Kirby Air Riders' geometry stages) gives the same high word
+            // as the U32 form: the type only changes the clamp of shifts of 32 and more and the right shifts.
+            const bool u64_left_hi = insn.Bits(73, 2) == 1 && !insn.Bits(76, 1) && insn.words[1] < 32;
+            if ((insn.Bits(73, 2) != 3 && !is_signed && !u64_left_hi) || insn.Bits(75, 1) || !insn.Bits(80, 1) || insn.words[1] > 32) return fail(index, "native funnel-shift mode");
             const u32 low = insn.Bits(24, 8), high = insn.Bits(64, 8), shift = insn.words[1];
             if (insn.Bits(76, 1)) {
                 if (low != 255) return fail(index, "native nonzero low right-shift word");

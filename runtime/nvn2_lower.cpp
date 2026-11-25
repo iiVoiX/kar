@@ -3,6 +3,7 @@
 // translator reads it, and a synthetic control block carries the fields the host reads.
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -54,6 +55,14 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
     }
     Shader::Ampere::LoweringOptions options;
     options.tensor = true;   // HMMA expanded inline (the old "full" tensor mode)
+    // A geometry stage (SPH shader type 4) takes the lowering's geometry forms: OUT, LEPC (its own code address) and the
+    // native exit stub. Without them Kirby Air Riders' geometry stages failed at their first instruction (LEPC) and were
+    // dropped, so ~60 programs drew without their geometry shader (RELEASE_PLAN.md 1.12). KAR_NATIVE_GS_LOWER=0: off.
+    static const int gs_lower = !(std::getenv("KAR_NATIVE_GS_LOWER") && *std::getenv("KAR_NATIVE_GS_LOWER") == '0');
+    if (gfx && ((w0 >> 10) & 15) == 4 && gs_lower) {
+        options.geometry = true;
+        options.native_code_address = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(code + hdr));
+    }
     const auto lowered = Shader::Ampere::LowerToMaxwell(native, options);
     if (!lowered) {
         // The failing instruction's 12-bit opcode too, so a run lists which native forms the lowering still lacks
