@@ -418,7 +418,7 @@ spin sdk 6883c0 688524   # 32 instructions; loads
 # Native PC options in Kirby's own options menu (RELEASE_PLAN 15.x, runtime/kar_menu.c). The text fetch f_70011302c0
 # looks a message label up with f_7000001300 (msbt, label) -> UTF-16 text or 0, at two call sites. Both go to the host
 # adapter at the patch page + 0x300, which calls the original and can answer a label with its own text (page + 0x400..).
-set karmenu KAR_MENU 1
+set karmenu KAR_MENU 0
 site karmenu main 1130310 97bb43fc @call:300   # text fetch, first message set
 site karmenu main 11303f8 97bb43c2 @call:300   # text fetch, second message set
 site karmenu main 112735c 9103c3fd 9103c3fd @call:310   # f_7001127350 (set UI text from label) after its prologue: record
