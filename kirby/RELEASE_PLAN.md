@@ -201,7 +201,7 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 | 12.2 | Automatischer Regenbogen-/Schwarzbild-Check: `tools/kar_shot_check.py`, Median-Helligkeit pro Lauf, an 10 bekannten Läufen geeicht (10/10 richtig) | OHNE | ✅ |
 | 12.3 | Validation-Layer-Lauf als fester Test vor jedem Release | OHNE + SPIEL | ⬜ Validation heute nicht sauber → 18.9 (Bindless-Set) |
 | 12.4 | Testskripte für jeden Modus (Menüpfade für frischen und alten Spielstand) | OHNE + SPIEL | 🔶 2026-11-18: Air Ride `fresh_race_ms.txt` (+ Pause), Top Ride `top_ms.txt`, Fahrschule `school_ms.txt` (Weltuhr, frisches Profil); City Trial/Road Trip nur bildgezählt (`mode_top.txt`/`mode_road.txt`, Limit 60, Ziel schwankt) |
-| 12.5 | Langzeit-Soak über Nacht mit Speicher- und fps-Protokoll | SPIEL | ⬜ |
+| 12.5 | Langzeit-Soak über Nacht mit Speicher- und fps-Protokoll | SPIEL | ⬜ 2026-11-25: 2× 60 min (soak60): kein FATAL, Speicher flach (privat 17,6–17,9 GB, kein Wachstum ab Min. 10), 1 Rennen + Menüs; Skript hängt danach in Menüs (Replay-Hinweis braucht DOWN bis Ende, DOWN landet in der Fahrerwahl auf „Name“) → echte Rennschleife fehlt noch |
 
 ## 13. Verteilung
 
