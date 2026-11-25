@@ -14,7 +14,7 @@ foreach ($u in $Upscalers) {
         -Profile $Profile -Out $dir -Shots '8400-8400:1' -ShotCount 1 -MaxMinutes $MaxMinutes `
         -Env "KAR_UPSCALE=$u;TOTK_VK_VALIDATION=1" | Out-Null
     $log = Join-Path $dir 'run1.err'
-    if (-not (Test-Path $log)) { Write-Host "$u: no log"; $bad++; continue }
+    if (-not (Test-Path $log)) { Write-Host "${u}: no log"; $bad++; continue }
     $hits = Select-String -Path $log -Pattern 'VUID-|THREADING ERROR|vk validation error' | Measure-Object
     $used = Select-String -Path $log -Pattern 'FSR 3.1 upscaling|upscaling 1|FSR 1 EASU' -Quiet
     Write-Host ("{0}: {1} validation messages{2}" -f $u, $hits.Count, $(if ($used) { '' } else { ' (upscaler not seen in the log)' }))
