@@ -932,14 +932,14 @@ static uint32_t ui_band(VkExec *ex) {
     vk_texture_unlock();
     return bound ? ex->color[0].width : 0;
 }
-// KAR_UI_COPY=1 (17.21, off by default): a draw into the interface layer whose block is the whole 16:9 layout and whose
+// KAR_UI_COPY (17.21, on unless 0): a draw into the interface layer whose block is the whole 16:9 layout and whose
 // fragment shader samples only textures of the layer's own (widened) size, such as the blur passes behind the
 // "connect to the network?" dialog, copies an unshifted wide layer: drawn into the 16:9 viewport it squeezed the
 // layer's 16:9 content into 1920/2576 of its width and left black beside it. Drawn over the whole layer width it
 // copies 1:1. Returns that width, or 0.
 static uint32_t ui_copy(VkExec *ex) {
     static int on = -1;
-    if (on < 0) on = getenv("KAR_UI_COPY") && *getenv("KAR_UI_COPY") == '1';
+    if (on < 0) on = !(getenv("KAR_UI_COPY") && *getenv("KAR_UI_COPY") == '0');
     if (!on || !ui_block || !ex->pass_ncolor || !ex->color[0].image || !kar_wide_ui(ex->color[0].width, ex->color[0].height))
         return 0;
     const float *f = (const float *)(uintptr_t)ui_block;
