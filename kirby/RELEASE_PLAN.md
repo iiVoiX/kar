@@ -225,12 +225,12 @@ im DKB-Tab „Bildschirm“, wirkt aber bei Kirby nicht überall oder ist nicht 
 | 14.2 | Ausgabe-Auflösung (Liste der Monitor-Auflösungen + eigene) | `OUTPUT_RES`, Neustart | OHNE + SPIEL | ⬜ |
 | 14.3 | Fenstermodus: Fenster / randloses Vollbild / exklusives Vollbild | `FULLSCREEN` (randlos), F11 | OHNE + SPIEL | ⬜ |
 | 14.4 | V-Sync an/aus/adaptiv (Present-Modus fifo/mailbox/immediate verständlich benannt) | `VK_PRESENT` | OHNE + SPIEL | ⬜ |
-| 14.5 | FPS-Limit 30/60/120/144/Monitor (Spiel läuft intern mit 60: höhere Werte prüfen) | `FPS_LIMIT` | SPIEL | ⬜ |
+| 14.5 | FPS-Limit 30/60/120/144/Monitor (Spiel läuft intern mit 60: höhere Werte prüfen) | `FPS_LIMIT` | SPIEL | ✅ 2026-11-25 (Top Ride): 30 → 29,8 fps, 60 → 54–60 fps, 144 (Nutzer-ini) → ~130 fps; Rennuhr = Wandzeit bei 30 und 130 fps |
 | 14.6 | Interne Auflösung (Spiel rendert 1536×864 für DLSS): Stufen 67 %/80 %/100 % | fehlt | OHNE + SPIEL | ⬜ |
 | 14.7 | Upscaler: FSR 1 / bilinear, Schärfe-Regler | `UPSCALER`, `SHARPNESS` (wirkt jetzt auch bei Kirby, 🔧) | SPIEL | ✅ 2026-11-20: TOTK_SHARPNESS=50 → „FSR 1 EASU … + RCAS (sharpness 50)“.  |
 | 14.8 | Anzeige-Auflösung, die das Spiel sieht (heute fest 2560×1440, `KAR_DISPLAY_RES`) | nur Umgebungsvariable | OHNE + SPIEL | 🔶 2026-11-18 (17.17): `kar_wide_size` rechnet jede Wunschgröße auf 1440 Zeilen um; Spiel sieht <Verhältnis>×1440 (Standard aus TOTK_OUTPUT_RES bei Ultrawide, sonst 2560×1440). Menüeintrag offen |
 | 14.9 | Helligkeit/Kontrast/Sättigung/Gamma | `COLOR_*` (DKB), bei Kirby prüfen | SPIEL | ⬜ |
-| 14.10 | Seitenverhältnis/Ultrawide, HUD-Position | `ASPECT`, `ULTRAWIDE`, `HUD_POSITION` (DKB), bei Kirby prüfen | SPIEL | ⬜ |
+| 14.10 | Seitenverhältnis/Ultrawide, HUD-Position | `ASPECT`, `ULTRAWIDE`, `HUD_POSITION` (DKB), bei Kirby prüfen | SPIEL | ✅ 2026-11-25: alle Testbilder 3440×1440 mit HUD am Rand (Rennen, City Trial, Top Ride, Road Trip, Splitscreen) |
 | 14.11 | Leistungsanzeige (fps, Frametime) | `PERF_OVERLAY`, F10 | SPIEL | ⬜ |
 | 14.12 | GPU-Auswahl bei mehreren Grafikkarten | `GPU_INDEX` | — | ✅ |
 | 14.13 | Voreinstellungen „Leistung / Ausgewogen / Qualität / Benutzerdefiniert“ (`TOTK_VIDEO_PRESET`): setzt interne Auflösung, Upscaler und Schärfe auf einmal; Ändern einer der drei Zeilen macht „Benutzerdefiniert“ (wie das Farbprofil). Warum: ein Klick statt drei Zeilen für Spieler ohne Grafikwissen | `menu.cpp tab_screen` | OHNE + SPIEL | ⏸ wartet auf Nutzer (Tastendruck im Menü). gebaut, im Menü sichtbar (menutest4); Tastendruck/Gerätewechsel noch von Hand testen |
