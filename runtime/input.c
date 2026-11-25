@@ -571,6 +571,57 @@ static int pad_read(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     return 1;
 }
 
+// The keyboard and mouse as one controller (lock held). Player 1's, or player 2's with kbd_split.
+static void keyboard_read(uint64_t *bp, int32_t sl[2], int32_t sr[2]) {
+    uint64_t b = 0;
+    uint8_t down[KEY_COUNT] = {0};
+    // Mouse buttons count only while the cursor is captured, and a button already held when the capture began
+    // (the click that refocused the window) is ignored until it is released.
+    static int was_captured;
+    static uint8_t mouse_ignore[KEY_COUNT];
+    int cap = ikb_captured();
+    for (int k = 1; k < KEY_COUNT; k++) {
+        down[k] = ikb_down(k);
+        if (k < KEY_MOUSE_L || k > KEY_MOUSE_X2) continue;
+        if (cap && !was_captured) mouse_ignore[k] = down[k];
+        if (!down[k]) mouse_ignore[k] = 0;
+        if (!cap || mouse_ignore[k]) down[k] = 0;
+    }
+    was_captured = cap;
+    b |= input_map_buttons(down);
+    int32_t k[2];
+    input_map_stick(down, 0, k);
+    pick(&sl[0], &sl[1], k[0], k[1]);
+    input_map_stick(down, 1, k);
+    pick(&sr[0], &sr[1], k[0], k[1]);
+    mouse_camera(k);
+    pick(&sr[0], &sr[1], k[0], k[1]);
+    *bp |= b;
+}
+
+// keyboard_player = 2 (settings, live; RELEASE_PLAN.md 7.1b): with the first gamepad connected, the keyboard and
+// mouse are player 2 and the further gamepads players 3 on; without a gamepad the keyboard stays player 1. Lock held.
+static int kbd_split(void) {
+    const char *e = cfg_get("TOTK_KEYBOARD_PLAYER");
+    int on = e && !strcmp(e, "2") && state == 1 && pad && SDL_GamepadConnected(pad);
+    static int told = -1;
+    if (on != told) {
+        if (told >= 0 || on) rt_log("input: keyboard is player %d", on ? 2 : 1);
+        told = on;
+    }
+    return on;
+}
+
+// KAR_KBD_SCRIPT=<lo>-<hi> (test runs, 7.1b): from frame lo to hi the keyboard player gets the test script's presses,
+// since a test window never counts as the foreground.
+static int kbd_script(void) {
+    static int parsed, on;
+    static unsigned long long lo, hi;
+    if (!parsed) parsed = 1, on = cfg_get("KAR_KBD_SCRIPT") && sscanf(cfg_get("KAR_KBD_SCRIPT"), "%llu-%llu", &lo, &hi) == 2;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    return on && fr >= lo && fr <= hi;
+}
+
 static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     uint64_t b = 0;
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
@@ -580,30 +631,7 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
     if (state > 0) {
         binds_refresh();
         if (state == 1) pad_read(&b, sl, sr);
-        if (ikb_foreground()) {
-            uint8_t down[KEY_COUNT] = {0};
-            // Mouse buttons count only while the cursor is captured, and a button already held when the capture began
-            // (the click that refocused the window) is ignored until it is released.
-            static int was_captured;
-            static uint8_t mouse_ignore[KEY_COUNT];
-            int cap = ikb_captured();
-            for (int k = 1; k < KEY_COUNT; k++) {
-                down[k] = ikb_down(k);
-                if (k < KEY_MOUSE_L || k > KEY_MOUSE_X2) continue;
-                if (cap && !was_captured) mouse_ignore[k] = down[k];
-                if (!down[k]) mouse_ignore[k] = 0;
-                if (!cap || mouse_ignore[k]) down[k] = 0;
-            }
-            was_captured = cap;
-            b |= input_map_buttons(down);
-            int32_t k[2];
-            input_map_stick(down, 0, k);
-            pick(&sl[0], &sl[1], k[0], k[1]);
-            input_map_stick(down, 1, k);
-            pick(&sr[0], &sr[1], k[0], k[1]);
-            mouse_camera(k);
-            pick(&sr[0], &sr[1], k[0], k[1]);
-        }
+        if (ikb_foreground() && !kbd_split()) keyboard_read(&b, sl, sr);
     }
     script_apply(&b, sl, sr);
     rec_apply(b, sl, sr);
@@ -733,8 +761,9 @@ int input_player_connected(int player) {
     plat_mutex_lock(&lock);
     if (!state) start();
     if (state == 1 && pad) scan_extra();   // the first gamepad is always player 1
-    SDL_Gamepad *g = state == 1 ? xpad[player - 2] : NULL;
-    int on = g && SDL_GamepadConnected(g);
+    int split = kbd_split();   // the keyboard is player 2, the further gamepads move up one
+    SDL_Gamepad *g = state == 1 && player - 2 - split >= 0 ? xpad[player - 2 - split] : NULL;
+    int on = (split && player == 2) || (g && SDL_GamepadConnected(g));
     plat_mutex_unlock(&lock);
     return on;
 }
@@ -751,7 +780,19 @@ int input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, i
         binds_refresh();
         scan_extra();
         pad_update();
-        g = xpad[player - 2];
+    }
+    int split = state == 1 && pad && kbd_split();
+    if (state == 1 && pad && player - 2 - split >= 0) g = xpad[player - 2 - split];
+    if (split && player == 2) {   // the keyboard and mouse as player 2
+        if (!g_block && !g_menu) {
+            if (ikb_foreground()) keyboard_read(&b, sl, sr);
+            if (kbd_script()) script_apply(&b, sl, sr);
+        }
+        plat_mutex_unlock(&lock);
+        stick_bits(&b, sl[0], sl[1], B_SL_LEFT);
+        stick_bits(&b, sr[0], sr[1], B_SR_LEFT);
+        *buttons = b, *lx = sl[0], *ly = sl[1], *rx = sr[0], *ry = sr[1];
+        return 1;
     }
     int on = g && SDL_GamepadConnected(g);
     if (on && !g_block && !g_menu) {

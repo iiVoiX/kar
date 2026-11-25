@@ -180,12 +180,17 @@ static int jitter_of(uint64_t fr, float *jx, float *jy) {
     return vk_fsr3_jitter(fr, (int)kar_fsr3_size[0], (int)kar_fsr3_size[2], jx, jy);
 }
 
+static uint64_t shifted_frame;   // frame + 1 of the last pass whose viewport took the jitter
+
 // The viewport shift in pixels for a pass of w x h with a depth target of dw x dh (vk_exec_draw.c record_fixed).
 int vk_kar_jitter_viewport(uint32_t w, uint32_t h, uint32_t dw, uint32_t dh, float *jx, float *jy) {
     static uint32_t sw = 1536, sh = 864;   // the scene's render size: the upscale source's, once seen
     if (kar_fsr3_size[0]) sw = kar_fsr3_size[0], sh = kar_fsr3_size[1];
     if (w != sw || h != sh || dw != sw || dh != sh) return 0;
-    return jitter_of(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), jx, jy);
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (!jitter_of(fr, jx, jy)) return 0;
+    shifted_frame = fr + 1;
+    return 1;
 }
 
 // FSR 3.1 into the intermediate, then the RCAS pass decodes (and with the menu's sharpness sharpens) into dst. 0 when
@@ -200,7 +205,8 @@ static int fsr3_record(int backend, VkCtx *c, VkCommandBuffer cb, VkImage src, V
     VkFgMv mv;
     if (!vk_fg_mv_compute(cb, sw, sh, &mv)) return miss++, 0;   // FSR 1 for this frame; the history resets after it
     float jit[2] = {0, 0};
-    if (!jitter_of(fr, &jit[0], &jit[1])) jit[0] = jit[1] = 0;
+    // only when the scene's passes of this frame were shifted (split screen draws no whole-pass viewport)
+    if (shifted_frame != fr + 1 || !jitter_of(fr, &jit[0], &jit[1])) jit[0] = jit[1] = 0;
     int reset = !last_frame || last_frame + 1 != fr || miss;
     miss = 0, last_frame = fr;
     if (U.mid.fresh) {

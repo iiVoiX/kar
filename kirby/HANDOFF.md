@@ -123,3 +123,4 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 - **DLSS:** SDK v310.9.16 in `refs/dlss` (ignoriert). Lizenz 4e → nie in die GPL-exe. Plan: neutrale Upscaler-Schnittstelle im Repo, DLSS-Zusatz-DLL in eigenem Ordner außerhalb (eigener Code, MIT, Nutzer baut selbst, SDK lädt das Build-Skript). Keine NVIDIA-Dateien/-Namen im Repo; `package_build.py` darf sie nie einpacken.
 - **Soak:** `kirby/scripts/soak_loop.txt` (A-Schleife, alle 1800 Ticks DOWN×8/A/B/UP×8).
 - **Shader:** Patch 0028 nur in `build/xlate-t`; Umstellen von `build/xlate` = Nutzerfrage (warmer Cache neu).
+- **Ausstehende Tests (gebündelt am Ende, Nutzerwunsch 2026-11-25):** Validation für fsr3 (Viewport-Jitter) und external (DLSS-Layouts); Splitscreen mit fsr3/external; DLSS-Jitter-Richtung (KAR_DLSS_JSX/JSY); Monitor-Platzierung (`monitor = n`); Nachttest `soak_night.txt` + memlog.ps1; Bilder nach Rennende für 7.6 (Speichern-Zeile); 7.1b Tastatur als Spieler 2 mit echtem Pad (Nutzer).

@@ -68,7 +68,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"VOLUME", "audio"}, {"MUTE_UNFOCUSED", "audio"}, {"AUDIO_DEVICE", "audio"},
     {"VIDEO_PRESET", "display"}, {"SCREENSHOT_KEY", "display"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
-    {"PAD_LAYOUT", "input"}, {"STICK_DEADZONE", "input"}, {"MOUSE_CAMERA", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
+    {"PAD_LAYOUT", "input"}, {"KEYBOARD_PLAYER", "input"}, {"STICK_DEADZONE", "input"}, {"MOUSE_CAMERA", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
     {"BIND_A", "input"}, {"BIND_B", "input"}, {"BIND_X", "input"}, {"BIND_Y", "input"}, {"BIND_LCLICK", "input"},
     {"BIND_RCLICK", "input"}, {"BIND_L", "input"}, {"BIND_R", "input"}, {"BIND_ZL", "input"}, {"BIND_ZR", "input"},
     {"BIND_PLUS", "input"}, {"BIND_MINUS", "input"}, {"BIND_LEFT", "input"}, {"BIND_UP", "input"},
@@ -127,7 +127,7 @@ static const CfgMeta metas[] = {
     {"VOLUME", "100", "0..100", LIVE}, {"MUTE_UNFOCUSED", "0", "0|1", LIVE},
     {"AUDIO_DEVICE", "", NULL, RESTART},   // an SDL playback device name; unset: the system default
     {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
-    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE},
+    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox|xbox_prompts", LIVE}, {"KEYBOARD_PLAYER", "1", "1|2", LIVE},
     {"STICK_DEADZONE", "8", "0..50", LIVE}, {"MOUSE_CAMERA", "0", "0|1", LIVE}, {"MOUSE_SENS", "1", "0..10", LIVE},
     {"MENU_LANG", "", "en|de|ru", LIVE},
     // Advanced: scheduling

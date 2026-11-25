@@ -341,6 +341,7 @@ static void window_main(void *arg) {
     RECT mon;
     if (gfx_window_monitor_rect(cfg_get("TOTK_MONITOR") ? atoi(cfg_get("TOTK_MONITOR")) : 0, &mon, NULL, 0))
         px = mon.left + ((mon.right - mon.left) - ow) / 2, py = mon.top + ((mon.bottom - mon.top) - oh) / 2;
+    if (px != CW_USEDEFAULT) rt_log("gfx: window on monitor %s at %d,%d", cfg_get("TOTK_MONITOR"), px, py);
     g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"Kirby Air Riders Recomp", WND_STYLE, px, py, ow, oh, NULL,
                              NULL, inst, NULL);
     if (!g_hwnd) {

@@ -89,6 +89,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling; 0 turns it off.",
     [UI_MENU_FRAME_GEN] = "Frame generation",
     [UI_MENU_MONITOR] = "Monitor", [UI_MENU_MONITOR_AUTO] = "Automatic",
+    [UI_MENU_KBD_PLAYER] = "Keyboard and mouse", [UI_MENU_KBD_P1] = "Player 1", [UI_MENU_KBD_P2] = "Player 2",
+    [UI_MENU_KBD_PLAYER_DESC] = "Player 2: with a controller connected, the controller is player 1 and the keyboard and mouse "
+                                "player 2, so two can play on one PC. Further controllers become players 3 and 4.",
     [UI_MENU_MONITOR_DESC] = "The monitor the window opens on; fullscreen covers that monitor. Restart to apply.",
     [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 inserts a generated picture between two real ones: about twice the frames shown. "
                                "The game itself keeps its own pace. Best with a frame rate limit of at least 60. Restart to apply.",
@@ -389,6 +392,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR; 0 выключает его.",
     [UI_MENU_FRAME_GEN] = "Генерация кадров",
     [UI_MENU_MONITOR] = "Монитор", [UI_MENU_MONITOR_AUTO] = "Автоматически",
+    [UI_MENU_KBD_PLAYER] = "Клавиатура и мышь", [UI_MENU_KBD_P1] = "Игрок 1", [UI_MENU_KBD_P2] = "Игрок 2",
+    [UI_MENU_KBD_PLAYER_DESC] = "Игрок 2: при подключённом контроллере он становится игроком 1, а клавиатура и мышь — игроком 2. "
+                                "Остальные контроллеры — игроки 3 и 4.",
     [UI_MENU_MONITOR_DESC] = "Монитор, на котором открывается окно; полный экран занимает этот монитор. Действует после перезапуска.",
     [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 вставляет созданный кадр между двумя настоящими: примерно вдвое больше кадров на экране. "
                                "Сама игра идёт в своём темпе. Лучше с ограничением кадров от 60. Действует после перезапуска.",
@@ -681,6 +687,9 @@ static const char *const text_de[UI_TEXT_COUNT] = {
     [UI_MENU_SHARPNESS_DESC] = "Nachschärfen nach der Skalierung; 0 schaltet es aus.",
     [UI_MENU_FRAME_GEN] = "Bildgenerierung",
     [UI_MENU_MONITOR] = "Monitor", [UI_MENU_MONITOR_AUTO] = "Automatisch",
+    [UI_MENU_KBD_PLAYER] = "Tastatur und Maus", [UI_MENU_KBD_P1] = "Spieler 1", [UI_MENU_KBD_P2] = "Spieler 2",
+    [UI_MENU_KBD_PLAYER_DESC] = "Spieler 2: Ist ein Controller angeschlossen, ist er Spieler 1 und Tastatur und Maus sind "
+                                "Spieler 2, so spielen zwei an einem PC. Weitere Controller werden Spieler 3 und 4.",
     [UI_MENU_MONITOR_DESC] = "Der Monitor, auf dem das Fenster öffnet; Vollbild füllt diesen Monitor. Wirkt nach Neustart.",
     [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 fügt zwischen zwei echten Bildern ein berechnetes ein: etwa doppelt so viele Bilder. "
                                "Das Spiel selbst läuft im eigenen Takt. Am besten mit einem FPS-Limit ab 60. Wirkt nach Neustart.",
