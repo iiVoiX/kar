@@ -4059,7 +4059,8 @@ static void skip_ui_note(VkExec *ex, int r) {
     static int n;
     for (int i = 0; i < n; i++)
         if (told[i] == ex->prog->serial) return;
-    if (n < 64) told[n++] = ex->prog->serial;
+    if (n == 64) return;   // full: stop logging rather than log every draw
+    told[n++] = ex->prog->serial;
     rt_log("ui full: program %llu skipped in the interface layer: %s", (unsigned long long)ex->prog->serial, skip_names[r]);
 }
 #define SKIP(r) return (skip_ct[r]++, skip_ui_note(ex, r), 0)
@@ -5122,6 +5123,10 @@ static void use_prog(VkExec *ex, int graphics) {
     if (p != ex->prog) ex->prog = p, bind_gen++;
     ex->prog_stages = mask;
 }
+
+// The program a draw or dispatch uses, resolved ahead of vk_exec_op_draw: the interface classifiers in vk_exec.c
+// (ui_full_flat, ui_band, ui_copy) look at it before the draw runs; without this they saw the previous draw's program.
+void vk_exec_use_prog(VkExec *ex, int graphics) { use_prog(ex, graphics); }
 
 void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
     geometry_context_log(ex, op, payload);

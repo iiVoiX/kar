@@ -1960,6 +1960,8 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         case OP_DRAW_IND:
             ui_op_dump(ex, h->op, a);
             if (h->op == OP_DRAW || h->op == OP_DRAW_IDX || h->op == OP_DRAW_IDX_IND || h->op == OP_DRAW_IND) {
+                void vk_exec_use_prog(VkExec *ex, int graphics);
+                vk_exec_use_prog(ex, 1), resolve_rt(ex);   // this draw's program and targets for the checks below
                 vk_exec_frame.draws_seen++, split_draws++;
                 ui_draw_dump(ex, h->op, a);
                 ui_anchor(ex);
