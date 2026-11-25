@@ -1007,6 +1007,19 @@ static void ui_full_log(VkExec *ex, int op, const void *a) {
     if (sig[i].last == ~0ull) sig[i].first = fr, sig[i].stretched = 0;
     sig[i].last = fr, sig[i].x = f[3], sig[i].y = f[7];
     if (ui_full_flat(ex)) sig[i].stretched = 1; else sig[i].why = ui_full_why;
+    if (ui_full_why == 2) {   // which program missed, and who holds its table entry
+        static uint64_t told[32];
+        static int ntold;
+        uint64_t ps = ex->prog ? ex->prog->serial : 0;
+        int seen = 0;
+        for (int t = 0; t < ntold; t++) seen |= told[t] == ps;
+        if (!seen && ntold < 32) {
+            uint64_t vk_exec_fs_slot_owner(uint64_t serial);
+            told[ntold++] = ps;
+            rt_log("ui full: program %llu not noted (entry held by %llu) at frame %llu", (unsigned long long)ps,
+                   (unsigned long long)vk_exec_fs_slot_owner(ps), (unsigned long long)fr);
+        }
+    }
 }
 static int ui_dump_frame(void);
 static int ui_probe_offset(VkExec *ex);

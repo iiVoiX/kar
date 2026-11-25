@@ -1164,6 +1164,14 @@ static void fs_slots_note(uint64_t serial, const GfxShader *fs) {
     }
     plat_mutex_unlock(&fsl_m);
 }
+// KAR_UI_FULL_LOG: the serial that holds this serial's table entry (0: none yet), to tell a collision from a miss
+uint64_t vk_exec_fs_slot_owner(uint64_t serial) {
+    unsigned i = (unsigned)((serial * 0x9E3779B97F4A7C15ull) >> 55);
+    plat_mutex_lock(&fsl_m);
+    uint64_t o = FSL[i].serial;
+    plat_mutex_unlock(&fsl_m);
+    return o;
+}
 // 1 and the stage and sampled-slot mask of the program with this serial once one of its draws noted them, else 0.
 int vk_exec_fs_slots(uint64_t serial, int *stage, uint64_t mask[2]) {
     unsigned i = (unsigned)((serial * 0x9E3779B97F4A7C15ull) >> 55);
@@ -4040,8 +4048,21 @@ unsupported:
 // Pass, shaders, pipeline, fixed state and resources for a draw. 0: the draw is skipped.
 // Why draws were skipped, by reason, logged every 50000 prepare_draw calls (KAR diagnostic).
 static volatile uint64_t skip_ct[16], skip_calls;
-static const char *const skip_names[16] = {"disabled", "gs", "scissor", "no program", "no vs", "bisect", "shader pending", "listed", "shader failed", "feedback", "pipe pending", "pipe failed", "drawn"};
-#define SKIP(r) return (skip_ct[r]++, 0)
+static const char *const skip_names[16] = {"disabled", "gs", "scissor", "no program", "no vs", "bisect", "shader pending", "listed", "shader failed", "feedback", "pipe pending", "pipe failed", "drawn", "no fragment stage", "prepared"};
+// KAR_UI_FULL_LOG: the first skip of each program drawing into the interface layer, with its reason (17.18: flat
+// fades whose programs were never noted for vk_exec_fs_slots)
+static void skip_ui_note(VkExec *ex, int r) {
+    static int on = -1;
+    if (on < 0) on = getenv("KAR_UI_FULL_LOG") && *getenv("KAR_UI_FULL_LOG") == '1';
+    if (!on || !ex->prog || !ex->pass_ncolor || !kar_wide_ui(ex->color[0].width, ex->color[0].height)) return;
+    static uint64_t told[64];
+    static int n;
+    for (int i = 0; i < n; i++)
+        if (told[i] == ex->prog->serial) return;
+    if (n < 64) told[n++] = ex->prog->serial;
+    rt_log("ui full: program %llu skipped in the interface layer: %s", (unsigned long long)ex->prog->serial, skip_names[r]);
+}
+#define SKIP(r) return (skip_ct[r]++, skip_ui_note(ex, r), 0)
 static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart);
 static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     static int clear_on = -1;   // KAR_CLEAR_AT (vk_texture.c vk_texture_clear_gpu_at): before this draw is prepared
@@ -4065,6 +4086,15 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     return r;
 }
 static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
+    skip_ui_note(ex, 14);   // KAR_UI_FULL_LOG: first draw of each interface-layer program that reaches here
+    {   // KAR_PROG_WATCH=<serial> (diagnostic): the first draws of that program with their target
+        static long long w = -2;
+        static int told;
+        if (w == -2) w = getenv("KAR_PROG_WATCH") ? atoll(getenv("KAR_PROG_WATCH")) : -1;
+        if (w >= 0 && ex->prog && (long long)ex->prog->serial == w && told++ < 8)
+            rt_log("prog watch: %lld drawn into %ux%u (colour targets %d) at frame %llu", w, ex->color[0].width,
+                   ex->color[0].height, ex->pass_ncolor, (unsigned long long)gfx_counters.frames);
+    }
     if (ex->render_disabled) SKIP(0);
     static int skip_all = -1;   // DKB_SKIP_DRAWS=1: drop every draw (bisecting GPU faults)
     if (skip_all < 0) skip_all = getenv("DKB_SKIP_DRAWS") != NULL;
@@ -4154,6 +4184,7 @@ static int prepare_draw_(VkExec *ex, int prim, int32_t count, int restart) {
                   !(getenv("KAR_UI_BAND") && *getenv("KAR_UI_BAND") == '0');
     if (ui_full && fs && ex->prog && ex->pass_ncolor && kar_wide_ui(ex->color[0].width, ex->color[0].height))
         fs_slots_note(ex->prog->serial, fs);   // for vk_exec_fs_slots (vk_exec.c)
+    else if (ui_full && !fs) skip_ui_note(ex, 13);   // drawn, but without a fragment stage: nothing to note
     {   // KAR_SAMPLE_LOG=<frame> (diagnostic, 17.19): each draw of that frame with its target and the size and pool id of
         // every texture its fragment shader samples, to find which pass reads a given target
         static long at = -2;
