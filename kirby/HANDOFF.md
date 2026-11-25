@@ -117,7 +117,8 @@ afterwards touch runtime/vk_fg.cpp so kar.exe relinks).
 
 ## Stand 2026-11-25 (Loop: Liste, Weekly ≤ 80 %)
 - **Nutzerentscheide:** Einstellungen nur im Port-Overlay (ImGui), keine eigenen Einträge im Kirby-Optionsmenü (`karmenu` aus, `KAR_MENU=1` an); Blöcke 14 (offene Punkte) und 15 gestrichen/zurückgestellt.
-- **FSR 3.1** (`upscaler = fsr3`, Overlay „AMD FSR 3.1“): läuft ohne Jitter (zeitliche Glättung). Jitter im Kamerablock und in den Kamera-Versatzfeldern (+0x200/+0x204) verschiebt die Szene nicht → nächster Versuch: Viewport-Versatz im Replay. FFX braucht `rec_drain` vor dem Aufruf.
+- **FSR 3.1** (`upscaler = fsr3`): Jitter per Viewport-Versatz im Replay (vk_exec_draw.c record_fixed → vk_kar_jitter_viewport), Richtung per 40-px-Test bestätigt; Flimmer-Beweis mit stehender Kamera steht aus (B halten). FFX braucht `rec_drain`.
+- **DLSS-Zusatz:** `E:/kirby/kar-dlss` (lokales git, MIT), `powershell -File build.ps1 -Sdk E:/kirby/dkb-pc-recomp/refs/dlss -Install <exe-Ordner>`; liegt in build/kar458752 (`upscaler = external`, Overlay „NVIDIA DLSS“). check_content/package_build sperren die DLLs.
 - **Bildgenerierung:** Overlay-Schalter (`frame_gen`, Neustart); MV-Abdeckung im Rennen 95 %.
 - **DLSS:** SDK v310.9.16 in `refs/dlss` (ignoriert). Lizenz 4e → nie in die GPL-exe. Plan: neutrale Upscaler-Schnittstelle im Repo, DLSS-Zusatz-DLL in eigenem Ordner außerhalb (eigener Code, MIT, Nutzer baut selbst, SDK lädt das Build-Skript). Keine NVIDIA-Dateien/-Namen im Repo; `package_build.py` darf sie nie einpacken.
 - **Soak:** `kirby/scripts/soak_loop.txt` (A-Schleife, alle 1800 Ticks DOWN×8/A/B/UP×8).

@@ -26,6 +26,9 @@ BLOCKED_SUFFIXES = {
 
 # ExeFS modules carry no extension.
 BLOCKED_NAMES = {"main", "sdk", "rtld", "subsdk0", "subsdk1", "main.npdm"}
+# Third-party binaries under their own licences that must never be in this repository: the upscaler add-on built
+# beside the exe and the vendor runtime it brings (docs/kirby-running.md, upscaler = external).
+BLOCKED_NAMES |= {"kar_upscaler.dll", "nvngx_dlss.dll", "nvngx_dlssd.dll", "nvngx_dlssg.dll"}
 
 # Written by the code generator into every file it emits.
 GENERATED_MARKER = "TOTK_RECOMP_" + "GENERATED_FROM_GAME_CODE"

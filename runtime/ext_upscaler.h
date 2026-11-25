@@ -1,4 +1,5 @@
-// External upscaler add-on interface (RELEASE_PLAN.md 17.5). An optional DLL beside the exe (kar_upscaler.dll) can
+// External upscaler add-on interface (RELEASE_PLAN.md 17.5). This file is also available under the MIT licence
+// (LICENSE-MIT), so an add-on may carry a copy of these declarations under its own terms. An optional DLL beside the exe (kar_upscaler.dll) can
 // take the place of the built-in upscalers in Kirby's upscale slot. It is a separate program: it exports one function,
 // ext_upscaler_get, returning the table below, and the exe talks to it through this interface alone. The add-on keeps
 // its own copy of these declarations; the layout is versioned by EXT_UPSCALER_VERSION and only ever grows at the end.
