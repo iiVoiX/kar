@@ -19,6 +19,7 @@
 
 #include "host.h"
 #include "cfg.h"
+#include "nvn_api.h"
 #include "kar_easu16_spv.h"
 #include "kar_rcas_spv.h"
 #include "kar_upscale_spv.h"
@@ -140,6 +141,66 @@ static VkImageView view_of(VkCtx *c, int dst, VkImage image, VkFormat format) {
     return v;
 }
 
+int vk_fsr3_dispatch(VkCommandBuffer cb, VkImage color, VkFormat cf, uint32_t sw, uint32_t sh, VkImage depth, VkImage mv,
+                     VkImage out, VkFormat of, uint32_t dw, uint32_t dh, float jx, float jy, int reset, float nearv,
+                     float farv, float fov, uint64_t key);
+int vk_fg_mv_compute(VkCommandBuffer cb, uint32_t w, uint32_t h, VkFgMv *out);
+int kar_fg_last_jitter(float px[2]);
+extern volatile uint32_t kar_fsr3_size[4];
+
+// UPSCALER = fsr3 (port menu, live) or KAR_UPSCALE=fsr3: FSR 3.1 (vk_fg.cpp) instead of EASU.
+static int fsr3_mode(void) {
+    const char *e = getenv("KAR_UPSCALE");
+    if (e && *e) return !strcmp(e, "fsr3");
+    const char *c = cfg_get("TOTK_UPSCALER");
+    return c && !strcmp(c, "fsr3");
+}
+
+// FSR 3.1 into the intermediate, then the RCAS pass decodes (and with the menu's sharpness sharpens) into dst. 0 when
+// there is no scene camera pair (menus, loading): the caller runs FSR 1. The history resets after such frames.
+static int fsr3_record(VkCtx *c, VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32_t sw, uint32_t sh,
+                       VkImageView out, uint32_t dw, uint32_t dh, int sharp, int decode) {
+    static uint64_t last_frame;
+    static uint32_t miss, exact_miss, runs;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (!U.rcas || !mid_image(c, dw, dh)) return 0;
+    kar_fsr3_size[0] = sw, kar_fsr3_size[1] = sh, kar_fsr3_size[2] = dw, kar_fsr3_size[3] = dh;
+    VkFgMv mv;
+    if (!vk_fg_mv_compute(cb, sw, sh, &mv)) return miss++, 0;   // FSR 1 for this frame; the history resets after it
+    float jit[2];
+    int exact = kar_fg_last_jitter(jit);
+    exact_miss += !exact, runs++;
+    if (runs % 600 == 0) rt_log("vk: FSR 3.1: %u frames, %u without the frame's own camera", runs, exact_miss);
+    int reset = !last_frame || last_frame + 1 != fr || miss;
+    miss = 0, last_frame = fr;
+    if (U.mid.fresh) {
+        VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                                    .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                    .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                    .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                    .image = U.mid.image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                               .pImageMemoryBarriers = &ib};
+        vkCmdPipelineBarrier2(cb, &di);
+        U.mid.fresh = 0;
+    }
+    if (!vk_fsr3_dispatch(cb, src, sfmt, sw, sh, mv.depth, mv.mv, U.mid.image, VK_FORMAT_R16G16B16A16_SFLOAT, dw, dh,
+                          jit[0], jit[1], reset, mv.nearv, mv.farv, mv.fov, fr))
+        return 0;
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    float rc[8] = {(float)dw, (float)dh, sharp > 0 ? (float)(100 - sharp) / 50.0f : -1.0f, (float)decode, 0, 0, 0, 0};
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, U.rcas);
+    bind_pair(cb, U.mid.sampled, out);
+    vkCmdPushConstants(cb, U.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, rc);
+    vkCmdDispatch(cb, (dw + 15) / 16, (dh + 15) / 16, 1);
+    return 1;
+}
+
 int vk_kar_upscale_record(VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32_t sw, uint32_t sh, VkImage dst,
                           VkFormat dfmt, uint32_t dw, uint32_t dh) {
     static int mode = -1, decode = -1;
@@ -161,6 +222,7 @@ int vk_kar_upscale_record(VkCommandBuffer cb, VkImage src, VkFormat sfmt, uint32
     const char *sv = cfg_get("TOTK_SHARPNESS");
     int sharp = sv && *sv ? cfg_int("TOTK_SHARPNESS") : 0;
     sharp = sharp < 0 ? 0 : sharp > 100 ? 100 : sharp;
+    if (fsr3_mode() && fsr3_record(c, cb, src, sfmt, sw, sh, out, dw, dh, sharp, decode)) return 1;
     int two = sharp > 0 && U.easu16 && U.rcas && mid_image(c, dw, dh);
     float pc[8] = {(float)sw, (float)sh, (float)sw, (float)sh, (float)dw, (float)dh, (float)decode, 0};
     if (two && U.mid.fresh) {   // the intermediate's first use: from UNDEFINED to GENERAL

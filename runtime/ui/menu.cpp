@@ -707,8 +707,9 @@ static void rows_video_preset(void) {
             }
     }
     bool moved = row_render_scale();
-    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
-    moved |= opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
+    static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR, UI_MENU_UPSCALER_FSR3};
+    // FSR 3.1 (vk_kar_upscale.c) exists for Kirby only
+    moved |= opt_choice("TOTK_UPSCALER", UI_MENU_UPSCALER, up, rt_game_is_kar() ? 3 : 2, UI_MENU_UPSCALER_DESC);
     moved |= opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
     if (moved && strcmp(cfg_value("TOTK_VIDEO_PRESET"), "custom")) {
         cfg_set("TOTK_VIDEO_PRESET", "custom");

@@ -722,3 +722,11 @@ void vk_backend_shutdown(void) {
     vk_mem_shutdown();
     vk_shutdown();
 }
+
+// The frame a camera or other per-frame game data written now belongs to, in the replay's count: with the async replay
+// the game's presents so far (the replay of the commands recorded now runs while gfx_counters.frames equals this
+// value), else the frames presented.
+uint64_t gfx_frame_key(void) {
+    return gfx_replay_async() ? __atomic_load_n(&game_frames, __ATOMIC_RELAXED)
+                              : __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+}

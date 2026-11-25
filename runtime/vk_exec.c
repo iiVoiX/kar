@@ -1550,6 +1550,8 @@ void vk_exec_pass_end(VkExec *ex) {
         if (ex->color[i].image) vk_texture_gpu_written(ex->color[i].tex), tfr_note(&ex->color[i], stamp),
                                 rt_note_newest(&ex->color[i], stamp);
     if (ex->depth.image) vk_texture_gpu_written(ex->depth.tex), tfr_note(&ex->depth, stamp);
+    extern void kar_fg_cam_scene_pass(uint32_t w, uint32_t h);
+    if (ex->depth.image) kar_fg_cam_scene_pass(ex->depth.width, ex->depth.height);   // FSR 3: the scene's camera
 }
 
 VkCommandBuffer vk_exec_inline_begin(int *reopen) {
@@ -1987,6 +1989,8 @@ static int record_impl(VkCommandBuffer cb, const uint64_t *handles, int n, uint6
     int memory = n || work;
     uint64_t rp_start = rp_on > 0 ? plat_now_ns() : 0;
     if (rp_on > 0) memset(rp_ns, 0, sizeof rp_ns), memset(rp_n, 0, sizeof rp_n), memset(vk_rp_sub, 0, sizeof vk_rp_sub), memset(vk_rp_sh, 0, sizeof vk_rp_sh), memset(gfx_rp, 0, sizeof gfx_rp), memset(gfx_pf_why, 0, sizeof gfx_pf_why);
+    extern void kar_fg_cam_mark(void);
+    if (memory) kar_fg_cam_mark();   // the scene camera kept when this submission's uniform copies are taken (FSR 3)
     if (memory) vk_mem_mirror_begin(), vk_usnap_begin(handles, n, fence);
     if (rp_on > 0) rp_ns[OP_COUNT_] = plat_now_ns() - rp_start;
     extern void vk_dts_mark(VkExec *ex, int tag);

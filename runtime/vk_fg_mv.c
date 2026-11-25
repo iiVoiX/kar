@@ -161,9 +161,53 @@ static int hud_image(VkCtx *c, int k, VkFormat f, uint32_t ow, uint32_t oh) {
     return 2;   // new: from UNDEFINED
 }
 
+// The motion vector pass alone (FSR 3 upscaling, vk_kar_upscale.c, runs it before the upscale): slot k recorded, -1
+// without a scene camera pair or depth target.
+static int mv_pass(VkCommandBuffer cb, uint32_t w, uint32_t h);
+
 int vk_fg_mv_record(VkCommandBuffer cb, uint32_t w, uint32_t h, VkImage out, VkFormat out_fmt, uint32_t out_w,
                     uint32_t out_h) {
     if (!vk_fg_on()) return 0;
+    int k = mv_pass(cb, w, h);
+    if (k < 0) return 0;
+    VkCtx *c = vk_ctx();
+    typeof(M.s[0]) *s = &M.s[k];
+    // the scene without the interface (B3): the DLSS stand-in just wrote it; the copy keeps it for the present
+    int hn = out ? hud_image(c, k, out_fmt, out_w, out_h) : 0;
+    if (hn) {
+        VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                               .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+        vkCmdPipelineBarrier2(cb, &di);
+        image_barrier(cb, s->hud, hn == 2 ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
+                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                      VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .extent = {out_w, out_h, 1}};
+        vkCmdCopyImage(cb, out, VK_IMAGE_LAYOUT_GENERAL, s->hud, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+        image_barrier(cb, s->hud, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+    }
+    s->info.hud = hn ? s->hud : VK_NULL_HANDLE, s->info.hud_w = out_w, s->info.hud_h = out_h, s->info.hud_fmt = out_fmt;
+    __atomic_store_n(&M.latest, k + 1, __ATOMIC_RELEASE);   // complete: the present may take it
+    return 1;
+}
+
+int vk_fg_mv_compute(VkCommandBuffer cb, uint32_t w, uint32_t h, VkFgMv *out) {
+    int k = mv_pass(cb, w, h);
+    if (k < 0) return 0;
+    *out = M.s[k].info;
+    return 1;
+}
+
+static int mv_pass(VkCommandBuffer cb, uint32_t w, uint32_t h) {
+    {   // already recorded in this frame at this size (FSR 3 runs the pass before the upscale, frame generation after)
+        int pk = (M.next + SLOTS - 1) % SLOTS;
+        if (M.s[pk].info.mv && M.s[pk].w == w && M.s[pk].h == h &&
+            M.s[pk].info.frame == __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED))
+            return pk;
+    }
     VkFormat dfmt;
     VkImage depth = vk_exec_depth_newest(w, h, &dfmt);
     float reproj[16], dz[2], fov, nearv, farv;
@@ -178,13 +222,13 @@ int vk_fg_mv_record(VkCommandBuffer cb, uint32_t w, uint32_t h, VkImage out, VkF
                                      nodepth, nocam, ok, (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
         }
     }
-    if (!cam_ok) return 0;
+    if (!cam_ok) return -1;
     VkCtx *c = vk_ctx();
     if (!M.tried) init(c);
-    if (!M.ok) return 0;
+    if (!M.ok) return -1;
     int k = M.next;
     VkImageView dv = depth_view(c, depth, dfmt);
-    if (!dv || !slot_images(c, k, w, h)) return 0;
+    if (!dv || !slot_images(c, k, w, h)) return -1;
     typeof(M.s[0]) *s = &M.s[k];
     VkImageLayout from = s->fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
     image_barrier(cb, s->mv, from, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT,
@@ -230,32 +274,13 @@ int vk_fg_mv_record(VkCommandBuffer cb, uint32_t w, uint32_t h, VkImage out, VkF
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
     image_barrier(cb, s->dist, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
-    // the scene without the interface (B3): the DLSS stand-in just wrote it; the copy keeps it for the present
-    int hn = out ? hud_image(c, k, out_fmt, out_w, out_h) : 0;
-    if (hn) {
-        VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                               .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                               .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT};
-        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
-        vkCmdPipelineBarrier2(cb, &di);
-        image_barrier(cb, s->hud, hn == 2 ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
-                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                      VK_ACCESS_2_TRANSFER_WRITE_BIT);
-        VkImageCopy cp = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .extent = {out_w, out_h, 1}};
-        vkCmdCopyImage(cb, out, VK_IMAGE_LAYOUT_GENERAL, s->hud, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
-        image_barrier(cb, s->hud, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
-    }
-    s->info = (VkFgMv){.mv = s->mv, .depth = s->depth, .hud = hn ? s->hud : VK_NULL_HANDLE, .w = w, .h = h,
-                       .hud_w = out_w, .hud_h = out_h, .hud_fmt = out_fmt, .fov = fov, .nearv = nearv, .farv = farv,
+    s->info = (VkFgMv){.mv = s->mv, .depth = s->depth, .w = w, .h = h, .fov = fov, .nearv = nearv, .farv = farv,
                        .frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED)};
     M.next = (k + 1) % SLOTS;
-    __atomic_store_n(&M.latest, k + 1, __ATOMIC_RELEASE);
     static int told;
     if (!told++) rt_log("fg: camera motion vectors %ux%u from depth format %d (fov %g, near %g, far %g)", w, h, (int)dfmt,
                         fov, nearv, farv);
-    return 1;
+    return k;
 }
 
 // The newest slot when it was recorded in the replay of the frame now presented (its frame counter is one behind the

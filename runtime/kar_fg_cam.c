@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "host.h"
+#include "cfg.h"
 #include "dispatch.h"
 #include "cpu.h"
 #include "gfx.h"
@@ -24,10 +25,60 @@
 // camera of the scene's size (field of view ~0.34), so each frame keeps the candidate with the widest field of view.
 // Frames are the present counter at the time of the call: the replay of a frame runs before its present, so the
 // motion vectors of frame n use the cameras kept under n (current) and n - 1 (previous).
-typedef struct { float vp[16], ivp[16], dz[2], fov, nearv, farv; uint32_t w, h; uint64_t frame; int ok; } SceneCam;
+typedef struct { float vp[16], ivp[16], dz[2], fov, nearv, farv, jit[2]; uint32_t w, h; uint64_t frame; int ok, jittered; } SceneCam;
 #define HIST 4
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static SceneCam hist[HIST];   // by frame % HIST
+
+// FSR 3 (RELEASE_PLAN.md 17.5): the game renders without jitter, so the scene camera's projection, view-projection and
+// its inverse get FSR's subpixel offset here, before the GPU reads the block. The kept matrices (motion vectors) stay
+// without it. Only while FSR 3 dispatched in the last frames (vk_fsr3_last_key); KAR_FSR3_JITTER=0 turns it off,
+// KAR_FSR3_JSX / KAR_FSR3_JSY = -1 flip a direction (diagnostic).
+int vk_fsr3_jitter(uint64_t index, int rw, int dw, float *x, float *y);
+uint64_t vk_fsr3_last_key(void);
+volatile uint32_t kar_fsr3_size[4];   // render width, height, output width, height of the last FSR 3 dispatch
+
+static int jitter_cfg(int *sx, int *sy) {
+    static int on = -1, jx = 1, jy = 1;
+    if (on < 0) {
+        const char *e = getenv("KAR_FSR3_JITTER");
+        on = !(e && *e == '0');
+        jx = getenv("KAR_FSR3_JSX") && atoi(getenv("KAR_FSR3_JSX")) < 0 ? -1 : 1;
+        jy = getenv("KAR_FSR3_JSY") && atoi(getenv("KAR_FSR3_JSY")) < 0 ? -1 : 1;
+    }
+    *sx = jx, *sy = jy;
+    return on;
+}
+
+// rows r0, r1 += d * row 3 of a 4x4 (projection, view-projection); the inverse gets column 3 -= dx col 0 + dy col 1
+static void jitter_rows(float *m, float dx, float dy) {
+    for (int k = 0; k < 4; k++) m[k] += dx * m[12 + k], m[4 + k] += dy * m[12 + k];
+}
+static void jitter_inverse(float *m, float dx, float dy) {
+    for (int r = 0; r < 4; r++) m[r * 4 + 3] -= dx * m[r * 4 + 0] + dy * m[r * 4 + 1];
+}
+
+static void apply_jitter(float *b, uint64_t fr, SceneCam *e) {
+    int sx, sy;
+    if (!jitter_cfg(&sx, &sy)) return;
+    uint64_t last = vk_fsr3_last_key();
+    if (!last || last + 8 < fr) return;
+    uint32_t rw = kar_fsr3_size[0], rh = kar_fsr3_size[1], ow = kar_fsr3_size[2];
+    if (!rw || !rh || !ow) return;
+    float px, py;
+    if (!vk_fsr3_jitter(fr, (int)rw, (int)ow, &px, &py)) return;
+    static int cycle = -1;   // KAR_FSR3_JCYCLE=1 (diagnostic): the four sign pairs in turn, 32 frames each
+    if (cycle < 0) cycle = getenv("KAR_FSR3_JCYCLE") && *getenv("KAR_FSR3_JCYCLE") == '1';
+    if (cycle) sx = (fr / 32) % 2 ? -1 : 1, sy = (fr / 64) % 2 ? -1 : 1;
+    float dx = sx * 2.0f * px / (float)rw, dy = sy * -2.0f * py / (float)rh;
+    int same4 = !memcmp(b + 0xe0 / 4, b + 0x160 / 4, 64), same5 = !memcmp(b + 0x120 / 4, b + 0x1a0 / 4, 64);
+    jitter_rows(b + 0x60 / 4, dx, dy);
+    jitter_rows(b + 0xe0 / 4, dx, dy);
+    jitter_inverse(b + 0x120 / 4, dx, dy);
+    if (same4) memcpy(b + 0x160 / 4, b + 0xe0 / 4, 64);
+    if (same5) memcpy(b + 0x1a0 / 4, b + 0x120 / 4, 64);
+    if (e) e->jit[0] = px, e->jit[1] = py, e->jittered = 1;
+}
 
 static void keep_scene_camera(Cpu *c, uint64_t fr) {
     const float *cam = (const float *)(uintptr_t)c->x[0];
@@ -40,14 +91,54 @@ static void keep_scene_camera(Cpu *c, uint64_t fr) {
         return;
     plat_mutex_lock(&lock);
     SceneCam *e = &hist[fr % HIST];
-    if (!e->ok || e->frame != fr || fov >= e->fov) {
+    int keep = !e->ok || e->frame != fr || fov >= e->fov;
+    if (keep) {
         memcpy(e->vp, b + 0xe0 / 4, sizeof e->vp);
         memcpy(e->ivp, b + 0x120 / 4, sizeof e->ivp);
         e->dz[0] = proj[10], e->dz[1] = proj[11];   // projection row 2: ndc z = (A z + B) / -z
         e->fov = fov, e->nearv = b[0x1e8 / 4], e->farv = b[0x1ec / 4], e->w = (uint32_t)w, e->h = (uint32_t)h;
-        e->frame = fr, e->ok = 1;
+        e->frame = fr, e->ok = 1, e->jittered = 0, e->jit[0] = e->jit[1] = 0;
+    }
+    apply_jitter((float *)(uintptr_t)c->x[1], fr, keep ? e : NULL);
+    plat_mutex_unlock(&lock);
+}
+
+static float last_jit[2];
+static int last_exact;
+
+// The newest kept frame when a submission's recording starts (vk_exec.c, right before its uniform copies): the frame
+// whose camera block, jitter included, that submission's draws read. The game sometimes writes the block only after
+// it submitted the frame's scene, which then draws with the block before it.
+static uint64_t marked, mark_prev, mark_changes, marks;
+static uint64_t mark_replay_frame;
+void kar_fg_cam_mark(void) {
+    plat_mutex_lock(&lock);
+    uint64_t newest = 0;
+    int any = 0;
+    for (int i = 0; i < HIST; i++)
+        if (hist[i].ok && (!any || hist[i].frame > newest)) newest = hist[i].frame, any = 1;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (any) {
+        // submissions of one replay frame that saw different cameras: the upscale may not use the scene's one
+        if (fr == mark_replay_frame && newest != marked) mark_changes++;
+        mark_prev = marked, marked = newest + 1, mark_replay_frame = fr, marks++;   // +1: 0 is "none"
     }
     plat_mutex_unlock(&lock);
+}
+// The jitter in pixels of the frame the last kar_fg_camera call found (0 without), and whether it was the replay's own.
+int kar_fg_last_jitter(float px[2]) {
+    px[0] = last_jit[0], px[1] = last_jit[1];
+    return last_exact;
+}
+
+// A pass into a depth target of the marked camera's render size ended: its submission drew the scene with that
+// camera, so the upscale of this frame uses it (scene_mark).
+static uint64_t scene_mark;
+void kar_fg_cam_scene_pass(uint32_t w, uint32_t h) {
+    uint64_t mk = marked;
+    if (!mk) return;
+    const SceneCam *e = &hist[(mk - 1) % HIST];
+    if (e->ok && e->frame == mk - 1 && e->w == w && e->h == h) scene_mark = mk;
 }
 
 // reproj = previous view-projection x inverse current view-projection (rows), for the scene camera of size w x h of
@@ -57,11 +148,39 @@ int kar_fg_camera(uint32_t w, uint32_t h, float reproj[16], float dz[2], float *
     plat_mutex_lock(&lock);
     // the newest kept frame (the game's logic may already be one frame ahead of the replay) and the one before it
     const SceneCam *cur = NULL, *prev = NULL;
+    // keyed by gfx_frame_key: this replay's own frame when it is kept, else the newest before it
     for (int i = 0; i < HIST; i++)
-        if (hist[i].ok && hist[i].frame <= fr + 1 && (!cur || hist[i].frame > cur->frame)) cur = &hist[i];
+        if (hist[i].ok && hist[i].frame <= fr && (!cur || hist[i].frame > cur->frame)) cur = &hist[i];
+    static int use_mark = -1;   // KAR_FSR3_MARK=0: the newest kept frame up to the replay's (diagnostic)
+    if (use_mark < 0) use_mark = !(getenv("KAR_FSR3_MARK") && *getenv("KAR_FSR3_MARK") == '0');
+    uint64_t mk = scene_mark ? scene_mark : marked;
+    if (use_mark && mk && hist[(mk - 1) % HIST].ok && hist[(mk - 1) % HIST].frame == mk - 1)
+        cur = &hist[(mk - 1) % HIST];
     if (cur) prev = &hist[(cur->frame + HIST - 1) % HIST];
-    int ok = cur && prev->ok && prev->frame + 1 == cur->frame && cur->frame + 2 >= fr && cur->w == w && cur->h == h &&
+    int ok = cur && prev->ok && prev->frame + 1 == cur->frame && cur->frame + 3 >= fr && cur->w == w && cur->h == h &&
              prev->w == w && prev->h == h;
+    last_jit[0] = ok && cur->jittered ? cur->jit[0] : 0;
+    last_jit[1] = ok && cur->jittered ? cur->jit[1] : 0;
+    last_exact = ok && mark_changes == 0;   // reported as a count below
+    {
+        static uint64_t told_at;
+        if (marks >= told_at + 3000) {
+            told_at = marks;
+            rt_log("fsr3 key: %llu submissions, %llu of them in a frame whose earlier submission saw another camera",
+                   (unsigned long long)marks, (unsigned long long)mark_changes);
+        }
+    }
+    {   // KAR_FSR3_KEYLOG=1 (diagnostic): the first replays that did not find their own frame's camera
+        static int on = -1, n;
+        if (on < 0) on = getenv("KAR_FSR3_KEYLOG") && *getenv("KAR_FSR3_KEYLOG") == '1';
+        if (on && ok && cur->frame != fr && n < 30) {
+            n++;
+            rt_log("fsr3 key: replay frame %llu found %llu; kept %llu %llu %llu %llu, game key now %llu",
+                   (unsigned long long)fr, (unsigned long long)cur->frame, (unsigned long long)hist[0].frame,
+                   (unsigned long long)hist[1].frame, (unsigned long long)hist[2].frame,
+                   (unsigned long long)hist[3].frame, (unsigned long long)gfx_frame_key());
+        }
+    }
     if (ok) {
         for (int r = 0; r < 4; r++)
             for (int k = 0; k < 4; k++) {
@@ -87,7 +206,7 @@ int kar_fg_camera(uint32_t w, uint32_t h, float reproj[16], float dz[2], float *
 }
 
 static void cam_hook(Cpu *c) {
-    keep_scene_camera(c, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+    keep_scene_camera(c, gfx_frame_key());
     static long long from = -2;
     if (from == -2) from = getenv("KAR_FG_CAMLOG") ? atoll(getenv("KAR_FG_CAMLOG")) : -1;
     if (from < 0) return;
@@ -109,6 +228,9 @@ void kar_fg_cam_init(void) {
     int set = rt_patch_set("karfg");
     if (set < 0) return;
     extern int vk_fg_on(void);
-    if (vk_fg_on()) rt_patch_switch(set, 1);   // the setting in dkb.ini turns the camera hook on too
+    // frame generation or FSR 3 (dkb.ini or the environment at start) turn the camera hook on too
+    const char *up = getenv("KAR_UPSCALE"), *cu = cfg_get("TOTK_UPSCALER");
+    int fsr3 = (up && !strcmp(up, "fsr3")) || (cu && !strcmp(cu, "fsr3"));
+    if (vk_fg_on() || fsr3) rt_patch_switch(set, 1);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_CAMERA, cam_hook);
 }

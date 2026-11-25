@@ -39,6 +39,7 @@ extern "C" int vk_fg_on(void) {
 #include <FidelityFX/host/backends/vk/ffx_vk.h>
 #include <FidelityFX/host/ffx_frameinterpolation.h>
 #include <FidelityFX/host/ffx_opticalflow.h>
+#include <FidelityFX/host/ffx_fsr3upscaler.h>
 
 namespace {
 struct Img {
@@ -602,6 +603,139 @@ extern "C" void vk_fg_release(void) {
     G = Fg{};
 }
 
+// ---- FSR 3.1 upscaling in the game's DLSS slot (RELEASE_PLAN.md 17.5, UPSCALER = fsr3) ----
+// vk_kar_upscale.c calls vk_fsr3_dispatch in the replay: the game's encoded rgb10a2 scene at render size, the depth
+// copy and camera motion vectors of vk_fg_mv.c (pixels, current to previous, no jitter), the jitter kar_fg_cam.c put
+// into the scene camera; the output is vk_kar_upscale.c's rgba16f intermediate, which its RCAS pass decodes into the
+// game's target. Own back-end interface and scratch: the present thread's frame generation keeps its own.
+namespace {
+struct {
+    int tried_iface, have_ctx;
+    void *scratch;
+    FfxInterface iface;
+    FfxFsr3UpscalerContext ctx;
+    uint32_t shared_id, nres;
+    FfxResourceInternal res[3];
+    uint32_t dw, dh;
+    uint64_t last_key;
+} F3;
+
+void fsr3_destroy() {
+    if (!F3.have_ctx) return;
+    VkCtx *c = vk_ctx();
+    vkDeviceWaitIdle(c->device);
+    for (uint32_t i = 0; i < F3.nres; i++) F3.iface.fpDestroyResource(&F3.iface, F3.res[i], F3.shared_id);
+    F3.iface.fpDestroyBackendContext(&F3.iface, F3.shared_id);
+    ffxFsr3UpscalerContextDestroy(&F3.ctx);
+    F3.have_ctx = 0, F3.nres = 0;
+}
+
+int fsr3_create(uint32_t dw, uint32_t dh) {
+    VkCtx *c = vk_ctx();
+    if (!F3.tried_iface) {
+        F3.tried_iface = 1;
+        VkDeviceContext dc = {c->device, c->phys, proc_addr};
+        size_t n = ffxGetScratchMemorySizeVK(c->phys, FFX_FSR3UPSCALER_CONTEXT_COUNT + 1);
+        F3.scratch = _aligned_malloc(n, 64);
+        if (!F3.scratch) return 0;
+        memset(F3.scratch, 0, n);
+        if (ffxGetInterfaceVK(&F3.iface, ffxGetDeviceVK(&dc), F3.scratch, n, FFX_FSR3UPSCALER_CONTEXT_COUNT + 1) != FFX_OK)
+            return _aligned_free(F3.scratch), F3.scratch = nullptr, 0;
+        if (!caps_orig) caps_orig = F3.iface.fpGetDeviceCapabilities;
+        F3.iface.fpGetDeviceCapabilities = caps_no_fp16;
+    }
+    if (!F3.scratch) return 0;
+    if (F3.have_ctx && F3.dw == dw && F3.dh == dh) return 1;
+    fsr3_destroy();
+    FfxFsr3UpscalerContextDescription d = {};
+    d.flags = FFX_FSR3UPSCALER_ENABLE_DEPTH_INVERTED;   // the game's projection: near 1, far 0
+    d.maxRenderSize = d.maxUpscaleSize = {dw, dh};
+    d.backendInterface = F3.iface;
+    if (ffxFsr3UpscalerContextCreate(&F3.ctx, &d) != FFX_OK) return 0;
+    F3.have_ctx = 1;
+    if (F3.iface.fpCreateBackendContext(&F3.iface, FFX_EFFECT_SHAREDRESOURCES, nullptr, &F3.shared_id) != FFX_OK) {
+        ffxFsr3UpscalerContextDestroy(&F3.ctx);
+        return F3.have_ctx = 0;
+    }
+    FfxFsr3UpscalerSharedResourceDescriptions sr = {};
+    if (ffxFsr3UpscalerGetSharedResourceDescriptions(&F3.ctx, &sr) != FFX_OK) return fsr3_destroy(), 0;
+    const FfxCreateResourceDescription *r[3] = {&sr.dilatedDepth, &sr.dilatedMotionVectors, &sr.reconstructedPrevNearestDepth};
+    for (int i = 0; i < 3; i++) {
+        if (F3.iface.fpCreateResource(&F3.iface, r[i], F3.shared_id, &F3.res[i]) != FFX_OK) return fsr3_destroy(), 0;
+        F3.nres = i + 1;
+    }
+    F3.dw = dw, F3.dh = dh;
+    rt_log("vk: FSR 3.1 upscaler ready for %ux%u output", dw, dh);
+    return 1;
+}
+
+FfxResource res_img(VkImage image, VkFormat f, uint32_t w, uint32_t h, int uav, const wchar_t *name) {
+    VkImageCreateInfo ci = {};
+    ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.imageType = VK_IMAGE_TYPE_2D;
+    ci.format = f;
+    ci.extent = {w, h, 1};
+    ci.mipLevels = ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | (uav ? VK_IMAGE_USAGE_STORAGE_BIT : 0);
+    return ffxGetResourceVK((void *)image, ffxGetImageResourceDescriptionVK(image, ci, uav ? FFX_RESOURCE_USAGE_UAV
+                                                                                         : FFX_RESOURCE_USAGE_READ_ONLY),
+                            name, FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+}   // namespace
+
+extern "C" void rec_drain(void);   // vk_rec.h (not included here: its macros would rename the calls below)
+
+// The jitter of sample `index` for a render width rw shown at width dw, in pixels (FSR's own sequence).
+extern "C" int vk_fsr3_jitter(uint64_t index, int rw, int dw, float *x, float *y) {
+    int32_t n = ffxFsr3UpscalerGetJitterPhaseCount(rw, dw);
+    if (n <= 0) return 0;
+    return ffxFsr3UpscalerGetJitterOffset(x, y, (int32_t)(index % (uint64_t)n), n) == FFX_OK;
+}
+
+// The frame key of the newest dispatch (kar_fg_cam.c jitters the camera only while FSR 3 runs).
+extern "C" uint64_t vk_fsr3_last_key(void) { return __atomic_load_n(&F3.last_key, __ATOMIC_RELAXED); }
+
+extern "C" int vk_fsr3_dispatch(VkCommandBuffer cb, VkImage color, VkFormat cf, uint32_t sw, uint32_t sh, VkImage depth,
+                                VkImage mv, VkImage out, VkFormat of, uint32_t dw, uint32_t dh, float jx, float jy,
+                                int reset, float nearv, float farv, float fov, uint64_t key) {
+    if (!fsr3_create(dw, dh)) return 0;
+    FfxFsr3UpscalerDispatchDescription d = {};
+    d.commandList = ffxGetCommandListVK(cb);
+    d.color = res_img(color, cf, sw, sh, 0, L"KAR_FSR3_Color");
+    d.depth = res_img(depth, VK_FORMAT_R32_SFLOAT, sw, sh, 0, L"KAR_FSR3_Depth");
+    d.motionVectors = res_img(mv, VK_FORMAT_R16G16_SFLOAT, sw, sh, 0, L"KAR_FSR3_MotionVectors");
+    d.output = res_img(out, of, dw, dh, 1, L"KAR_FSR3_Output");
+    d.dilatedDepth = F3.iface.fpGetResource(&F3.iface, F3.res[0]);
+    d.dilatedMotionVectors = F3.iface.fpGetResource(&F3.iface, F3.res[1]);
+    d.reconstructedPrevNearestDepth = F3.iface.fpGetResource(&F3.iface, F3.res[2]);
+    d.jitterOffset = {jx, jy};
+    d.motionVectorScale = {1.0f, 1.0f};
+    d.renderSize = {sw, sh};
+    d.upscaleSize = {dw, dh};
+    d.enableSharpening = false;   // vk_kar_upscale.c's RCAS pass decodes and, with the menu's sharpness, sharpens
+    static uint64_t t0;
+    uint64_t t = kern_now_ns();
+    d.frameTimeDelta = t0 && t > t0 ? (float)((t - t0) / 1e6) : 16.7f;
+    if (d.frameTimeDelta > 100.0f) d.frameTimeDelta = 100.0f;
+    t0 = t;
+    d.preExposure = 1.0f;
+    d.reset = reset != 0;
+    d.cameraNear = nearv, d.cameraFar = farv, d.cameraFovAngleVertical = fov, d.viewSpaceToMetersFactor = 1.0f;
+    // The SDK calls vkCmd* itself, past the recorder thread (vk_rec.c) that makes the replay's calls into cb: it
+    // records once the recorder made every call queued so far, and the calls after it queue behind its commands.
+    rec_drain();
+    if (ffxFsr3UpscalerContextDispatch(&F3.ctx, &d) != FFX_OK) {
+        static int told;
+        if (!told++) rt_log("vk: FSR 3.1 dispatch failed (%ux%u -> %ux%u)", sw, sh, dw, dh);
+        return 0;
+    }
+    __atomic_store_n(&F3.last_key, key, __ATOMIC_RELAXED);
+    static int told;
+    if (!told++) rt_log("vk: FSR 3.1 upscaling %ux%u -> %ux%u (jitter %g %g)", sw, sh, dw, dh, jx, jy);
+    return 1;
+}
+
 #else
 extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h, const int crop[4], int mv_slot,
                                      VkFormat *out_fmt) {
@@ -611,6 +745,10 @@ extern "C" VkImage vk_fg_interpolate(VkImage src, VkFormat src_fmt, int w, int h
     return VK_NULL_HANDLE;
 }
 extern "C" void vk_fg_release(void) {}
+extern "C" int vk_fsr3_jitter(uint64_t, int, int, float *, float *) { return 0; }
+extern "C" uint64_t vk_fsr3_last_key(void) { return 0; }
+extern "C" int vk_fsr3_dispatch(VkCommandBuffer, VkImage, VkFormat, uint32_t, uint32_t, VkImage, VkImage, VkImage, VkFormat,
+                                uint32_t, uint32_t, float, float, int, float, float, float, uint64_t) { return 0; }
 extern "C" VkImage vk_fg_current(VkFormat *fmt) {
     *fmt = VK_FORMAT_UNDEFINED;
     return VK_NULL_HANDLE;

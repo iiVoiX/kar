@@ -160,7 +160,8 @@ int vk_fsr_record(VkCommandBuffer cb, unsigned slot, VkImage src, VkFormat fmt, 
                   VkImage dst, const int out[4]) {
     int cw = crop[2], ch = crop[3];
     uint32_t dw = (uint32_t)out[2], dh = (uint32_t)out[3];
-    if (strcmp(cfg_value("TOTK_UPSCALER"), "fsr") || (dw <= (uint32_t)cw && dh <= (uint32_t)ch) || !fmt) return 0;
+    // fsr3 (Kirby's DLSS slot, vk_kar_upscale.c) keeps FSR 1 here for the window
+    if (strncmp(cfg_value("TOTK_UPSCALER"), "fsr", 3) || (dw <= (uint32_t)cw && dh <= (uint32_t)ch) || !fmt) return 0;
     VkCtx *c = vk_ctx();
     if (!F.tried) init(c);
     if (!F.ok || !ensure_images(c, dw, dh)) return 0;

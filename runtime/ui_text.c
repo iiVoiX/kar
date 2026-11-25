@@ -74,8 +74,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_RENDER_SCALE_GAME] = "Game (83 %)",
     [UI_MENU_UPSCALER] = "Scaling to the window",
     [UI_MENU_UPSCALER_DESC] = "How the picture is scaled when the window is larger than the game resolution. FSR keeps "
-                              "edges and detail sharper than bilinear.",
+                              "edges and detail sharper than bilinear. Kirby Air Riders: FSR 3.1 also smooths edges over several frames in the "
+                              "race.",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Bilinear",
+    [UI_MENU_UPSCALER_FSR3] = "AMD FSR 3.1",
     [UI_MENU_ASPECT] = "Fit picture to window",
     [UI_MENU_ASPECT_DESC] = "When the window's shape differs from the game resolution's (a 16:9 picture on a 21:9 "
                             "screen): keep the picture's shape with black bars, or stretch it over the window. "
@@ -369,8 +371,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_RENDER_SCALE_GAME] = "Как в игре (83 %)",
     [UI_MENU_UPSCALER] = "Масштабирование под окно",
     [UI_MENU_UPSCALER_DESC] = "Как картинка растягивается, когда окно больше разрешения игры. FSR сохраняет края и "
-                              "детали чётче билинейного.",
+                              "детали чётче билинейного. Kirby Air Riders: FSR 3.1 в гонке также сглаживает края по нескольким кадрам.",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Билинейное",
+    [UI_MENU_UPSCALER_FSR3] = "AMD FSR 3.1",
     [UI_MENU_ASPECT] = "Подгонка картинки под окно",
     [UI_MENU_ASPECT_DESC] = "Когда форма окна отличается от разрешения игры (картинка 16:9 на экране 21:9): сохранить "
                             "форму картинки с чёрными полосами или растянуть её на всё окно. Обзор камеры не расширяется.",
@@ -654,8 +657,10 @@ static const char *const text_de[UI_TEXT_COUNT] = {
     [UI_MENU_RENDER_SCALE_GAME] = "Spiel (83 %)",
     [UI_MENU_UPSCALER] = "Skalierung aufs Fenster",
     [UI_MENU_UPSCALER_DESC] = "Wie das Bild skaliert wird, wenn das Fenster größer als die Auflösung ist. FSR hält Kanten "
-                              "und Details schärfer als bilinear.",
+                              "und Details schärfer als bilinear. Kirby Air Riders: FSR 3.1 glättet im Rennen zusätzlich Kanten über "
+                              "mehrere Bilder.",
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Bilinear",
+    [UI_MENU_UPSCALER_FSR3] = "AMD FSR 3.1",
     [UI_MENU_ASPECT] = "Bild ans Fenster anpassen",
     [UI_MENU_ASPECT_DESC] = "Wenn die Fensterform von der Auflösung abweicht: Form mit schwarzen Balken behalten oder "
                             "auf das Fenster strecken.",

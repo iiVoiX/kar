@@ -54,6 +54,7 @@ void nvn_submit_prepare(const uint64_t *handles, int n);   // weak no-op; the co
 // submission uses the same recording with other deferred binds)
 void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n);
 int gfx_replay_async(void);                                // 1: the back end replays submissions on its own thread
+uint64_t gfx_frame_key(void);                            // the replay frame the game data written now belongs to
 uint64_t gfx_replayed_submits(void);                       // newest submit number (nvn_submit_count) replayed
 #define NVN_HANDLE_TEX(h) ((int)((h) & 0xfffff))           // combined texture handle = texture id | sampler id << 20
 #define NVN_HANDLE_SAMP(h) ((int)(((h) >> 20) & 0xfff))

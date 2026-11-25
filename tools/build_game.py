@@ -291,7 +291,7 @@ def c_string(s):
 # FidelityFX SDK built by tools/build_ffx.py (Windows): runtime/vk_fg.cpp compiles against it and these libraries are
 # linked (frame generation, KAR_FG=1). Without it vk_fg.cpp builds its stubs.
 FFX_DIR = ROOT / 'build' / 'ffx-src'
-FFX_LIBS = ([FFX_DIR / 'bin' / 'ffx_sdk' / f'libffx_{n}_x64.a' for n in ('frameinterpolation', 'opticalflow', 'backend_vk')]
+FFX_LIBS = ([FFX_DIR / 'bin' / 'ffx_sdk' / f'libffx_{n}_x64.a' for n in ('frameinterpolation', 'opticalflow', 'fsr3upscaler', 'backend_vk')]
             if WIN and (FFX_DIR / 'bin' / 'ffx_sdk' / 'libffx_backend_vk_x64.a').is_file() else [])
 RUNTIME = ROOT / 'runtime'   # --runtime: a copy of runtime/ lets a task build without touching the shared tree
 

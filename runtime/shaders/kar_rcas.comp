@@ -25,7 +25,8 @@ void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
 void put(AU2 p, AU4 con) {
     if (p.x >= uint(pc.size.x) || p.y >= uint(pc.size.y)) return;
     AF3 c;
-    FsrRcasF(c.r, c.g, c.b, p, con);
+    if (pc.size.z < 0.0) c = texelFetch(src, ivec2(p), 0).rgb;   // decode only (FSR 3 output, no sharpening)
+    else FsrRcasF(c.r, c.g, c.b, p, con);
     c = clamp(c, 0.0, 1.0);
     // decode 1: the sRGB curve the game encoded with (fs 184cb4d91dd73177: 12.92 below 0.0031308, else
     // 1.055 x^(1/2.4) - 0.055); 2: a plain square (the first stand-in, which lifted the mid-tones: a flat picture)
