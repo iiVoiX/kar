@@ -162,8 +162,8 @@ Jeder Schritt hat ein Kriterium und eine Messung; kein Schritt ohne Messung davo
 | 8.1 | Tastatur-Belegung dokumentiert (`docs/kirby-running.md`) | OHNE | ✅ |
 | 8.2 | Tasten umbelegen im Port-Menü: gibt es schon (Steuerungs-Tab) | — | ✅ |
 | 8.3 | Xbox-, PlayStation- und Switch-Pro-Controller (Tastensymbole passend zum Pad?) | SPIEL (du) | ⬜ |
-| 8.4 | Mehrere Controller gleichzeitig für Splitscreen | SPIEL (du) | ⬜ |
-| 8.5 | Gyro/Bewegungssteuerung, falls das Spiel sie nutzt | SPIEL (du) | ⬜ |
+| 8.4 | Mehrere Controller gleichzeitig für Splitscreen | SPIEL (du) | ✅ 2026-11-25: Splitscreen mit 2 und 4 Spielern über virtuelle Pads (7.1, KAR_VPAD_MIRROR ,3) und Tastatur als Spieler 2 (7.1b) läuft; echte Pads gleichzeitig = Nutzertest (NUTZERTESTS.md).  |
+| 8.5 | Gyro/Bewegungssteuerung, falls das Spiel sie nutzt | SPIEL (du) | ⬜ 2026-11-25: Spiel nutzt den Bewegungssensor (StartSixAxisSensor/GetSixAxisSensorStates, vom Host ersetzt; Overlay „Bewegung“ = `motion`). Nur mit echtem Gyro-Pad prüfbar → Nutzertest.  |
 
 ## 9. Audio
 
