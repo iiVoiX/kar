@@ -230,7 +230,7 @@ im DKB-Tab „Bildschirm“, wirkt aber bei Kirby nicht überall oder ist nicht 
 | 14.7 | Upscaler: FSR 1 / bilinear, Schärfe-Regler | `UPSCALER`, `SHARPNESS` (wirkt jetzt auch bei Kirby, 🔧) | SPIEL | ✅ 2026-11-20: TOTK_SHARPNESS=50 → „FSR 1 EASU … + RCAS (sharpness 50)“.  |
 | 14.8 | Anzeige-Auflösung, die das Spiel sieht (heute fest 2560×1440, `KAR_DISPLAY_RES`) | nur Umgebungsvariable | OHNE + SPIEL | 🔶 2026-11-18 (17.17): `kar_wide_size` rechnet jede Wunschgröße auf 1440 Zeilen um; Spiel sieht <Verhältnis>×1440 (Standard aus TOTK_OUTPUT_RES bei Ultrawide, sonst 2560×1440). Menüeintrag offen |
 | 14.9 | Helligkeit/Kontrast/Sättigung/Gamma | `COLOR_*` (DKB), bei Kirby prüfen | SPIEL | ⬜ |
-| 14.10 | Seitenverhältnis/Ultrawide, HUD-Position | `ASPECT`, `ULTRAWIDE`, `HUD_POSITION` (DKB), bei Kirby prüfen | SPIEL | ✅ 2026-11-25 (Vollbild-Shots, `TOTK_OUTPUT_RES=3440x1440`): Ultrawide an → 3440×1440 Hor+, aus → 2560×1440 16:9; HUD edges/centered greift im Rennen (Anker = Tacho). Top Ride hat keinen Tacho → HUD bleibt mittig (14.10b) |
+| 14.10 | Seitenverhältnis/Ultrawide, HUD-Position | `ASPECT`, `ULTRAWIDE`, `HUD_POSITION` (DKB), bei Kirby prüfen | SPIEL | ✅ 2026-11-25 (Vollbild-Shots, `TOTK_OUTPUT_RES=3440x1440`): Ultrawide an → 3440×1440 Hor+, aus → 2560×1440 16:9; HUD edges/centered greift im Air-Ride-Rennen (Vollbild-Shots beider Werte geprüft; Anker = Tacho). Top Ride hat keinen Tacho → HUD bleibt mittig (14.10b) |
 | 14.10b | HUD am Rand auch in Top Ride (eigener Anker-Shader statt Tacho, `KAR_UI_ANCHOR`) | `HUD_POSITION` | EXTRA | ⬜ |
 | 14.11 | Leistungsanzeige (fps, Frametime) | `PERF_OVERLAY`, F10 | SPIEL | ⬜ |
 | 14.12 | GPU-Auswahl bei mehreren Grafikkarten | `GPU_INDEX` | — | ✅ |
