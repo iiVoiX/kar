@@ -115,7 +115,9 @@ static void present_main(void *arg) {
             ExtFgFrame ff = {.frame = j.frame, .depth = have ? mv.depth : VK_NULL_HANDLE, .motion = have ? mv.mv : VK_NULL_HANDLE,
                              .render_w = have ? mv.w : 0, .render_h = have ? mv.h : 0, .output_w = (uint32_t)ow,
                              .output_h = (uint32_t)oh, .fov_y = have ? mv.fov : 1.0f, .near_z = have ? mv.nearv : 0.1f,
-                             .far_z = have ? mv.farv : 1000.0f, .depth_inverted = 1, .reset = !have};
+                             .far_z = have ? mv.farv : 1000.0f, .depth_inverted = 1, .reset = !have,
+                             .hudless = have ? mv.hud : VK_NULL_HANDLE, .hudless_format = have ? mv.hud_fmt : VK_FORMAT_UNDEFINED,
+                             .hudless_w = have ? mv.hud_w : 0, .hudless_h = have ? mv.hud_h : 0};
             extern void gfx_window_mark_dirty(void);   // gfx_present.c
             if (ext_fg_frame(&ff) == 2) gfx_window_mark_dirty();   // the swapchain again, with frame generation on
         }

@@ -65,6 +65,11 @@ typedef struct ExtFgFrame {
     uint32_t render_w, render_h, output_w, output_h;   // output: the swapchain extent
     float fov_y, near_z, far_z;   // radians; the camera's planes
     int32_t depth_inverted, reset;
+    // the scene without the interface, as the game's upscaler wrote it (GENERAL), or VK_NULL_HANDLE; the add-on takes it
+    // only when it has the swapchain's size
+    VkImage hudless;
+    VkFormat hudless_format;
+    uint32_t hudless_w, hudless_h;
 } ExtFgFrame;
 enum { EXT_FG_PRESENT_START = 4, EXT_FG_PRESENT_END = 5 };
 
@@ -104,6 +109,7 @@ void ext_fg_device_ready(VkInstance instance, VkPhysicalDevice phys, VkDevice de
 int ext_fg_supported(void);                  // after the device: frame generation can run
 int ext_fg_frame(const ExtFgFrame *frame);   // version 3 calls; nothing without a supported add-on
 void ext_fg_marker(int marker);
+int ext_fg_offered(void);     // the add-on has frame generation (the menu lists it)
 int ext_fg_requested(void);   // the add-on's frame generation is asked for (settings only, before any device)
 void vk_present_extent(int *w, int *h);      // gfx_present.c: the swapchain's size
 // The add-on's version of a Vulkan call when its frame generation runs, else the normal one (cached per name).

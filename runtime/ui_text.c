@@ -93,7 +93,9 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_KBD_PLAYER_DESC] = "Player 2: with a controller connected, the controller is player 1 and the keyboard and mouse "
                                 "player 2, so two can play on one PC. Further controllers become players 3 and 4.",
     [UI_MENU_MONITOR_DESC] = "The monitor the window opens on; fullscreen covers that monitor. Restart to apply.",
-    [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 inserts a generated picture between two real ones: about twice the frames shown. "
+    [UI_MENU_FRAME_GEN_OFF] = "Off",
+    [UI_MENU_FRAME_GEN_DESC] = "Inserts a generated picture between two real ones: about twice the frames shown. AMD FSR 3 runs "
+                               "on any graphics card, NVIDIA DLSS (with the DLSS add-on) on GeForce RTX 40 and 50. "
                                "The game itself keeps its own pace. Best with a frame rate limit of at least 60. Restart to apply.",
     [UI_MENU_COLOR] = "Colour",
     [UI_MENU_COLOR_PRESET] = "Colour profile",
@@ -400,7 +402,9 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_KBD_PLAYER_DESC] = "Игрок 2: при подключённом контроллере он становится игроком 1, а клавиатура и мышь — игроком 2. "
                                 "Остальные контроллеры — игроки 3 и 4.",
     [UI_MENU_MONITOR_DESC] = "Монитор, на котором открывается окно; полный экран занимает этот монитор. Действует после перезапуска.",
-    [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 вставляет созданный кадр между двумя настоящими: примерно вдвое больше кадров на экране. "
+    [UI_MENU_FRAME_GEN_OFF] = "Выкл",
+    [UI_MENU_FRAME_GEN_DESC] = "Вставляет созданный кадр между двумя настоящими: примерно вдвое больше кадров на экране. AMD FSR 3 "
+                               "работает на любой видеокарте, NVIDIA DLSS (с дополнением DLSS) на GeForce RTX 40 и 50. "
                                "Сама игра идёт в своём темпе. Лучше с ограничением кадров от 60. Действует после перезапуска.",
     [UI_MENU_COLOR] = "Цвет",
     [UI_MENU_COLOR_PRESET] = "Цветовой профиль",
@@ -699,7 +703,9 @@ static const char *const text_de[UI_TEXT_COUNT] = {
     [UI_MENU_KBD_PLAYER_DESC] = "Spieler 2: Ist ein Controller angeschlossen, ist er Spieler 1 und Tastatur und Maus sind "
                                 "Spieler 2, so spielen zwei an einem PC. Weitere Controller werden Spieler 3 und 4.",
     [UI_MENU_MONITOR_DESC] = "Der Monitor, auf dem das Fenster öffnet; Vollbild füllt diesen Monitor. Wirkt nach Neustart.",
-    [UI_MENU_FRAME_GEN_DESC] = "AMD FSR 3 fügt zwischen zwei echten Bildern ein berechnetes ein: etwa doppelt so viele Bilder. "
+    [UI_MENU_FRAME_GEN_OFF] = "Aus",
+    [UI_MENU_FRAME_GEN_DESC] = "Fügt zwischen zwei echten Bildern ein berechnetes ein: etwa doppelt so viele Bilder. AMD FSR 3 läuft "
+                               "auf jeder Grafikkarte, NVIDIA DLSS (mit dem DLSS-Add-on) auf GeForce RTX 40 und 50. "
                                "Das Spiel selbst läuft im eigenen Takt. Am besten mit einem FPS-Limit ab 60. Wirkt nach Neustart.",
     [UI_MENU_COLOR] = "Farbe",
     [UI_MENU_COLOR_PRESET] = "Farbprofil",

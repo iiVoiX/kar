@@ -59,6 +59,7 @@ extern const char rt_game_display[];
 extern const char rt_game_target[];
 int rt_game_is_kar(void);
 const char *ext_upscaler_name(void);   // ext_upscaler.c: the loaded upscaler add-on, or NULL
+int ext_fg_offered(void);              // ext_upscaler.c: the add-on has frame generation
 #ifdef _WIN32
 int gfx_window_monitor_count(void);   // gfx_window_win.c
 const char *gfx_window_monitor_name(int n);
@@ -722,7 +723,11 @@ static void rows_video_preset(void) {
     moved |= opt_choice_list("TOTK_UPSCALER", UI_MENU_UPSCALER, upv, upn, !rt_game_is_kar() ? 2 : ext ? 4 : 3,
                              UI_MENU_UPSCALER_DESC);
     moved |= opt_slider("TOTK_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
-    if (rt_game_is_kar()) opt_toggle("TOTK_FRAME_GEN", UI_MENU_FRAME_GEN, UI_MENU_FRAME_GEN_DESC);   // vk_fg.cpp
+    if (rt_game_is_kar()) {   // vk_fg.cpp (AMD FSR 3), or the add-on's (ext_upscaler.c, NVIDIA DLSS) when it has one
+        static const char *const fgv[] = {"0", "1", "dlss"};
+        const char *fgn[] = {menu_text(UI_MENU_FRAME_GEN_OFF), "AMD FSR 3", "NVIDIA DLSS"};
+        opt_choice_list("TOTK_FRAME_GEN", UI_MENU_FRAME_GEN, fgv, fgn, ext_fg_offered() ? 3 : 2, UI_MENU_FRAME_GEN_DESC);
+    }
     if (moved && strcmp(cfg_value("TOTK_VIDEO_PRESET"), "custom")) {
         cfg_set("TOTK_VIDEO_PRESET", "custom");
         cfg_save();

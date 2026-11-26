@@ -89,11 +89,6 @@ static int fg_on, fg_ok;
 int ext_fg_preinit(void) {
     const char *set = cfg_get("TOTK_FRAME_GEN");
     if (!set || strcmp(set, "dlss")) return 0;
-    // experimental: Streamline's device creation crashed on the first try (RELEASE_PLAN 17.6); KAR_DLSSG=1 to test
-    if (!getenv("KAR_DLSSG") || *getenv("KAR_DLSSG") != '1') {
-        rt_log("frame generation: dlss is experimental (set KAR_DLSSG=1 to try); none this run");
-        return 0;
-    }
     const ExtUpscalerApi *a = api();
     if (!a || a->version < 2 || !a->fg_preinit || !a->fg_vk_proc) {
         rt_log("frame generation: dlss asked for, but %s has none", EXT_UPSCALER_DLL);
@@ -131,8 +126,13 @@ void ext_fg_marker(int marker) {
 int ext_fg_requested(void) {
     static int on = -1;
     if (on < 0) {
-        const char *set = cfg_get("TOTK_FRAME_GEN"), *e = getenv("KAR_DLSSG");
-        on = set && !strcmp(set, "dlss") && e && *e == '1';
+        const char *set = cfg_get("TOTK_FRAME_GEN");
+        on = set && !strcmp(set, "dlss");
     }
     return on;
+}
+// The port menu offers the add-on's frame generation when the add-on has it (version 3 with its frame calls).
+int ext_fg_offered(void) {
+    const ExtUpscalerApi *a = api();
+    return a && a->version >= 3 && a->fg_preinit && a->fg_vk_proc && a->fg_frame;
 }

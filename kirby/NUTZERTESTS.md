@@ -21,4 +21,4 @@ Kurz testen, Ergebnis einfach in den Chat schreiben (z. B. „3.5 ok, 9.4 Ton l�
 | 1.12 | Leuchtendes Gitter am Streckenrand | Konsole: Floria-Felder – gibt es am Rand ein gelb leuchtendes Gitter (Begrenzung), wenn man nah an den Rand fährt? |
 | 17.14 | Discord-Status | discord.com/developers → neue Anwendung „Kirby Air Riders“, unter Rich Presence → Art Assets ein Bild mit Namen `icon` hochladen; die Application ID als `DISCORD_APP_ID=` in totk.ini eintragen, Spiel starten: zeigt Discord „Spielt Kirby Air Riders“ mit Zeit? |
 | 13.2 | Installer | `python -m installer` (Fenster) mit deinem Dump starten: läuft er durch, startet das Spiel danach aus dem Zielordner? |
-| 17.6 | DLSS-Frame-Generation (Test) | Am entsperrten PC in PowerShell im Ordner build\kar458752: `$env:KAR_DLSSG='1'; $env:TOTK_FRAME_GEN='dlss'; .\kar.exe` – ein Rennen fahren, danach mir Bescheid geben (ich lese kar_dlss.log: „Bilder pro Spielbild“ sollte ~2 sein). Fühlt es sich flüssiger an? |
+| 17.6 | DLSS-Frame-Generation | Overlay → Anzeige → „Bildgenerierung: NVIDIA DLSS“, Neustart, ein Rennen: flüssiger, Eingabe ok, Bild ohne Fehler? |
