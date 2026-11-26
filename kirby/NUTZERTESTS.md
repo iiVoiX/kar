@@ -19,3 +19,4 @@ Kurz testen, Ergebnis einfach in den Chat schreiben (z. B. „3.5 ok, 9.4 Ton l�
 | 1.11 | Konsolenvergleich Schatten | Konsole: Foto/Video einer Stelle unter einer Überdachung oder Brücke im Rennen (Air Ride, z. B. Floria-Felder Tunnel) – fallen dort Umgebungsschatten? |
 | 3.10 | Amiibo (optional) | Falls du ein echtes amiibo + Lesegerät/Dump hast: sag Bescheid |
 | 1.12 | Leuchtendes Gitter am Streckenrand | Konsole: Floria-Felder – gibt es am Rand ein gelb leuchtendes Gitter (Begrenzung), wenn man nah an den Rand fährt? |
+| 17.14 | Discord-Status | discord.com/developers → neue Anwendung „Kirby Air Riders“, unter Rich Presence → Art Assets ein Bild mit Namen `icon` hochladen; die Application ID als `DISCORD_APP_ID=` in totk.ini eintragen, Spiel starten: zeigt Discord „Spielt Kirby Air Riders“ mit Zeit? |

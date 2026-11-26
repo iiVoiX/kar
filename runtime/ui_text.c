@@ -138,6 +138,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
                                   "keyboard stays quiet until the window is in front again. Off, it pauses when its "
                                   "window loses focus, as on the Switch when Home is pressed; a load interrupted that "
                                   "way can stop for good.",
+    [UI_MENU_DISCORD] = "Discord status",
+    [UI_MENU_DISCORD_DESC] = "Shows \"Playing\" with the play time in Discord while the game runs. Needs a Discord application id in totk.ini (DISCORD_APP_ID); without one nothing is sent.",
 
     [UI_MENU_VOLUME] = "Volume", [UI_MENU_VOLUME_DESC] = "Master volume of the game.",
     [UI_MENU_MUTE_UNFOCUSED] = "Mute in background",
@@ -441,6 +443,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
                                   "действует, пока окно не вернётся на передний план. Выключено: игра встаёт на паузу, "
                                   "когда окно теряет фокус, как на Switch при нажатии Home; прерванная так загрузка "
                                   "может остановиться насовсем.",
+    [UI_MENU_DISCORD] = "Статус в Discord",
+    [UI_MENU_DISCORD_DESC] = "Показывает в Discord, что вы играете, и время игры. Нужен id приложения Discord в totk.ini (DISCORD_APP_ID); без него ничего не отправляется.",
 
     [UI_MENU_VOLUME] = "Громкость", [UI_MENU_VOLUME_DESC] = "Общая громкость игры.",
 
@@ -730,6 +734,8 @@ static const char *const text_de[UI_TEXT_COUNT] = {
     [UI_MENU_ASSUME_FOCUS_DESC] = "An (Standard): Das Spiel läuft weiter, während du in einem anderen Fenster bist; die "
                                   "Tastatur ruht, bis das Fenster wieder vorne ist. Aus: Es pausiert, wenn das Fenster "
                                   "den Fokus verliert.",
+    [UI_MENU_DISCORD] = "Discord-Status",
+    [UI_MENU_DISCORD_DESC] = "Zeigt in Discord „Spielt“ mit der Spielzeit, solange das Spiel läuft. Braucht die ID einer Discord-Anwendung in totk.ini (DISCORD_APP_ID); ohne sie wird nichts gesendet.",
 
     [UI_MENU_VOLUME] = "Lautstärke", [UI_MENU_VOLUME_DESC] = "Gesamtlautstärke des Spiels.",
     [UI_MENU_MUTE_UNFOCUSED] = "Im Hintergrund stumm",

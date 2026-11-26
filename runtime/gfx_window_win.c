@@ -348,6 +348,8 @@ static void window_main(void *arg) {
         rt_log("gfx: CreateWindowEx failed (%lu)", GetLastError());
         g_wnd_failed = 1;
     } else {
+        void discord_start(void);
+        discord_start();   // discord.c: the status once the game window exists (not for tool runs)
         // An IME switched on over the game attaches to this window and then shows its candidate window and eats the keys
         // it composes, although there is nothing here to type into (a Chinese IME takes Shift, the B button by default).
         // Detaching the game's window leaves the software keyboard alone: its edit box sits in a window of its own
