@@ -9,6 +9,7 @@
 // picture and is adjusted with it; the in-game menu is drawn later, straight into the swapchain image, and is not.
 // The source view of slot s is destroyed when slot s records again (present_image has waited for that slot's fence);
 // the output image is shared by all slots, and each frame's first barrier orders it after the previous frame's reads.
+#include "ext_upscaler.h"
 #include "vk.h"
 
 #include <string.h>
@@ -87,7 +88,7 @@ static int ensure_image(VkCtx *c, uint32_t w, uint32_t h) {
     if (C.img && C.w == w && C.h == h) return 1;
     // another crop size (a resolution change): earlier presents may still read the old image
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    EXT_FG_VK(vkDeviceWaitIdle)(c->device);
     vk_queue_unlock();
     free_image(c);
     VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,

@@ -69,6 +69,9 @@ typedef struct ExtUpscalerApi {
 
 typedef const ExtUpscalerApi *(*ExtUpscalerGetFn)(void);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 // The exe side (ext_upscaler.c).
 const char *ext_upscaler_name(void);   // NULL without a usable add-on
 uint32_t ext_upscaler_instance_ext(const char **out, uint32_t room);
@@ -80,3 +83,10 @@ int ext_fg_preinit(void);                    // 1 when the add-on's frame genera
 PFN_vkVoidFunction ext_fg_proc(const char *name);   // its version of a Vulkan call, or NULL
 void ext_fg_device_ready(VkInstance instance, VkPhysicalDevice phys, VkDevice device);
 int ext_fg_supported(void);                  // after the device: frame generation can run
+// The add-on's version of a Vulkan call when its frame generation runs, else the normal one (cached per name).
+// EXT_FG_VK(vkQueuePresentKHR)(queue, &info) at every call site of the calls the add-on lends.
+PFN_vkVoidFunction ext_fg_resolve(const char *name, PFN_vkVoidFunction normal);
+#define EXT_FG_VK(fn) ((PFN_##fn)ext_fg_resolve(#fn, (PFN_vkVoidFunction)fn))
+#ifdef __cplusplus
+}
+#endif

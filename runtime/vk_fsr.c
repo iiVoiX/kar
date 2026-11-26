@@ -13,6 +13,7 @@
 // The source view of slot s is destroyed when slot s records again: present_image has waited for that slot's fence.
 // The two intermediate images are shared by all slots; each frame's first barrier orders it after the previous
 // frame's reads (one queue, so the barrier covers earlier submissions).
+#include "ext_upscaler.h"
 #include "vk.h"
 
 #include <string.h>
@@ -103,7 +104,7 @@ static int ensure_images(VkCtx *c, uint32_t w, uint32_t h) {
     // A swapchain size change: earlier presents may still read the old images. vkDeviceWaitIdle needs every queue
     // externally synchronized, so it holds the queue lock like a submission.
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    EXT_FG_VK(vkDeviceWaitIdle)(c->device);
     vk_queue_unlock();
     free_images(c);
     for (int i = 0; i < 2; i++) {

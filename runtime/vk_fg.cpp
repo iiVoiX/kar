@@ -16,6 +16,7 @@ extern "C" {
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include "ext_upscaler.h"
 #include "cfg.h"
 #include "host.h"
 #include "vk.h"
@@ -623,7 +624,7 @@ struct {
 void fsr3_destroy() {
     if (!F3.have_ctx) return;
     VkCtx *c = vk_ctx();
-    vkDeviceWaitIdle(c->device);
+    EXT_FG_VK(vkDeviceWaitIdle)(c->device);
     for (uint32_t i = 0; i < F3.nres; i++) F3.iface.fpDestroyResource(&F3.iface, F3.res[i], F3.shared_id);
     F3.iface.fpDestroyBackendContext(&F3.iface, F3.shared_id);
     ffxFsr3UpscalerContextDestroy(&F3.ctx);

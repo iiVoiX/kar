@@ -461,7 +461,7 @@ static long g_errors_total;     // outlives the device so the probe can print it
 
 static void destroy_all(void) {
     gfx_window_release_vk();
-    if (g_vk.device) vkDeviceWaitIdle(g_vk.device);
+    if (g_vk.device) EXT_FG_VK(vkDeviceWaitIdle)(g_vk.device);
     if (g_vk.device) vk_clear_shutdown(g_vk.device);
     if (g_vk.device) vk_astc_release();
     if (g_vk.device) vk_crumbs_release();

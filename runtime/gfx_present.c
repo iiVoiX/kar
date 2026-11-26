@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ext_upscaler.h"
 #include "cfg.h"
 #include "flight.h"
 #include "fs.h"
@@ -287,7 +288,7 @@ static void flip_locked(void) {
                            .pWaitSemaphores = &g_render_done[g_flip_idx], .swapchainCount = 1, .pSwapchains = &g_sc,
                            .pImageIndices = &g_flip_idx};
     vk_queue_lock();
-    VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
+    VkResult r = EXT_FG_VK(vkQueuePresentKHR)(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
     vk_device_fault_report(r);
     if (r == VK_ERROR_DEVICE_LOST) rt_fatal("gfx: device lost at vkQueuePresentKHR (%d)", (int)r);
@@ -311,15 +312,15 @@ static void free_capture(void) {
 // Destroys the swapchain, its sync objects and the surface, then creates a fresh surface (g_pl held).
 static int recreate_surface_locked(VkCtx *c) {
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    EXT_FG_VK(vkDeviceWaitIdle)(c->device);
     for (uint32_t i = 0; i < g_sc_n; i++) {
         vkDestroySemaphore(c->device, g_render_done[i], NULL);
         if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
         g_sc_view[i] = VK_NULL_HANDLE;
     }
     g_sc_n = 0;
-    if (g_sc) { vkDestroySwapchainKHR(c->device, g_sc, NULL); g_sc = VK_NULL_HANDLE; }
-    if (g_surface) { vkDestroySurfaceKHR(c->instance, g_surface, NULL); g_surface = VK_NULL_HANDLE; }
+    if (g_sc) { EXT_FG_VK(vkDestroySwapchainKHR)(c->device, g_sc, NULL); g_sc = VK_NULL_HANDLE; }
+    if (g_surface) { EXT_FG_VK(vkDestroySurfaceKHR)(c->instance, g_surface, NULL); g_surface = VK_NULL_HANDLE; }
     g_surface = wsys_surface(c->instance);
     vk_queue_unlock();
     rt_log("gfx: recreated lost Vulkan surface -> %s", g_surface ? "ok" : "failed");
@@ -377,7 +378,7 @@ static int create_swapchain(void) {
     if (count > 8) count = 8;
 
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    EXT_FG_VK(vkDeviceWaitIdle)(c->device);
     VkSwapchainKHR old = g_sc;
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_surface, .minImageCount = count,
@@ -387,7 +388,7 @@ static int create_swapchain(void) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = pick_present_mode(c->phys), .clipped = VK_TRUE,
         .oldSwapchain = old};
-    VkResult r = vkCreateSwapchainKHR(c->device, &ci, NULL, &g_sc);
+    VkResult r = EXT_FG_VK(vkCreateSwapchainKHR)(c->device, &ci, NULL, &g_sc);
     if (r != VK_SUCCESS) {
         rt_log("gfx: vkCreateSwapchainKHR failed (%d)", (int)r);
         g_sc = old;
@@ -407,11 +408,15 @@ static int create_swapchain(void) {
         if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
         g_sc_view[i] = VK_NULL_HANDLE;
     }
-    if (old) vkDestroySwapchainKHR(c->device, old, NULL);
+    if (old) EXT_FG_VK(vkDestroySwapchainKHR)(c->device, old, NULL);
     g_sc_fmt = sf.format;
     g_sc_ext = ext;
-    g_sc_n = MAX_IMAGES;
-    vkGetSwapchainImagesKHR(c->device, g_sc, &g_sc_n, g_sc_img);
+    // count first, then the images: Streamline's hook (frame generation add-on) builds its stand-in images on the
+    // count query and fills the array only on the second call
+    g_sc_n = 0;
+    EXT_FG_VK(vkGetSwapchainImagesKHR)(c->device, g_sc, &g_sc_n, NULL);
+    if (g_sc_n > MAX_IMAGES) g_sc_n = MAX_IMAGES;
+    EXT_FG_VK(vkGetSwapchainImagesKHR)(c->device, g_sc, &g_sc_n, g_sc_img);
     VkSemaphoreCreateInfo semi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     for (uint32_t i = 0; i < g_sc_n; i++) {
         vkCreateSemaphore(c->device, &semi, NULL, &g_render_done[i]);
@@ -635,12 +640,12 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         perf_present_gpu((uint64_t)((double)(tv[1] - tv[0]) * g_ts_period));
     g_ts_on[slot] = 0;
     uint32_t idx = 0;
-    VkResult r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+    VkResult r = EXT_FG_VK(vkAcquireNextImageKHR)(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
         if (r == VK_ERROR_SURFACE_LOST_KHR) plat_xchg32(&g_surface_lost, 1);
         plat_xchg32(&g_dirty, 1);
         if (!create_swapchain()) goto out;
-        r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+        r = EXT_FG_VK(vkAcquireNextImageKHR)(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
     }
     vk_device_fault_report(r);
     if (r == VK_ERROR_DEVICE_LOST) rt_fatal("gfx: device lost at vkAcquireNextImageKHR (%d)", (int)r);
@@ -851,7 +856,7 @@ void gfx_window_release_vk(void) {
     plat_rmutex_lock(&g_pl);
     if (c && g_started) {
         vk_queue_lock();
-        vkDeviceWaitIdle(c->device);
+        EXT_FG_VK(vkDeviceWaitIdle)(c->device);
         vk_queue_unlock();
         g_flip_on = 0;   // its blit is done (device idle); the swapchain goes away unpresented
         menu_vk_release();
@@ -870,8 +875,8 @@ void gfx_window_release_vk(void) {
             g_sc_view[i] = VK_NULL_HANDLE;
         }
         if (g_pool) vkDestroyCommandPool(c->device, g_pool, NULL);
-        if (g_sc) vkDestroySwapchainKHR(c->device, g_sc, NULL);
-        if (g_surface) vkDestroySurfaceKHR(c->instance, g_surface, NULL);
+        if (g_sc) EXT_FG_VK(vkDestroySwapchainKHR)(c->device, g_sc, NULL);
+        if (g_surface) EXT_FG_VK(vkDestroySurfaceKHR)(c->instance, g_surface, NULL);
         g_sc = VK_NULL_HANDLE; g_surface = VK_NULL_HANDLE; g_pool = VK_NULL_HANDLE; g_sc_n = 0;
         g_started = 0;     // the window and its thread stay; the next gfx_window_start makes a new surface
     }

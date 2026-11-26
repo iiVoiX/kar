@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ext_upscaler.h"
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
@@ -3006,7 +3007,7 @@ void vk_mem_shutdown(void) {
     if (!c) return;
     vk_upload_flush(1);
     vk_queue_lock();
-    vkDeviceWaitIdle(c->device);
+    EXT_FG_VK(vkDeviceWaitIdle)(c->device);
     vk_queue_unlock();
     vk_texture_shutdown();
     plat_rmutex_lock(&cmd_lock);

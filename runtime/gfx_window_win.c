@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <imm.h>
 
+#include "ext_upscaler.h"
 #include "cfg.h"
 #include "flight.h"
 #include "fs.h"
@@ -392,7 +393,7 @@ VkSurfaceKHR wsys_surface(VkInstance inst) {
     VkWin32SurfaceCreateInfoKHR si = {.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
                                       .hinstance = GetModuleHandleW(NULL), .hwnd = g_hwnd};
     VkSurfaceKHR surface = VK_NULL_HANDLE;
-    VkResult r = vkCreateWin32SurfaceKHR(inst, &si, NULL, &surface);
+    VkResult r = EXT_FG_VK(vkCreateWin32SurfaceKHR)(inst, &si, NULL, &surface);
     if (r != VK_SUCCESS) rt_log("gfx: vkCreateWin32SurfaceKHR failed (%d)", (int)r);
     return r == VK_SUCCESS ? surface : VK_NULL_HANDLE;
 }

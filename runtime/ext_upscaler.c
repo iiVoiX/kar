@@ -111,3 +111,14 @@ void ext_fg_device_ready(VkInstance instance, VkPhysicalDevice phys, VkDevice de
     rt_log("frame generation: %s on this device", fg_ok ? "supported" : "not supported (see the add-on's log)");
 }
 int ext_fg_supported(void) { return fg_ok; }
+PFN_vkVoidFunction ext_fg_resolve(const char *name, PFN_vkVoidFunction normal) {
+    if (!fg_on) return normal;
+    static struct { const char *name; PFN_vkVoidFunction fn; } cache[16];
+    for (int i = 0; i < 16 && cache[i].name; i++)
+        if (cache[i].name == name || !strcmp(cache[i].name, name)) return cache[i].fn;
+    PFN_vkVoidFunction f = X.api->fg_vk_proc(name);
+    if (!f) return normal;   // not lent (yet: device calls exist once the device does)
+    for (int i = 0; i < 16; i++)
+        if (!cache[i].name) { cache[i].name = name, cache[i].fn = f; break; }
+    return f;
+}
