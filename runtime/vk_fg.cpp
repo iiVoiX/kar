@@ -27,7 +27,7 @@ extern "C" int vk_fg_on(void) {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("KAR_FG"), *c = cfg_get("TOTK_FRAME_GEN");
-        on = e && *e ? *e == '1' : c && *c && strcmp(c, "0") != 0;
+        on = e && *e ? *e == '1' : c && *c && strcmp(c, "0") != 0 && strcmp(c, "dlss") != 0;   // dlss: the add-on's
     }
     return on;
 }

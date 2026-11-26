@@ -11,11 +11,17 @@
 //   evaluate             in the replay, outside a render pass, on the replay's command buffer: records the upscale of
 //                        one frame. Every image is in VK_IMAGE_LAYOUT_GENERAL before the call and must be again after.
 //   shutdown             before the device goes away.
+// Version 2 adds optional frame generation by the add-on (RELEASE_PLAN 17.6); an add-on that leaves these NULL has none:
+//   fg_preinit           before the Vulkan instance exists, when the user asked for the add-on's frame generation: 1 when
+//                        it can run (its libraries loaded); the exe then creates instance and device through fg_vk_proc.
+//   fg_vk_proc           the add-on's own version of a Vulkan entry point by name (instance and device creation, the
+//                        surface, swapchain, acquire, present and wait-idle calls), NULL for the exe's normal one.
+//   fg_device_ready      once the device exists: 1 when frame generation is supported on it.
 #pragma once
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define EXT_UPSCALER_VERSION 1
+#define EXT_UPSCALER_VERSION 2
 #define EXT_UPSCALER_ENTRY "ext_upscaler_get"
 #define EXT_UPSCALER_DLL "kar_upscaler.dll"
 
@@ -54,6 +60,10 @@ typedef struct ExtUpscalerApi {
     int (*init)(const ExtUpscalerSetup *setup);
     int (*evaluate)(const ExtUpscalerFrame *frame);   // 1 when recorded
     void (*shutdown)(void);
+    // version 2
+    int (*fg_preinit)(const wchar_t *data_dir);
+    PFN_vkVoidFunction (*fg_vk_proc)(const char *name);
+    int (*fg_device_ready)(VkInstance instance, VkPhysicalDevice phys, VkDevice device);
 } ExtUpscalerApi;
 
 typedef const ExtUpscalerApi *(*ExtUpscalerGetFn)(void);
@@ -65,3 +75,7 @@ uint32_t ext_upscaler_device_ext(VkInstance instance, VkPhysicalDevice phys, con
                                  uint32_t nhave, const char **out, uint32_t room);
 void ext_upscaler_device_ready(VkInstance instance, VkPhysicalDevice phys, VkDevice device);
 int ext_upscaler_evaluate(const ExtUpscalerFrame *frame);
+int ext_fg_preinit(void);                    // 1 when the add-on's frame generation is wanted (TOTK_FRAME_GEN=dlss) and loads
+PFN_vkVoidFunction ext_fg_proc(const char *name);   // its version of a Vulkan call, or NULL
+void ext_fg_device_ready(VkInstance instance, VkPhysicalDevice phys, VkDevice device);
+int ext_fg_supported(void);                  // after the device: frame generation can run

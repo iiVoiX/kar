@@ -105,7 +105,7 @@ static const CfgMeta metas[] = {
     {"UPSCALER", "fsr", "fsr|bilinear|fsr3|external", LIVE}, {"SHARPNESS", "80", "0..100", LIVE},
     {"ASPECT", "fit", "fit|stretch", LIVE}, {"FOV", "100", "70..140", LIVE},
     {"ULTRAWIDE", "0", "0|1", RESTART},
-    {"FRAME_GEN", "0", "0|1", RESTART},
+    {"FRAME_GEN", "0", "0|1|dlss", RESTART},
     {"MONITOR", "0", NULL, RESTART},   // 0: Windows places the window; n: centred on monitor n (gfx_window_win.c)   // Kirby: AMD FSR 3 frame generation (vk_fg.cpp)
     // the menu's video preset: writes RENDER_SCALE, UPSCALER and SHARPNESS; moving one of them makes it custom
     {"VIDEO_PRESET", "balanced", "performance|balanced|quality|ultra|custom", LIVE},

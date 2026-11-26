@@ -115,7 +115,10 @@ static int create_instance(void) {
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
     rdoc_init();
-    VkResult r = vkCreateInstance(&ci, NULL, &g_vk.instance);
+    // the add-on's frame generation (ext_upscaler.c, 17.6) wants instance and device made through its own entry points
+    PFN_vkCreateInstance create_instance_fn = vkCreateInstance;
+    if (ext_fg_preinit() && ext_fg_proc("vkCreateInstance")) create_instance_fn = (PFN_vkCreateInstance)ext_fg_proc("vkCreateInstance");
+    VkResult r = create_instance_fn(&ci, NULL, &g_vk.instance);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateInstance failed (%d); is a Vulkan 1.3 driver installed?", (int)r); return 0; }
     g_vk.validation = validate;
     if (validate) {
@@ -416,10 +419,12 @@ static int create_device(void) {
     }
     VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &c->f2, .queueCreateInfoCount = nqi,
                              .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
-    VkResult r = vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.device);
+    PFN_vkCreateDevice create_device_fn = ext_fg_proc("vkCreateDevice") ? (PFN_vkCreateDevice)ext_fg_proc("vkCreateDevice") : vkCreateDevice;
+    VkResult r = create_device_fn(g_vk.phys, &di, NULL, &g_vk.device);
     free(c);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateDevice failed (%d)", (int)r); return 0; }
     ext_upscaler_device_ready(g_vk.instance, g_vk.phys, g_vk.device);
+    ext_fg_device_ready(g_vk.instance, g_vk.phys, g_vk.device);
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }

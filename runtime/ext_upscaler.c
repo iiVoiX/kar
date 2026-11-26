@@ -3,6 +3,7 @@
 // changes. KAR_EXT_UPSCALER=0 skips the add-on.
 #include <stdlib.h>
 #include <string.h>
+#include "cfg.h"
 #include "ext_upscaler.h"
 #include "host.h"
 #ifdef _WIN32
@@ -33,7 +34,7 @@ static const ExtUpscalerApi *api(void) {
     if (!m) { rt_log("ext upscaler: %s present but not loadable (%lu)", EXT_UPSCALER_DLL, GetLastError()); return NULL; }
     ExtUpscalerGetFn get = (ExtUpscalerGetFn)(void *)GetProcAddress(m, EXT_UPSCALER_ENTRY);
     const ExtUpscalerApi *a = get ? get() : NULL;
-    if (!a || a->version < EXT_UPSCALER_VERSION || !a->init || !a->evaluate) {
+    if (!a || a->version < 1 || !a->init || !a->evaluate) {   // version 1 add-ons load too (no frame generation)
         rt_log("ext upscaler: %s has no usable interface", EXT_UPSCALER_DLL);
         return NULL;
     }
@@ -82,3 +83,31 @@ void ext_upscaler_device_ready(VkInstance instance, VkPhysicalDevice phys, VkDev
 const char *ext_upscaler_name(void) { return X.ready && X.api ? (X.api->name ? X.api->name : "External") : NULL; }
 
 int ext_upscaler_evaluate(const ExtUpscalerFrame *f) { return X.ready && X.api->evaluate(f); }
+
+// ---- frame generation by the add-on (17.6)
+static int fg_on, fg_ok;
+int ext_fg_preinit(void) {
+    const char *set = cfg_get("TOTK_FRAME_GEN");
+    if (!set || strcmp(set, "dlss")) return 0;
+    // experimental: Streamline's device creation crashed on the first try (RELEASE_PLAN 17.6); KAR_DLSSG=1 to test
+    if (!getenv("KAR_DLSSG") || *getenv("KAR_DLSSG") != '1') {
+        rt_log("frame generation: dlss is experimental (set KAR_DLSSG=1 to try); none this run");
+        return 0;
+    }
+    const ExtUpscalerApi *a = api();
+    if (!a || a->version < 2 || !a->fg_preinit || !a->fg_vk_proc) {
+        rt_log("frame generation: dlss asked for, but %s has none", EXT_UPSCALER_DLL);
+        return 0;
+    }
+    wchar_t dir[260] = L".";
+    fg_on = a->fg_preinit(dir);
+    rt_log("frame generation: add-on %s", fg_on ? "loaded; instance and device through it" : "could not start");
+    return fg_on;
+}
+PFN_vkVoidFunction ext_fg_proc(const char *name) { return fg_on ? X.api->fg_vk_proc(name) : NULL; }
+void ext_fg_device_ready(VkInstance instance, VkPhysicalDevice phys, VkDevice device) {
+    if (!fg_on || !X.api->fg_device_ready) return;
+    fg_ok = X.api->fg_device_ready(instance, phys, device);
+    rt_log("frame generation: %s on this device", fg_ok ? "supported" : "not supported (see the add-on's log)");
+}
+int ext_fg_supported(void) { return fg_ok; }

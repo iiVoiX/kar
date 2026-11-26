@@ -109,7 +109,9 @@ def main():
         shutil.copyfile(romfs, out / 'romfs' / 'romfs.bin')
     # the upscaler add-on and its vendor runtime are each user's own build and never go into a package
     stray = [f for f in out.rglob('*') if f.name.lower() in ('kar_upscaler.dll', 'nvngx_dlss.dll', 'nvngx_dlssd.dll',
-                                                             'nvngx_dlssg.dll')]
+                                                             'nvngx_dlssg.dll', 'sl.interposer.dll', 'sl.common.dll',
+                                                             'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll',
+                                                             'nvlowlatencyvk.dll')]
     if stray:
         raise SystemExit(f'package_build: {stray[0]} must not be packaged (upscaler add-on / vendor runtime)')
     print(f'package_build: {out}: {n} files in folders, {size_of(out) / 2**30:.2f} GiB'
