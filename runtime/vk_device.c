@@ -175,10 +175,14 @@ static int name_has(const char *s, const char *sub) {
 // TOTK_GPU_NAME (case-insensitive part of the name) overrides.
 static int pick_device(void) {
     uint32_t n = 0;
-    vkEnumeratePhysicalDevices(g_vk.instance, &n, NULL);
+    // through the frame-generation add-on when it runs: it learns which instance a physical device belongs to here
+    PFN_vkEnumeratePhysicalDevices enum_fn = ext_fg_proc("vkEnumeratePhysicalDevices")
+                                                 ? (PFN_vkEnumeratePhysicalDevices)ext_fg_proc("vkEnumeratePhysicalDevices")
+                                                 : vkEnumeratePhysicalDevices;
+    enum_fn(g_vk.instance, &n, NULL);
     if (!n) { rt_log("vk: no Vulkan device"); return 0; }
     VkPhysicalDevice *pd = calloc(n, sizeof *pd);
-    vkEnumeratePhysicalDevices(g_vk.instance, &n, pd);
+    enum_fn(g_vk.instance, &n, pd);
     const char *e = cfg_get("TOTK_GPU_INDEX");   // no fixed default: the best device when unset
     int want = e && *e ? atoi(e) : -1;
     const char *name = cfg_get("TOTK_GPU_NAME");

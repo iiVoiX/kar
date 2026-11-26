@@ -15,6 +15,7 @@
 //   fg_preinit           before the Vulkan instance exists, when the user asked for the add-on's frame generation: 1 when
 //                        it can run (its libraries loaded); the exe then creates instance and device through fg_vk_proc.
 //   fg_vk_proc           the add-on's own version of a Vulkan entry point by name (instance and device creation, the
+//                        physical-device enumeration,
 //                        surface, swapchain, acquire, present and wait-idle calls), NULL for the exe's normal one.
 //   fg_device_ready      once the device exists: 1 when frame generation is supported on it.
 #pragma once
