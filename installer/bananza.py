@@ -37,7 +37,7 @@ GAMES = {
     'dkb100': {'exe': 'dkb', 'modules': 'main,sdk', 'nros': (), 'shaders': True},
     'dkb458752': {'exe': 'dkb', 'modules': 'main,sdk', 'nros': (), 'shaders': True},
     'kar458752': {'exe': 'kar', 'modules': 'main,sdk,subsdk0,subsdk1',
-                  'nros': (('effectscript', 'Bin/Module/EffectScript.nro'),), 'shaders': False},
+                  'nros': (('effectscript', 'Bin/Module/EffectScript.nro'),), 'shaders': False, 'button_font': True},
 }
 
 
@@ -708,7 +708,8 @@ class Compile(Step):
         try:
             return (exe.is_file() and sha256(exe) == record.get('sha256') and
                     sha256(ctx.dest / 'romfs-index.bin') == record.get('index_sha256') and
-                    all(sha256(ctx.dest / p.name) == sha256(p) for p in ctx.layout.dlls))
+                    all(sha256(ctx.dest / p.name) == sha256(p) for p in ctx.layout.dlls) and
+                    (not game_spec(ctx.info['game']).get('button_font') or (ctx.dest / 'fonts' / '5.map').is_file()))
         except OSError:
             return False
 
@@ -717,19 +718,27 @@ class Compile(Step):
         game = ctx.info['game']
         args = [ctx.layout.python, ctx.layout.tools / 'build_game.py', '--version', game, '--expected',
                 ctx.layout.tools / 'data' / f'expected-{game}.json', '--gen', ctx.temp / 'gen', '--out', out,
-                '--modules', game_spec(game)['modules'], '--exefs', ctx.dest / 'exefs', '--romfs', ctx.dest / 'romfs',
-                '--profile', ctx.dest / 'profile', '--runtime', ctx.layout.runtime, '--toolchain', ctx.layout.llvm,
+                '--modules', ','.join([game_spec(game)['modules'], *(n for n, _ in game_spec(game)['nros'])]),   # NROs too
+                '--exefs', ctx.dest / 'exefs', '--romfs', ctx.dest / 'romfs',
+                '--profile', ctx.dest / 'profile', '--runtime', ctx.layout.runtime,
                 '--ninja', ctx.layout.ninja, '--jobs', ctx.options.jobs, '--full-build']
-        if ctx.layout.deps:
+        # MSYS2 UCRT64 given as the toolchain (a developer's machine): build_game.py's own MSYS2 build, which links
+        # MSYS2's C++ runtime; an llvm-mingw tree brings libc++ and takes the libraries from --deps
+        msys = (Path(ctx.layout.llvm) / 'bin').resolve() == layouts.UCRT.resolve()
+        if not msys:
+            args += ['--toolchain', ctx.layout.llvm]
+        if ctx.layout.deps and not msys:
             args += ['--deps', ctx.layout.deps]
         if ctx.layout.sysroot:
             args += ['--sysroot', ctx.layout.sysroot]
-        # llvm-windres starts the preprocessor by name: the toolchain's bin goes first on PATH (with a toolchain given
-        # by --toolchain the build otherwise stopped at the resource file, ninja reporting "ReadFile: The handle is invalid")
+        # the resource compiler starts the preprocessor by name: the toolchain's bin goes first on PATH
         path = str(Path(ctx.layout.llvm) / 'bin') + os.pathsep + os.environ.get('PATH', '')
         run_tool(ctx, self.id, args, env={'PATH': path})
         for p in (out / exe_of(game), out / 'romfs-index.bin', *ctx.layout.dlls):
             copy_file(p, ctx.dest / p.name)
+        if game_spec(game).get('button_font'):   # Kirby: the button-symbol font and its map (RELEASE_PLAN 17.11)
+            run_tool(ctx, self.id, [ctx.layout.python, ctx.layout.tools / 'make_kar_buttonfont.py', '--out',
+                                    ctx.dest / 'fonts'])
         return {'sha256': sha256(ctx.dest / exe_of(game)), 'index_sha256': sha256(ctx.dest / 'romfs-index.bin')}
 
 

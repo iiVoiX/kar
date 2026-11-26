@@ -871,6 +871,8 @@ def main():
         CLANG = TOOLCHAIN_BIN / f'clang{suffix}'
         AR = TOOLCHAIN_BIN / f'llvm-ar{suffix}'
         WINDRES = TOOLCHAIN_BIN / 'llvm-windres.exe'
+        if not WINDRES.is_file():   # an MSYS2 toolchain has binutils' windres.exe, not llvm-windres (installer, 13.2)
+            WINDRES = TOOLCHAIN_BIN / 'windres.exe'
     if args.toolchain and WIN or args.deps and (args.toolchain or not WIN):   # Linux: --deps only, never deps-mingw
         DEPS = (args.deps or DEFAULT_DEPS).resolve()
         dlls = sorted((DEPS / 'bin').glob('*.dll')) if WIN else []
