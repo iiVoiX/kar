@@ -56,9 +56,8 @@ static void mesa_cache_beside_exe(void) {
     plat_setenv("MESA_SHADER_CACHE_DIR", dir);
 }
 
-#ifdef __APPLE__
 // An instance extension the loader offers. Enabling one it does not offer fails vkCreateInstance outright, so the
-// portability enumeration extension below is checked first (macOS only, create_instance).
+// optional ones below are checked first (create_instance).
 static int instance_ext_present(const char *name) {
     uint32_t n = 0;
     vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
@@ -68,7 +67,6 @@ static int instance_ext_present(const char *name) {
     free(e);
     return found;
 }
-#endif
 
 static int create_instance(void) {
     mesa_cache_beside_exe();
@@ -106,6 +104,9 @@ static int create_instance(void) {
         flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     }
 #endif
+    // the HDR colour spaces (HDR10 ST 2084, scRGB) are only listed for an instance with this extension (17.7)
+    if (n_ext < 19 && instance_ext_present(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
+        ext[n_ext++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
     n_ext += ext_upscaler_instance_ext(ext + n_ext, 20 - n_ext);   // the optional upscaler add-on (ext_upscaler.c)
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "TotK Recomp",
                              .pEngineName = "TotK Recomp", .apiVersion = VK_API_VERSION_1_3};

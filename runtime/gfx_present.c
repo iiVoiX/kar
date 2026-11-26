@@ -353,6 +353,13 @@ static int create_swapchain(void) {
     if (nf > 64) nf = 64;
     vkGetPhysicalDeviceSurfaceFormatsKHR(c->phys, g_surface, &nf, fmts);
     if (!nf) return 0;
+    static int listed;
+    if (!listed++) {   // what the display offers, HDR colour spaces included (17.7)
+        char b[1024];
+        int o = 0;
+        for (uint32_t i = 0; i < nf && o < 1000; i++) o += snprintf(b + o, sizeof b - o, " %d/%d", fmts[i].format, fmts[i].colorSpace);
+        rt_log("vk: surface formats (format/colour space):%s", b);
+    }
     // UNORM: the blit writes the bytes the game wrote (no sRGB encode).
     VkSurfaceFormatKHR sf = fmts[0];
     int found = 0;
