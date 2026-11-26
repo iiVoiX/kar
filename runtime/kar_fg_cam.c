@@ -105,8 +105,16 @@ int kar_fg_camera(uint32_t w, uint32_t h, float reproj[16], float dz[2], float *
     uint64_t mk = scene_mark ? scene_mark : marked;
     if (use_mark && mk && hist[(mk - 1) % HIST].ok && hist[(mk - 1) % HIST].frame == mk - 1)
         cur = &hist[(mk - 1) % HIST];
-    if (cur) prev = &hist[(cur->frame + HIST - 1) % HIST];
-    int ok = cur && prev->ok && prev->frame + 1 == cur->frame && cur->frame + 3 >= fr && cur->w == w && cur->h == h &&
+    // the camera of the picture before: the newest kept frame up to two keys older (a key the game skipped has no
+    // picture, so the one before it is the previous picture; KAR_FG_CAMGAP=0 asks for exactly one key older)
+    static int gap = -1;
+    if (gap < 0) gap = getenv("KAR_FG_CAMGAP") && *getenv("KAR_FG_CAMGAP") == '0' ? 1 : 2;
+    if (cur)
+        for (int i = 0; i < HIST; i++)
+            if (hist[i].ok && hist[i].frame < cur->frame && hist[i].frame + gap >= cur->frame &&
+                (!prev || hist[i].frame > prev->frame))
+                prev = &hist[i];
+    int ok = cur && prev && cur->frame + 3 >= fr && cur->w == w && cur->h == h &&
              prev->w == w && prev->h == h;
     last_jit[0] = ok && cur->jittered ? cur->jit[0] : 0;
     last_jit[1] = ok && cur->jittered ? cur->jit[1] : 0;
@@ -145,7 +153,8 @@ int kar_fg_camera(uint32_t w, uint32_t h, float reproj[16], float dz[2], float *
         if (on && !ok && n < 20 && cur) {
             n++;
             rt_log("fg: no camera pair at frame %llu: newest %llu (%ux%u), before it %llu ok %d", (unsigned long long)fr,
-                   (unsigned long long)cur->frame, cur->w, cur->h, (unsigned long long)prev->frame, prev->ok);
+                   (unsigned long long)cur->frame, cur->w, cur->h, prev ? (unsigned long long)prev->frame : 0ull,
+                   prev ? prev->ok : 0);
         }
     }
     plat_mutex_unlock(&lock);

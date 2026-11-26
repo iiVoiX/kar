@@ -285,12 +285,32 @@ static int mv_pass(VkCommandBuffer cb, uint32_t w, uint32_t h) {
     return k;
 }
 
-// The newest slot when it was recorded in the replay of the frame now presented (its frame counter is one behind the
-// present's), else 0: a frame without them (menu, loading) gets the zero motion vectors.
+// The newest slot when it was recorded in the replay of the frame now presented (its frame counter at most three behind
+// the present's), else 0: a frame without them (menu, loading) gets the zero motion vectors.
 int vk_fg_mv_latest(void) {
     int k = __atomic_load_n(&M.latest, __ATOMIC_ACQUIRE);
     uint64_t now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-    return k && M.s[k - 1].info.frame + 1 >= now ? k : 0;
+    // up to three frames behind: the present of a picture is often built two or three frame counts after its replay
+    // recorded the slot (KAR_FG_MVLOG: 6 % of race pictures were dropped at one frame); a menu has no fresh slot at all
+    int ok = k && M.s[k - 1].info.frame + 3 >= now;
+    static int on = -1;   // KAR_FG_MVLOG=1: why the present got no slot (none yet, or recorded too many frames ago)
+    static unsigned n, none, stale, lag[4];
+    if (on < 0) on = getenv("KAR_FG_MVLOG") && *getenv("KAR_FG_MVLOG") == '1';
+    if (on) {
+        n++;
+        if (!k) none++;
+        else if (!ok) {
+            stale++;
+            uint64_t d = now - M.s[k - 1].info.frame;
+            lag[d < 5 ? d - 2 : 3]++;
+        }
+        if (n % 600 == 0) {
+            rt_log("fg: present slots %u: none %u, stale %u (2 frames behind %u, 3 %u, 4 %u, more %u)", n, none, stale,
+                   lag[0], lag[1], lag[2], lag[3]);
+            none = stale = 0, memset(lag, 0, sizeof lag);
+        }
+    }
+    return ok ? k : 0;
 }
 
 int vk_fg_mv_get(int slot, VkFgMv *out) {
