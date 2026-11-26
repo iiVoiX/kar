@@ -291,8 +291,14 @@ def c_string(s):
 # FidelityFX SDK built by tools/build_ffx.py (Windows): runtime/vk_fg.cpp compiles against it and these libraries are
 # linked (frame generation, KAR_FG=1). Without it vk_fg.cpp builds its stubs.
 FFX_DIR = ROOT / 'build' / 'ffx-src'
-FFX_LIBS = ([FFX_DIR / 'bin' / 'ffx_sdk' / f'libffx_{n}_x64.a' for n in ('frameinterpolation', 'opticalflow', 'fsr3upscaler', 'backend_vk')]
-            if WIN and (FFX_DIR / 'bin' / 'ffx_sdk' / 'libffx_backend_vk_x64.a').is_file() else [])
+
+
+def ffx_libs(d):
+    return ([d / 'bin' / 'ffx_sdk' / f'libffx_{n}_x64.a' for n in ('frameinterpolation', 'opticalflow', 'fsr3upscaler', 'backend_vk')]
+            if WIN and (d / 'bin' / 'ffx_sdk' / 'libffx_backend_vk_x64.a').is_file() else [])
+
+
+FFX_LIBS = ffx_libs(FFX_DIR)   # an llvm-mingw build (--toolchain) takes build/ffx-src-llvm instead (main)
 RUNTIME = ROOT / 'runtime'   # --runtime: a copy of runtime/ lets a task build without touching the shared tree
 
 
@@ -859,7 +865,7 @@ def main():
         expected = ROOT / 'tools' / 'data' / f'expected-v{DISPLAY_VERSIONS[args.version]}.json'
     expected_data = json.loads(Path(expected).read_text())
     hashes = expected_data['exefs_sha256']
-    global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS
+    global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS, FFX_DIR, FFX_LIBS
     if args.ninja:
         NINJA = args.ninja.resolve()
     elif not NINJA.is_file() and (ROOT / 'bin' / ('ninja' + ('.exe' if WIN else ''))).is_file():
@@ -873,6 +879,13 @@ def main():
         WINDRES = TOOLCHAIN_BIN / 'llvm-windres.exe'
         if not WINDRES.is_file():   # an MSYS2 toolchain has binutils' windres.exe, not llvm-windres (installer, 13.2)
             WINDRES = TOOLCHAIN_BIN / 'windres.exe'
+        if (TOOLCHAIN_BIN.parent / 'include' / 'c++' / 'v1').is_dir():   # llvm-mingw links libc++: FidelityFX built with
+            # it (build_ffx.py --toolchain), else none
+            FFX_DIR = ROOT / 'build' / 'ffx-src-llvm'
+            FFX_LIBS = ffx_libs(FFX_DIR)
+            if not FFX_LIBS:
+                print('build_game: no FidelityFX build for this toolchain (tools/build_ffx.py --toolchain): FSR 3 and '
+                      'frame generation are left out', file=sys.stderr)
     if args.toolchain and WIN or args.deps and (args.toolchain or not WIN):   # Linux: --deps only, never deps-mingw
         DEPS = (args.deps or DEFAULT_DEPS).resolve()
         dlls = sorted((DEPS / 'bin').glob('*.dll')) if WIN else []

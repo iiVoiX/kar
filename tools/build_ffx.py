@@ -16,7 +16,9 @@ Changes:
   - ffx_vk.cpp: the arrays in the scratch memory start 16-byte aligned (Clang uses aligned SSE stores there).
   - Compiler flags: MINGW_HAS_SECURE_API, forced includes of wchar.h, stdio.h, cmath and new (MSVC pulls them in).
 
-Usage: .venv/Scripts/python tools/build_ffx.py
+Usage: .venv/Scripts/python tools/build_ffx.py [--toolchain DIR]
+  --toolchain DIR   build with an llvm-mingw tree (DIR/bin/clang.exe; libc++) into build/ffx-src-llvm instead: the
+                    libraries build_game.py --toolchain links (the default build uses MSYS2's libstdc++, RELEASE_PLAN 13.2b)
 """
 import os
 import re
@@ -40,6 +42,16 @@ def edit(path, old, new, count=1):
 
 
 def main():
+    global COPY, BUILD
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--toolchain', type=Path)
+    args = ap.parse_args()
+    cc, cxx = 'clang', 'clang++'
+    if args.toolchain:
+        COPY, BUILD = ROOT / 'build' / 'ffx-src-llvm', ROOT / 'build' / 'ffx-llvm'
+        tc = args.toolchain.resolve() / 'bin'
+        cc, cxx = (tc / 'clang.exe').as_posix(), (tc / 'clang++.exe').as_posix()
     if not SRC.is_dir():
         raise SystemExit(f'{SRC} missing: check out FidelityFX-SDK v1.1.4 (sparse, sdk/) into refs/fidelityfx')
     shutil.rmtree(COPY, ignore_errors=True)
@@ -95,8 +107,10 @@ def main():
     env['PATH'] = str(UCRT) + os.pathsep + env.get('PATH', '')
     env.setdefault('VULKAN_SDK', r'C:\VulkanSDK\1.4.363.0')
     flags = '-DMINGW_HAS_SECURE_API=1 -Wno-everything -include wchar.h -include stdio.h -include cmath -include new'
+    if args.toolchain:   # llvm-mingw's headers leave out MSVC's _countof; libc++ includes fewer headers indirectly
+        flags += ' "-D_countof(a)=(sizeof(a)/sizeof((a)[0]))" -include mutex -include type_traits'   # libc++ pulls in less
     subprocess.run([str(UCRT / 'cmake.exe'), '-S', str(COPY), '-B', str(BUILD), '-G', 'Ninja',
-                    '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_C_COMPILER=clang', '-DCMAKE_CXX_COMPILER=clang++',
+                    '-DCMAKE_BUILD_TYPE=Release', f'-DCMAKE_C_COMPILER={cc}', f'-DCMAKE_CXX_COMPILER={cxx}',
                     f'-DCMAKE_CXX_FLAGS={flags}', '-DFFX_API_BACKEND=VK_X64', '-DFFX_FSR3=ON',
                     '-DFFX_AUTO_COMPILE_SHADERS=1'], check=True, env=env, stdout=subprocess.DEVNULL)
     subprocess.run([str(UCRT / 'cmake.exe'), '--build', str(BUILD), '-j', '16'], check=True, env=env)
