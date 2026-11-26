@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-label="Kirby Air Riders Recomp – native PC port">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd7e6"/>
+      <stop offset="1" stop-color="#ffc2da"/>
+    </linearGradient>
+    <path id="star" d="M0 -20 l5.9 12 13.1 1.9 -9.5 9.3 2.2 13 -11.7 -6.2 -11.7 6.2 2.2 -13 -9.5 -9.3 13.1 -1.9z"/>
+  </defs>
+  <rect width="1280" height="360" rx="28" fill="url(#bg)"/>
+  <circle cx="1140" cy="40" r="210" fill="#ffffff" opacity="0.35"/>
+  <circle cx="70" cy="350" r="150" fill="#ffffff" opacity="0.3"/>
+  <path d="M-40 300 C 240 210, 520 380, 820 270 S 1180 200, 1320 260" fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" opacity="0.7"/>
+  <path d="M-40 322 C 240 232, 520 402, 820 292 S 1180 222, 1320 282" fill="none" stroke="#ee5a9b" stroke-width="4" stroke-linecap="round" opacity="0.35"/>
+  <use href="#star" transform="translate(1010 92) scale(1.6)" fill="#ffd23f" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"/>
+  <use href="#star" transform="translate(1120 190) scale(0.9)" fill="#ffffff"/>
+  <use href="#star" transform="translate(905 230) scale(0.7)" fill="#ffd23f"/>
+  <use href="#star" transform="translate(1210 110) scale(0.55)" fill="#ffd23f" opacity="0.8"/>
+  <use href="#star" transform="translate(84 64) scale(0.8)" fill="#ffd23f"/>
+  <g font-family="'Baloo 2','Nunito','Segoe UI Rounded','Arial Rounded MT Bold','Segoe UI',sans-serif">
+    <rect x="72" y="70" width="236" height="36" rx="18" fill="#2b2350"/>
+    <text x="190" y="94" text-anchor="middle" font-size="16" font-weight="800" letter-spacing="2.5" fill="#ffffff">NATIVE PC PORT</text>
+    <text x="70" y="186" font-size="74" font-weight="800" fill="#2b2350">Kirby Air Riders</text>
+    <text x="70" y="262" font-size="74" font-weight="800" fill="#ee5a9b">Recomp</text>
+    <text x="72" y="310" font-size="22" font-weight="700" fill="#4a4170">Static recompilation · Vulkan · no emulator · your own dump</text>
+  </g>
+</svg>

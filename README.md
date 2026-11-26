@@ -1,162 +1,183 @@
-# Kirby Air Riders – nativer PC-Port (statische Rekompilierung)
+<p align="center">
+  <img src="docs/img/banner.svg" alt="Kirby Air Riders Recomp – native PC port" width="100%">
+</p>
 
-Ein nativer Windows-Port von *Kirby Air Riders* (Switch 2, Update 458752 = Version 1.3.3). Der Spielcode (ARM64) wird
-**statisch in C übersetzt** und mit Clang zu einer normalen `kar.exe` gebaut. Grafik (NVN → Vulkan), Ton, Eingabe,
-Dateisystem und Systemdienste stellt eine eigene Laufzeit bereit. Es gibt **keinen Emulator** und keinen JIT.
+<p align="center">
+  <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-ee5a9b?style=for-the-badge">
+  <img alt="Graphics: Vulkan 1.3" src="https://img.shields.io/badge/graphics-Vulkan%201.3-7b5cff?style=for-the-badge">
+  <img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-2b2350?style=for-the-badge">
+  <img alt="No game data included" src="https://img.shields.io/badge/game%20data-not%20included-ffd23f?style=for-the-badge&amp;labelColor=2b2350">
+</p>
 
-Das Projekt baut auf dem *DKB Recomp* (Donkey Kong Bananza) auf und erweitert ihn um alles, was Kirby Air Riders braucht.
-Die ursprüngliche README des Unterbaus liegt unter [`docs/README-dkb-upstream.md`](docs/README-dkb-upstream.md).
-
-> **Keine Spieldaten in diesem Repository.** Spielcode, übersetzter („gelifteter“) C-Code, RomFS, Shader-Caches,
-> Bildschirmfotos und Bauergebnisse bleiben auf deinem Rechner. Du brauchst einen eigenen Dump des Spiels.
-> `.gitignore` und `tools/check_content.py` (Pre-Commit-Hook/CI) verhindern, dass solche Dateien eingecheckt werden.
+<p align="center">
+  <b>A native Windows port of <i>Kirby Air Riders</i> (Switch 2, update 1.3.3).</b><br>
+  The game's ARM64 code is translated to C ahead of time and built into a normal <code>kar.exe</code>.<br>
+  No emulator, no JIT: graphics, audio, input and system services come from its own runtime.
+</p>
 
 ---
 
-## Stand
+> [!IMPORTANT]
+> **This repository contains no game data.** Game code, the lifted C code, the RomFS, shader caches, screenshots and
+> build output stay on your machine. You need your own dump of the game. `.gitignore` and
+> `tools/check_content.py` (pre-commit hook and CI) keep such files out of the repository.
 
-| Bereich | Stand |
+## Highlights
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### 🏁 The whole game
+Air Ride, Top Ride, City Trial and Road Trip, menus, movies and saves. A 75-minute soak runs without a crash.
+
+</td>
+<td width="33%" valign="top">
+
+### 🖥️ Built for PC
+Any resolution, ultrawide 21:9 and 32:9 with the HUD kept 16:9, frame-rate limit up to 240 or unlimited, monitor
+choice, an in-game overlay (F1) for every setting.
+
+</td>
+<td width="33%" valign="top">
+
+### ✨ Upscaling and frame generation
+AMD FSR 1 and FSR 3.1, NVIDIA DLSS (separate add-on) and frame generation with AMD FSR 3 or NVIDIA DLSS:
+about twice the frames shown.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🎮 Controllers and keyboard
+Xbox, PlayStation and Switch Pro pads with rumble and gyro, full keyboard and mouse, keyboard as player 2, button
+symbols in the game's own text that follow your pad and your bindings.
+
+</td>
+<td valign="top">
+
+### ⚡ Fast start
+Shaders and pipelines are built ahead in the background; with a warm cache the game is up in about a second.
+
+</td>
+<td valign="top">
+
+### 📦 Installer
+Builds everything from your dump: checks it, packs the data, lifts the code and compiles it, with MSYS2 or the
+llvm-mingw toolchain.
+
+</td>
+</tr>
+</table>
+
+## How it works
+
+<p align="center">
+  <img src="docs/img/pipeline.svg" alt="From your dump to kar.exe: lifter, C code, Clang and the runtime" width="100%">
+</p>
+
+- **Lifter** (`recomp/`): reads the game's executables and turns every function into C, with a patch table for the few
+  places the PC needs to differ.
+- **Runtime** (`runtime/`): NVN 2 graphics on Vulkan, the Switch 2's Ampere shaders lowered and translated to SPIR-V,
+  audio and input over SDL3, files, threads, time and the other system services the game calls.
+- **PC extras**: upscalers, frame generation, ultrawide, the settings overlay and button symbols.
+
+The project builds on *DKB Recomp* (Donkey Kong Bananza), which itself grew out of *TotK Recomp*. The original
+README of that base is in [`docs/README-dkb-upstream.md`](docs/README-dkb-upstream.md).
+
+## Status
+
+| Area | State |
 |---|---|
-| Start, Titel, Intro-Demo, Tutorial-Video | läuft |
-| Menüs, Charakter-/Fahrzeugwahl, Rennen (3D + HUD) | läuft, ca. 60 fps im Rennen (CPU-gebunden im Replay) |
-| Ton (AudioOut über SDL3) | läuft |
-| Deutsch + km/h als Standard | läuft (`TOTK_LANG` ändert die Sprache) |
-| Hochskalierung FSR 1 statt DLSS | läuft |
-| Start mit Ladebildschirm, Pipeline-Vorbau | ~1 s Start mit warmem Cache |
-| Speicher | ~6,7 GiB Arbeitsspeicher, ~10,6 GiB privat (Ziel < 8 GB) |
-| Eigene PC-Optionen im echten Kirby-Optionsmenü | in Arbeit (Text-Haken läuft, siehe unten) |
-| Ultrawide 21:9 / 32:9 | in Arbeit |
-| Lokaler Mehrspieler, City Trial / Top Ride / Road Trip vollständig geprüft | offen |
+| Boot, title, movies, menus, all modes | ✅ works |
+| Races at 60 fps, up to 140+ with a higher limit | ✅ works |
+| Audio, saves | ✅ works |
+| Local split screen (pad + keyboard, two pads) | 🧪 being tested |
+| FSR 1, FSR 3.1, DLSS (add-on) | ✅ works, Vulkan validation clean |
+| Frame generation: AMD FSR 3, NVIDIA DLSS | ✅ works (DLSS: RTX 40/50) |
+| Ultrawide 21:9 / 32:9 | ✅ works |
+| Installer from your own dump | ✅ command line; the window is being tested |
+| AMD and Intel GPUs, Windows 10, Linux | ❔ not tested yet |
+| HDR | ⏸ waiting for an HDR display to test on |
 
-Die vollständige, priorisierte Aufgabenliste steht in [`kirby/RELEASE_PLAN.md`](kirby/RELEASE_PLAN.md),
-das laufende Arbeitsprotokoll in [`kirby/HANDOFF.md`](kirby/HANDOFF.md).
+## Getting started
 
----
+### Requirements
 
-## Voraussetzungen
+- Windows 10 or 11, a GPU with Vulkan 1.3 (tested on NVIDIA so far)
+- About 55 GB of free space while installing
+- Your own `.nup` dump of *Kirby Air Riders* with update 1.3.3 (no keys needed)
 
-- Windows 10/11, GPU mit Vulkan 1.3 (bisher auf NVIDIA getestet)
-- MSYS2 UCRT64 Clang (`C:\msys64\ucrt64\bin` im `PATH`)
-- .NET 10 SDK (für den Shader-Übersetzer)
-- Python: die beiden Umgebungen `.venv` und `.venv-py314` (siehe [`docs/building.md`](docs/building.md))
-- Ein eigener `.nup`-Dump von Kirby Air Riders mit Update 1.3.3 (keine Schlüssel nötig)
-
-## Vom Dump zum laufenden Spiel
+### With the installer
 
 ```bat
-:: 1. Spielcode (ExeFS) des neuesten Updates entpacken
-.venv-py314\Scripts\python tools\extract_nup.py <dein>.nup --select latest --only exefs --out build\extracted\kar458752
+.venv\Scripts\python -m installer
+```
 
-:: 2. Spieldaten (RomFS, ~20 GB) in eine Datei packen
-.venv-py314\Scripts\python tools\extract_nup.py <dein>.nup --select latest --only romfs --pack --out build\extracted\kar458752-packed
+It asks for your dump and a target folder, then checks, packs, lifts and compiles, and leaves a ready `kar.exe`.
+Details: [`docs/installer.md`](docs/installer.md).
 
-:: 3. Shader-Übersetzer einmal bauen
+<details>
+<summary><b>By hand, step by step</b></summary>
+
+Needs MSYS2 UCRT64 Clang (`C:\msys64\ucrt64\bin` on `PATH`), the .NET 10 SDK for the shader translator and the two
+Python environments `.venv` and `.venv-py314` (see [`docs/building.md`](docs/building.md)).
+
+```bat
+:: 1. Unpack the game code (ExeFS) of the newest update
+.venv-py314\Scripts\python tools\extract_nup.py <your>.nup --select latest --only exefs --out build\extracted\kar458752
+
+:: 2. Pack the game data (RomFS, ~20 GB) into one file
+.venv-py314\Scripts\python tools\extract_nup.py <your>.nup --select latest --only romfs --pack --out build\extracted\kar458752-packed
+
+:: 3. Build the shader translator once
 .venv\Scripts\python tools\build_xlate.py
 
-:: 4. Spielcode nach C übersetzen (mit Kirby-Patch-Tabelle und dem EffectScript-Modul)
+:: 4. Lift the game code to C (with Kirby's patch table and the EffectScript module)
 .venv\Scripts\python recomp\gen.py --exefs build\extracted\kar458752\exefs --out generated\kar458752 ^
     --modules main,subsdk0,subsdk1,sdk ^
     --nro effectscript=build\extracted\kar458752\romfs\Bin\Module\EffectScript.nro ^
     --patches recomp\patches-kar458752.txt
 
-:: 5. Bauen
+:: 5. Build
 .venv\Scripts\python tools\build_game.py --version kar458752 --expected tools\data\expected-kar458752.json --romfs build\extracted\kar458752-packed\romfs
 ```
 
-Ergebnis: `build\kar458752\kar.exe`. Der erste Start übersetzt und kompiliert die Shader, spätere Starts sind schnell.
-Beenden immer über das Fenster schließen, nicht den Prozess abschießen (sonst geht der Pipeline-Cache verloren).
-Während `kar.exe` läuft, schlägt das Linken fehl.
+The result is `build\kar458752\kar.exe`. The first start translates and compiles the shaders; later starts are
+fast. Always quit by closing the window rather than killing the process, so the pipeline cache is kept.
 
-Eine portable Ordner-Variante (nur für eigene Rechner, enthält Spielcode):
-`.venv\Scripts\python tools\package_build.py --version kar458752 --extracted build\extracted\kar458752-packed`
+</details>
 
-Ausführliche Anleitung mit allen Schaltern: [`docs/kirby-running.md`](docs/kirby-running.md).
+### Optional: NVIDIA DLSS
 
----
+DLSS is not part of this repository. It is a separate add-on, `kar_upscaler.dll`, kept outside it and built by
+each user: its build script fetches the DLSS SDK and NVIDIA Streamline from NVIDIA's own repositories, and you accept NVIDIA's licence
+when you build it. The game talks to it only through a small, neutral interface (`runtime/ext_upscaler.h`, also MIT).
+Once the add-on sits next to `kar.exe`, *NVIDIA DLSS* appears in the overlay for upscaling and frame generation.
 
-## Wie es funktioniert
+## Controls and settings
 
-```
- .nup-Dump ──extract_nup──► ExeFS (main, subsdk0/1, sdk) + RomFS
-                              │
-                     recomp/gen.py  (ARM64 → C, Patch-Tabelle)
-                              │
-                     generated/kar458752/*.c   (nur lokal!)
-                              │
-       runtime/*.c  ──────────┼──── Clang ───► kar.exe
-  (Kernel, Speicher, NVN→Vulkan, Audio, HID,
-   Dateisystem, nn::-Dienste, Port-Menü)
-```
+Press **F1** in the game for the settings overlay (display, graphics, controls, audio). Every setting is also a line
+in `totk.ini` next to the exe. Keyboard and pad defaults, remapping and the button symbols:
+[`docs/controls.md`](docs/controls.md). All switches for testing and diagnosis:
+[`docs/kirby-running.md`](docs/kirby-running.md).
 
-- **Lifter** (`recomp/`): übersetzt jede Gastfunktion in eine C-Funktion `f_<Adresse>`. Gastadressen = Hostadressen
-  (Module ab `0x7000000000`). Indirekte Sprünge laufen über eine Dispatch-Tabelle (`runtime/dispatch.c`).
-- **Patch-Tabelle** (`recomp/patches-kar458752.txt`, Format in `recomp/patches.py`): ersetzt einzelne Spielbefehle
-  beim Generieren, zur Laufzeit per Schalter an/aus. Neu für Kirby: Ersatzwort `@call:<Versatz>` ruft eine
-  Host-Funktion auf der Patch-Seite auf (ohne die 128-MiB-Reichweitengrenze von `bl`).
-- **Grafik** (`runtime/nvn_*`, `runtime/vk_*`): NVN-Aufrufe des Spiels werden aufgezeichnet und als Vulkan-Befehle
-  abgespielt („Replay“); Shader (Maxwell/Ampere) übersetzt `build/xlate/totk_xlate.exe` nach SPIR-V.
-  Kirby-spezifisch: FSR-1-Hochskalierung statt DLSS (`runtime/vk_kar_upscale.c`, Shader in `runtime/shaders/kar_*`),
-  Compute-Prefetch, Nutzungslisten über Sitzungen (`cs-used.bin`, `pipeline-used.bin`) für schnellen Start und wenig
-  Speicher.
-- **Systemdienste** (`runtime/ov_*.c`): `nn::oe`, `nn::hid`, Audio, Netz (offline), Film-Decoder (`ov_movie2.c`),
-  `nn::ro` (EffectScript-NRO) usw.
-- **Kirby-Optionsmenü** (`runtime/kar_menu.c`, Patch-Set `karmenu`): hängt sich in die Textsuche des Spiels
-  (`f_70011302c0` → `f_7000001300`) und in das Setzen von UI-Texten ein, damit eigene PC-Einstellungen im
-  Original-Design des Spiels erscheinen. Ziel: Reiter „PC-Grafik“ auf der Seite *Optionen → Anzeige*, umschaltbar mit
-  L/R. Stand und Befunde: `kirby/RELEASE_PLAN.md`, Abschnitt 15.
-- Alle Kirby-Sonderfälle der Laufzeit fragen über `rt_game_is_kar()` ab (`runtime/main.c`).
+## Repository layout
 
-## Wichtige Schalter (Umgebungsvariablen)
-
-| Schalter | Wirkung |
+| Path | What is in it |
 |---|---|
-| `TOTK_FPS_LIMIT=60` | Bildratenbegrenzung (Kirby läuft nach Wanduhr; Testskripte brauchen 60) |
-| `KAR_DISPLAY_RES=WxH` | Anzeige-Auflösung, die das Spiel sieht (Standard 2560x1440) |
-| `TOTK_OUTPUT_RES`, `TOTK_WINDOW_SIZE` | Ausgabe-/Fenstergröße |
-| `KAR_MENU=0` | Haken im Optionsmenü aus |
-| `KAR_MENU_LOG=<Teilstring>` | protokolliert Textsuchen/Textsetzen mit Bildnummer und Aufrufkette |
-| `KAR_CS_PREFETCH=0`, `KAR_PIPE_PREWARM_ALL=1` | Compute-Prefetch aus / alle Pipelines vorbauen |
-| `KAR_REPLAY_PROF=1` | Zeitmessung des Replays je Bild |
-| `KAR_FNCOUNT=<Bilder>`, `KAR_TRACE_FRAMES=a-b,…` | Aufrufzähler / Aufruf-Trace für Offline-Analyse |
-| `TOTK_SHOTS=lo-hi:step`, `TOTK_SHOTS_FULL=1` | Bildschirmfotos in Serie (volle Größe) |
+| `recomp/` | Lifter, generator, patch tables |
+| `runtime/` | The runtime (C/C++): graphics, shaders, audio, input, system services, PC extras |
+| `tools/` | Build, packaging, tests, Kirby tools (`kar_*`) |
+| `installer/` | The installer (command line and window) |
+| `docs/` | Documentation |
+| `kirby/` | Task list, work log, input scripts for automated runs |
+| `build/`, `generated/`, `refs/` | **local only**, never checked in |
 
-Vollständige Liste: [`docs/kirby-running.md`](docs/kirby-running.md).
+## Legal
 
-## Testen
-
-`tools/kar_race_test.ps1` startet `kar.exe` mit einem Eingabeskript, macht Bildschirmfotos und sammelt das Log:
-
-```powershell
-powershell -File tools\kar_race_test.ps1 -Runs 1 -Script kirby\scripts\toRace.txt -Shots 2300-3900:800 -ShotCount 3 -Env 'TOTK_FPS_LIMIT=60'
-```
-
-Eingabeskripte (`kirby/scripts/*.txt`, Zeilen `<Bild> <Taste> <Dauer>`):
-
-| Skript | Weg |
-|---|---|
-| `toRace.txt` | Titel → Rennen |
-| `menu_opt.txt`, `menu_anz.txt`, `menu_disp.txt` | Hauptmenü → Optionen / Anzeige / Barrierefreiheit |
-| `menu_anz_r.txt` | Anzeige-Seite + R (PC-Modus) |
-| `mode_top.txt`, `mode_city.txt`, `mode_road.txt` | Top Ride / City Trial / Road Trip |
-| `soak60.txt` | Langzeittest |
-
-Analyse-Werkzeuge in `kirby/tools/`: `kar_assets.py` (HAL-Archiv `assets.cat`, „PARC“ v4), `kar_msbt.py`
-(MSBT-Texte), `trace_*.py` (Aufruf-Traces), `spv*.py`/`csvariants.py` (Shader), `shotmean.py`/`kirbymean.py`
-(Bildvergleich). Weitere Kirby-Werkzeuge liegen in `tools/kar_*.py`.
-
-## Repository-Aufbau
-
-| Pfad | Inhalt |
-|---|---|
-| `recomp/` | Lifter, Generator, Patch-Tabellen |
-| `runtime/` | Laufzeit (C/C++), Kirby-Dateien `kar_*`, `vk_kar_upscale.c`, `ov_movie2.c`, `audout.c`, … |
-| `tools/` | Bau, Paket, Test, Kirby-Werkzeuge `kar_*` |
-| `docs/` | Doku (Kirby: `kirby-running.md`, `kirby-changelog.md`) |
-| `kirby/` | Aufgabenliste, Arbeitsprotokoll, Eingabeskripte, Analyse-Werkzeuge |
-| `build/`, `generated/`, `refs/` | **nur lokal**, nie eingecheckt |
-
-## Rechtliches
-
-Dieses Repository enthält ausschließlich eigenen Code und Code des Unterbaus (Lizenzhinweise in
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)). *Kirby Air Riders* ist eine Marke von Nintendo / HAL Laboratory.
-Der Port ist ein privates Forschungsprojekt; für die Nutzung ist ein legal erworbenes Spiel nötig.
+This repository contains only original code and code of its base, under the licences listed in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md); as a whole it is GPL-3.0-or-later. *Kirby Air Riders* is a
+trademark of Nintendo / HAL Laboratory. This is an unofficial fan project, not affiliated with or endorsed by
+Nintendo or HAL Laboratory. You need a legally obtained copy of the game to use it.
