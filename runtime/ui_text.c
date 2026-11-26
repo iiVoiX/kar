@@ -143,7 +143,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_DISCORD] = "Discord status",
     [UI_MENU_GLYPHS] = "Button symbols", [UI_MENU_GLYPHS_AUTO] = "Automatic", [UI_MENU_GLYPHS_KEYBOARD] = "Keyboard and mouse",
     [UI_MENU_GLYPHS_DESC] = "The button symbols in the game's text: automatic follows the controller (the keyboard without one); they show the keys and buttons you bound. Restart to apply.",
-    [UI_MENU_DISCORD_DESC] = "Shows \"Playing\" with the play time in Discord while the game runs. Needs a Discord application id in totk.ini (DISCORD_APP_ID); without one nothing is sent.",
+    [UI_MENU_DISCORD_DESC] = "Shows \"Playing\" with the play time in Discord while the game runs. Needs a Discord application id in dkb.ini (DISCORD_APP_ID); without one nothing is sent.",
 
     [UI_MENU_VOLUME] = "Volume", [UI_MENU_VOLUME_DESC] = "Master volume of the game.",
     [UI_MENU_MUTE_UNFOCUSED] = "Mute in background",
@@ -452,7 +452,7 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_DISCORD] = "Статус в Discord",
     [UI_MENU_GLYPHS] = "Символы кнопок", [UI_MENU_GLYPHS_AUTO] = "Автоматически", [UI_MENU_GLYPHS_KEYBOARD] = "Клавиатура и мышь",
     [UI_MENU_GLYPHS_DESC] = "Символы кнопок в текстах игры: автоматически по контроллеру (без него клавиатура); показывают назначенные клавиши и кнопки. Действует после перезапуска.",
-    [UI_MENU_DISCORD_DESC] = "Показывает в Discord, что вы играете, и время игры. Нужен id приложения Discord в totk.ini (DISCORD_APP_ID); без него ничего не отправляется.",
+    [UI_MENU_DISCORD_DESC] = "Показывает в Discord, что вы играете, и время игры. Нужен id приложения Discord в dkb.ini (DISCORD_APP_ID); без него ничего не отправляется.",
 
     [UI_MENU_VOLUME] = "Громкость", [UI_MENU_VOLUME_DESC] = "Общая громкость игры.",
 
@@ -747,7 +747,7 @@ static const char *const text_de[UI_TEXT_COUNT] = {
     [UI_MENU_DISCORD] = "Discord-Status",
     [UI_MENU_GLYPHS] = "Tastensymbole", [UI_MENU_GLYPHS_AUTO] = "Automatisch", [UI_MENU_GLYPHS_KEYBOARD] = "Tastatur und Maus",
     [UI_MENU_GLYPHS_DESC] = "Die Tastensymbole im Spieltext: automatisch passend zum Controller (ohne Controller die Tastatur); sie zeigen die belegten Tasten. Wirkt nach einem Neustart.",
-    [UI_MENU_DISCORD_DESC] = "Zeigt in Discord „Spielt“ mit der Spielzeit, solange das Spiel läuft. Braucht die ID einer Discord-Anwendung in totk.ini (DISCORD_APP_ID); ohne sie wird nichts gesendet.",
+    [UI_MENU_DISCORD_DESC] = "Zeigt in Discord „Spielt“ mit der Spielzeit, solange das Spiel läuft. Braucht die ID einer Discord-Anwendung in dkb.ini (DISCORD_APP_ID); ohne sie wird nichts gesendet.",
 
     [UI_MENU_VOLUME] = "Lautstärke", [UI_MENU_VOLUME_DESC] = "Gesamtlautstärke des Spiels.",
     [UI_MENU_MUTE_UNFOCUSED] = "Im Hintergrund stumm",

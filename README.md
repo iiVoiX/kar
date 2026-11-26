@@ -51,8 +51,8 @@ about twice the frames shown.
 <td valign="top">
 
 ### 🎮 Controllers and keyboard
-Xbox, PlayStation and Switch Pro pads with rumble and gyro, full keyboard and mouse, keyboard as player 2, button
-symbols in the game's own text that follow your pad and your bindings.
+Gamepads through SDL3 (rumble and gyro where the pad has them; real-pad testing is under way), full keyboard and
+mouse, keyboard as player 2, button symbols in the game's own text that follow your pad and your bindings.
 
 </td>
 <td valign="top">
@@ -112,11 +112,12 @@ README of that base is in [`docs/README-dkb-upstream.md`](docs/README-dkb-upstre
 ### With the installer
 
 ```bat
-.venv\Scripts\python -m installer
+.venv\Scripts\python -m installer --exefs <exefs folder> --romfs <packed romfs folder> --dest <target folder>
 ```
 
-It asks for your dump and a target folder, then checks, packs, lifts and compiles, and leaves a ready `kar.exe`.
-Details: [`docs/installer.md`](docs/installer.md).
+From the game code (ExeFS) and the packed game data of your dump (steps 1 and 2 below) it checks, packs, lifts and
+compiles, and leaves a ready `kar.exe` in the target folder. This command-line run is tested end to end; the
+installer window (`python -m installer` without arguments) is being tested. Details: [`docs/installer.md`](docs/installer.md).
 
 <details>
 <summary><b>By hand, step by step</b></summary>
@@ -152,14 +153,14 @@ fast. Always quit by closing the window rather than killing the process, so the 
 ### Optional: NVIDIA DLSS
 
 DLSS is not part of this repository. It is a separate add-on, `kar_upscaler.dll`, kept outside it and built by
-each user: its build script fetches the DLSS SDK and NVIDIA Streamline from NVIDIA's own repositories, and you accept NVIDIA's licence
+each user (it is not published yet): its build script fetches the DLSS SDK and NVIDIA Streamline from NVIDIA's own repositories, and you accept NVIDIA's licence
 when you build it. The game talks to it only through a small, neutral interface (`runtime/ext_upscaler.h`, also MIT).
 Once the add-on sits next to `kar.exe`, *NVIDIA DLSS* appears in the overlay for upscaling and frame generation.
 
 ## Controls and settings
 
 Press **F1** in the game for the settings overlay (display, graphics, controls, audio). Every setting is also a line
-in `totk.ini` next to the exe. Keyboard and pad defaults, remapping and the button symbols:
+in `dkb.ini` next to the exe. Keyboard and pad defaults, remapping and the button symbols:
 [`docs/controls.md`](docs/controls.md). All switches for testing and diagnosis:
 [`docs/kirby-running.md`](docs/kirby-running.md).
 
