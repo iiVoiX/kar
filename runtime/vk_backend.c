@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "ext_upscaler.h"
 #include "flight.h"
 #include "gfx.h"
 #include "host.h"
@@ -106,6 +107,18 @@ static void present_main(void *arg) {
             fg_prev = now;
             mid = vk_fg_interpolate(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, j.mv_slot, &ff);
         }
+        if (!mid && ext_fg_supported()) {   // the add-on's frame generation (17.6): this picture's depth, motion, camera
+            VkFgMv mv;
+            int have = j.mv_slot && vk_fg_mv_get(j.mv_slot, &mv);
+            int ow = 0, oh = 0;
+            vk_present_extent(&ow, &oh);
+            ExtFgFrame ff = {.frame = j.frame, .depth = have ? mv.depth : VK_NULL_HANDLE, .motion = have ? mv.mv : VK_NULL_HANDLE,
+                             .render_w = have ? mv.w : 0, .render_h = have ? mv.h : 0, .output_w = (uint32_t)ow,
+                             .output_h = (uint32_t)oh, .fov_y = have ? mv.fov : 1.0f, .near_z = have ? mv.nearv : 0.1f,
+                             .far_z = have ? mv.farv : 1000.0f, .depth_inverted = 1, .reset = !have};
+            extern void gfx_window_mark_dirty(void);   // gfx_present.c
+            if (ext_fg_frame(&ff) == 2) gfx_window_mark_dirty();   // the swapchain again, with frame generation on
+        }
         if (!mid) vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
         q1 = kern_now_ns();
         uint64_t f = vk_sync_submit(NULL, 0, 0); // no guest reports; this value only covers the blit (or the copy)
@@ -140,7 +153,9 @@ static void present_main(void *arg) {
             }
         }
         uint64_t t1 = kern_now_ns();
+        ext_fg_marker(EXT_FG_PRESENT_START);
         vk_present_flip();
+        ext_fg_marker(EXT_FG_PRESENT_END);
         if (vk_fg_on()) {   // every 5 s: the pictures shown (real and interpolated) and the real ones, per second
             uint64_t now = kern_now_ns();
             fg_real++, fg_shown++;
@@ -222,7 +237,7 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     }
     PresentJob j = {.image = img->image, .format = img->format, .w = (int)img->width, .h = (int)img->height, .frame = frame,
                     .at = at_ns, .queued = queued, .value = value,
-                    .mv_slot = vk_fg_on() ? vk_fg_mv_latest() : 0};   // the replay of this frame recorded it already
+                    .mv_slot = vk_fg_on() || ext_fg_requested() ? vk_fg_mv_latest() : 0};   // the replay of this frame recorded it already
     if (crop) {
         j.has_crop = 1;
         for (int i = 0; i < 4; i++) j.crop[i] = crop[i];

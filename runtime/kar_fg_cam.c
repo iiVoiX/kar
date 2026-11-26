@@ -181,6 +181,7 @@ void kar_fg_cam_init(void) {
     const char *up = getenv("KAR_UPSCALE"), *cu = cfg_get("TOTK_UPSCALER");
     const char *v = up && *up ? up : cu;   // FSR 3.1 or the upscaler add-on: both need the camera motion vectors
     int fsr3 = v && (!strcmp(v, "fsr3") || !strcmp(v, "external"));
-    if (vk_fg_on() || fsr3) rt_patch_switch(set, 1);
+    extern int ext_fg_requested(void);   // the add-on's frame generation needs the camera too
+    if (vk_fg_on() || fsr3 || ext_fg_requested()) rt_patch_switch(set, 1);
     rt_register_host((uint64_t)(uintptr_t)rt_patch_page() + SLOT_CAMERA, cam_hook);
 }

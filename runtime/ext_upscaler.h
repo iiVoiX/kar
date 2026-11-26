@@ -18,11 +18,15 @@
 //                        physical-device enumeration,
 //                        surface, swapchain, acquire, present and wait-idle calls), NULL for the exe's normal one.
 //   fg_device_ready      once the device exists: 1 when frame generation is supported on it.
+// Version 3, per presented game picture on the present thread:
+//   fg_frame             before the picture's blit to the swapchain: its depth, motion vectors and camera (below);
+//                        2 asks the exe to build the swapchain again (frame generation was just switched on).
+//   fg_marker            EXT_FG_PRESENT_START just before the present, EXT_FG_PRESENT_END after it.
 #pragma once
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
-#define EXT_UPSCALER_VERSION 2
+#define EXT_UPSCALER_VERSION 3
 #define EXT_UPSCALER_ENTRY "ext_upscaler_get"
 #define EXT_UPSCALER_DLL "kar_upscaler.dll"
 
@@ -52,6 +56,18 @@ typedef struct ExtUpscalerFrame {
     float frame_ms, near_z, far_z, fov_y;
 } ExtUpscalerFrame;
 
+// One game picture for the add-on's frame generation. Images are in VK_IMAGE_LAYOUT_GENERAL and stay valid until the
+// picture's present; depth and motion are at render size.
+typedef struct ExtFgFrame {
+    uint64_t frame;          // the game's frame number
+    VkImage depth;           // r32 float, near 1 and far 0 when depth_inverted; VK_NULL_HANDLE: none this picture
+    VkImage motion;          // rg16 float, pixels from the current to the previous picture
+    uint32_t render_w, render_h, output_w, output_h;   // output: the swapchain extent
+    float fov_y, near_z, far_z;   // radians; the camera's planes
+    int32_t depth_inverted, reset;
+} ExtFgFrame;
+enum { EXT_FG_PRESENT_START = 4, EXT_FG_PRESENT_END = 5 };
+
 typedef struct ExtUpscalerApi {
     uint32_t version;
     const char *name;        // shown in the port menu
@@ -65,6 +81,9 @@ typedef struct ExtUpscalerApi {
     int (*fg_preinit)(const wchar_t *data_dir);
     PFN_vkVoidFunction (*fg_vk_proc)(const char *name);
     int (*fg_device_ready)(VkInstance instance, VkPhysicalDevice phys, VkDevice device);
+    // version 3
+    int (*fg_frame)(const ExtFgFrame *frame);
+    void (*fg_marker)(int marker);
 } ExtUpscalerApi;
 
 typedef const ExtUpscalerApi *(*ExtUpscalerGetFn)(void);
@@ -83,6 +102,10 @@ int ext_fg_preinit(void);                    // 1 when the add-on's frame genera
 PFN_vkVoidFunction ext_fg_proc(const char *name);   // its version of a Vulkan call, or NULL
 void ext_fg_device_ready(VkInstance instance, VkPhysicalDevice phys, VkDevice device);
 int ext_fg_supported(void);                  // after the device: frame generation can run
+int ext_fg_frame(const ExtFgFrame *frame);   // version 3 calls; nothing without a supported add-on
+void ext_fg_marker(int marker);
+int ext_fg_requested(void);   // the add-on's frame generation is asked for (settings only, before any device)
+void vk_present_extent(int *w, int *h);      // gfx_present.c: the swapchain's size
 // The add-on's version of a Vulkan call when its frame generation runs, else the normal one (cached per name).
 // EXT_FG_VK(vkQueuePresentKHR)(queue, &info) at every call site of the calls the add-on lends.
 PFN_vkVoidFunction ext_fg_resolve(const char *name, PFN_vkVoidFunction normal);

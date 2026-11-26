@@ -168,7 +168,8 @@ static int mv_pass(VkCommandBuffer cb, uint32_t w, uint32_t h);
 
 int vk_fg_mv_record(VkCommandBuffer cb, uint32_t w, uint32_t h, VkImage out, VkFormat out_fmt, uint32_t out_w,
                     uint32_t out_h) {
-    if (!vk_fg_on()) return 0;
+    extern int ext_fg_requested(void);   // ext_upscaler.c: the add-on's frame generation takes them as well
+    if (!vk_fg_on() && !ext_fg_requested()) return 0;
     int k = mv_pass(cb, w, h);
     if (k < 0) return 0;
     VkCtx *c = vk_ctx();

@@ -836,6 +836,8 @@ void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int
     present_image(src, layout, fmt, w, h, crop, 1);
 }
 
+void vk_present_extent(int *w, int *h) { *w = (int)g_sc_ext.width, *h = (int)g_sc_ext.height; }
+
 void vk_present_flip(void) {
     plat_rmutex_lock(&g_pl);
     flip_locked();

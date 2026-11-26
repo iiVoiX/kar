@@ -122,3 +122,17 @@ PFN_vkVoidFunction ext_fg_resolve(const char *name, PFN_vkVoidFunction normal) {
         if (!cache[i].name) { cache[i].name = name, cache[i].fn = f; break; }
     return f;
 }
+int ext_fg_frame(const ExtFgFrame *frame) {
+    return fg_ok && X.api->version >= 3 && X.api->fg_frame ? X.api->fg_frame(frame) : 0;
+}
+void ext_fg_marker(int marker) {
+    if (fg_ok && X.api->version >= 3 && X.api->fg_marker) X.api->fg_marker(marker);
+}
+int ext_fg_requested(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *set = cfg_get("TOTK_FRAME_GEN"), *e = getenv("KAR_DLSSG");
+        on = set && !strcmp(set, "dlss") && e && *e == '1';
+    }
+    return on;
+}
