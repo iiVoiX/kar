@@ -22,6 +22,8 @@
 #include "aoc_romfs.h"
 #include "cfg.h"
 #include "host.h"
+#include "input.h"
+#include "input_map.h"
 #include "nvn_api.h"
 #include "ov.h"
 #include "platform/platform.h"
@@ -1240,6 +1242,99 @@ static int builtin_font_path(int64_t t, char *path, size_t n) {
     return 0;
 }
 
+// Button symbols per pad and keyboard (RELEASE_PLAN 17.11). The generated button font (tools/make_kar_buttonfont.py)
+// draws every known button code as a composite glyph of one component and carries the other styles as plain glyphs;
+// <font>.map beside it lists each code's Switch button and the file offset of its component's glyph index, and the id
+// of every style glyph. TOTK_BUTTON_GLYPHS (auto, switch, xbox, playstation, keyboard; read once, when the game loads
+// the font at boot) points each component at the symbol of the pad input or key that button is bound to (input_map,
+// with the pad layout of TOTK_PAD_LAYOUT), so the game's text shows what to press. auto: the open gamepad's kind, the
+// keyboard without one. A user's dumped console font has no map and keeps its own symbols.
+static uint32_t sfnt_be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static void sfnt_put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24), p[1] = (uint8_t)(v >> 16), p[2] = (uint8_t)(v >> 8), p[3] = (uint8_t)v; }
+static uint32_t sfnt_sum(const uint8_t *p, uint32_t len) {   // the table checksum: big-endian words, zero-padded
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < len; i += 4) {
+        uint8_t w[4] = {0, 0, 0, 0};
+        memcpy(w, p + i, len - i < 4 ? len - i : 4);
+        sum += sfnt_be32(w);
+    }
+    return sum;
+}
+// The glyf table's checksum and head's checkSumAdjustment after its bytes changed.
+static void sfnt_resum(uint8_t *f, uint64_t len) {
+    unsigned n = (unsigned)f[4] << 8 | f[5];
+    uint8_t *head = NULL;
+    for (unsigned i = 0; i < n && 12 + 16 * (i + 1) <= len; i++) {
+        uint8_t *rec = f + 12 + 16 * i;
+        uint32_t off = sfnt_be32(rec + 8), tlen = sfnt_be32(rec + 12);
+        if ((uint64_t)off + tlen > len) return;
+        if (!memcmp(rec, "head", 4)) head = f + off;
+        if (!memcmp(rec, "glyf", 4)) sfnt_put32(rec + 4, sfnt_sum(f + off, tlen));
+    }
+    if (!head) return;
+    sfnt_put32(head + 8, 0);
+    sfnt_put32(head + 8, 0xB1B0AFBAu - sfnt_sum(f, (uint32_t)len));
+}
+static const char *glyph_style_name(int k) {
+    return k == INPUT_GLYPHS_XBOX ? "xbox" : k == INPUT_GLYPHS_PLAYSTATION ? "playstation" : k == INPUT_GLYPHS_KEYBOARD ? "keyboard" : "switch";
+}
+// The style glyph for Switch button b in style k ("x_south", "k_e"), or NULL when nothing is bound to it.
+static int glyph_for(int k, int b, char *name, size_t n) {
+    if (k == INPUT_GLYPHS_KEYBOARD) {
+        for (int i = 0; i < input_map.nkeys; i++)
+            if (input_map.keys[i].action == b && input_key_name(input_map.keys[i].key))
+                return snprintf(name, n, "k_%s", input_key_name(input_map.keys[i].key)), 1;
+        return 0;
+    }
+    int layout = input_pad_layout_pick(cfg_value("TOTK_PAD_LAYOUT"), 0);   // an Xbox or PlayStation pad: east is not A
+    for (int i = 0; i < input_map.npads[layout]; i++)
+        if (input_map.pads[layout][i].action == b && input_pad_name(input_map.pads[layout][i].pad))
+            return snprintf(name, n, "%s_%s", k == INPUT_GLYPHS_PLAYSTATION ? "p" : "x",
+                            input_pad_name(input_map.pads[layout][i].pad)), 1;
+    return 0;
+}
+static void button_glyphs(uint8_t *font, uint64_t len, const char *font_path) {
+    const char *set = cfg_value("TOTK_BUTTON_GLYPHS");
+    int k = !set || !*set || !strcmp(set, "auto") ? input_glyphs_auto()
+            : !strcmp(set, "xbox")                ? INPUT_GLYPHS_XBOX
+            : !strcmp(set, "playstation")         ? INPUT_GLYPHS_PLAYSTATION
+            : !strcmp(set, "keyboard")            ? INPUT_GLYPHS_KEYBOARD
+                                                  : INPUT_GLYPHS_SWITCH;
+    if (k == INPUT_GLYPHS_SWITCH) return;
+    char map[PLAT_PATH_MAX + 64];
+    size_t pl = strlen(font_path);
+    if (pl < 4 || pl + 1 > sizeof map || strcmp(font_path + pl - 4, ".ttf")) return;
+    memcpy(map, font_path, pl - 4), memcpy(map + pl - 4, ".map", 5);
+    FILE *f = fopen(map, "rb");
+    if (!f) { rt_log("pl: button symbols %s: no %s (a console font keeps its own)", glyph_style_name(k), map); return; }
+    static char line[256];
+    static struct { char name[24]; unsigned gid; } gl[256];
+    static struct { unsigned code; int button; uint64_t at; } sl[64];
+    int ng = 0, ns = 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned a, gid;
+        int b;
+        unsigned long long at;
+        char nm[24];
+        if (sscanf(line, "slot %x %d %llu", &a, &b, &at) == 3 && ns < 64) sl[ns].code = a, sl[ns].button = b, sl[ns++].at = at;
+        else if (sscanf(line, "glyph %23s %u", nm, &gid) == 2 && ng < 256) snprintf(gl[ng].name, sizeof gl[ng].name, "%s", nm), gl[ng++].gid = gid;
+    }
+    fclose(f);
+    int done = 0;
+    for (int i = 0; i < ns; i++) {
+        char want[32];
+        if (sl[i].at + 2 > len || !glyph_for(k, sl[i].button, want, sizeof want)) continue;
+        for (int g = 0; g < ng; g++)
+            if (!strcmp(gl[g].name, want)) {
+                font[sl[i].at] = (uint8_t)(gl[g].gid >> 8), font[sl[i].at + 1] = (uint8_t)gl[g].gid;
+                done++;
+                break;
+            }
+    }
+    if (done) sfnt_resum(font, len);
+    rt_log("pl: button symbols %s: %d of %d codes follow the bindings", glyph_style_name(k), done, ns);
+}
+
 static void ov_builtin_font(Cpu *c) {
     uint8_t *out = arg_p(c, 0);
     int64_t t = (int32_t)arg_x(c, 1);
@@ -1263,6 +1358,7 @@ static void ov_builtin_font(Cpu *c) {
         size_t got = fread(p, 1, (size_t)len, f);
         fclose(f);
         if (got != (size_t)len) rt_fatal("nn::pl: built-in font %s: short read", path);
+        if (t == 5) button_glyphs(p, (uint64_t)len, path);
         builtin.size[t] = (uint64_t)len;
         __atomic_store_n(&builtin.data[t], p, __ATOMIC_RELEASE);
         rt_log("pl: built-in font %lld: %lld bytes from %s", (long long)t, (long long)len, path);

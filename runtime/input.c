@@ -696,6 +696,22 @@ int input_cursor_allowed(void) {
     return g_block != 1 && g_menu != 1 && mouse_sens_get() > 0 && !(in && !strcmp(in, "none"));
 }
 
+int input_glyphs_auto(void) {
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    int kind = INPUT_GLYPHS_KEYBOARD;   // no gamepad: the keyboard's keys
+    if (pad) {
+        SDL_GamepadType t = SDL_GetGamepadType(pad);
+        kind = t == SDL_GAMEPAD_TYPE_PS3 || t == SDL_GAMEPAD_TYPE_PS4 || t == SDL_GAMEPAD_TYPE_PS5 ? INPUT_GLYPHS_PLAYSTATION
+               : t == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO || t == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
+                       t == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || t == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR
+                   ? INPUT_GLYPHS_SWITCH
+                   : INPUT_GLYPHS_XBOX;   // Xbox, Steam Deck and other pads with Xbox labels
+    }
+    plat_mutex_unlock(&lock);
+    return kind;
+}
+
 void input_block(int on) {
     plat_xchg32(&g_block, on ? 1 : 2);
     ikb_cursor_update();

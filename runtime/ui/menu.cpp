@@ -838,6 +838,12 @@ static void tab_controls(float scale) {
         const char *kn[] = {menu_text(UI_MENU_KBD_P1), menu_text(UI_MENU_KBD_P2)};
         opt_choice_list("TOTK_KEYBOARD_PLAYER", UI_MENU_KBD_PLAYER, kv, kn, 2, UI_MENU_KBD_PLAYER_DESC);
     }
+    {   // ov_system.c button_glyphs: the symbols in the game's text, read when the game starts
+        static const char *const gv[] = {"auto", "switch", "xbox", "playstation", "keyboard"};
+        const char *gn[] = {menu_text(UI_MENU_GLYPHS_AUTO), "Nintendo Switch", "Xbox / Steam Deck", "PlayStation",
+                            menu_text(UI_MENU_GLYPHS_KEYBOARD)};
+        opt_choice_list("TOTK_BUTTON_GLYPHS", UI_MENU_GLYPHS, gv, gn, 5, UI_MENU_GLYPHS_DESC);
+    }
     opt_toggle("TOTK_MOTION", UI_MENU_MOTION, UI_MENU_MOTION_DESC);
     opt_slider("TOTK_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
     opt_slider("TOTK_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");

@@ -37,6 +37,10 @@ static int conn_drain(Conn c) {
     }
     return 0;
 }
+static int conn_ready(Conn c) {   // 1 when the client has sent something, -1 when the pipe broke
+    DWORD avail = 0;
+    return PeekNamedPipe(c, NULL, 0, NULL, &avail, NULL) ? avail > 0 : -1;
+}
 static void conn_close(Conn c) { CloseHandle(c); }
 static void nap(int ms) { Sleep((DWORD)ms); }
 static int self_pid(void) { return (int)GetCurrentProcessId(); }
@@ -80,6 +84,11 @@ static int conn_drain(Conn c) {
         return r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
     }
 }
+static int conn_ready(Conn c) {
+    char b;
+    ssize_t r = recv(c, &b, 1, MSG_PEEK);
+    return r > 0 ? 1 : r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+}
 static void conn_close(Conn c) { close(c); }
 static void nap(int ms) { usleep((useconds_t)ms * 1000); }
 static int self_pid(void) { return (int)getpid(); }
@@ -106,7 +115,10 @@ static Conn connect_client(const char *id) {
         if (c == CONN_NONE) continue;
         char hs[96];
         snprintf(hs, sizeof hs, "{\"v\":1,\"client_id\":\"%s\"}", id);
-        if (send_frame(c, 0, hs)) return c;
+        // the client answers the handshake (READY) before it takes commands: wait up to 3 s for that reply
+        int ok = send_frame(c, 0, hs), r = 0;
+        for (int i = 0; ok && i < 30 && !(r = conn_ready(c)); i++) nap(100);
+        if (ok && r > 0 && conn_drain(c)) return c;
         conn_close(c);
     }
     return CONN_NONE;
