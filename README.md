@@ -4,7 +4,7 @@
 
 <p align="center">
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-ee5a9b?style=for-the-badge">
-  <img alt="Graphics: Vulkan 1.3" src="https://img.shields.io/badge/graphics-Vulkan_1.3-7b5cff?style=for-the-badge">
+  <img alt="Graphics: Vulkan" src="https://img.shields.io/badge/graphics-Vulkan-7b5cff?style=for-the-badge">
   <img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-2b2350?style=for-the-badge">
   <img alt="No game data included" src="https://img.shields.io/badge/game%20data-not%20included-ffd23f?style=for-the-badge&amp;labelColor=2b2350">
 </p>
