@@ -384,7 +384,7 @@ def main():
         if g is not None and button_of(c) is not None:
             names.append(f's{c:04X}')   # the Switch glyph, which the code's composite shows by default
             glyphs[f's{c:04X}'] = g
-            pen = TTGlyphPen(None)
+            pen = TTGlyphPen(glyphs)   # the component's glyph is in it already
             pen.addComponent(f's{c:04X}', (1, 0, 0, 1, 0, 0))
             g = pen.glyph()
             slots[c] = button_of(c)
