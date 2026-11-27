@@ -1,7 +1,10 @@
 """Kirby Air Riders Recomp launcher (RELEASE_PLAN 13.2c): play button, status and the main settings, in the port's own
 pastel style (original drawing, no game artwork). Kirby only; the installer window (gui.py) stays as it is.
 
-    python -m installer.launcher [--dir <install folder>] [--lang de|en|ru] [--selftest]
+    python -m installer.launcher [--dir <install folder>] [--kit <kit folder>] [--lang de|en|ru] [--selftest]
+
+--kit names a build kit (data/exefs, data/romfs, toolchain/ as tools/laptop kits hold them): without kar.exe in --dir
+the window shows the first-time setup, runs the installer with the kit's files and opens the launcher when it is done.
 
 --dir defaults to the folder holding kar.exe beside this checkout's build (build/kar458752) or the current folder.
 Settings are lines in <dir>/dkb.ini (the file kar.exe reads, runtime/cfg.c): each choice sets one key and every other
@@ -11,8 +14,11 @@ line stays. Without kar.exe in --dir the launcher offers the installer instead o
 import argparse
 import os
 import re
+import json
+import queue
 import subprocess
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
 
@@ -66,7 +72,11 @@ TEXT = {
            'pad_layout': 'Button layout', 'button_glyphs': 'Button symbols', 'keyboard_player': 'Keyboard plays as',
            'motion': 'Motion controls', 'volume': 'Volume', 'mute_unfocused': 'Mute in background',
            'on': 'On', 'off': 'Off', 'window': 'Window', 'centre': 'Centre', 'edges': 'Edges', 'unlimited': 'Unlimited',
-           'auto': 'Automatic', 'keyboard': 'Keyboard', 'player1': 'Player 1', 'player2': 'Player 2'},
+           'auto': 'Automatic', 'keyboard': 'Keyboard', 'player1': 'Player 1', 'player2': 'Player 2',
+           'setup_tag': 'FIRST-TIME SETUP', 'setup_a': 'Set up once,', 'setup_b': 'then race.',
+           'setup_sub': 'Builds the game from your own dump. Nothing is downloaded.', 'dest': 'Install to',
+           'progress': 'Progress', 'working': 'BUILDING…', 'failed': 'Something went wrong. Log:', 'need': 'Needs about 55 GB free.',
+           's_check': 'Check the dump', 's_dkb_data': 'Pack the game data', 's_dkb_translator': 'Shader translator', 's_lift': 'Translate the game code', 's_compile': 'Compile', 's_dkb_shaders': 'Shaders and button symbols', 's_dkb_verify': 'Final check', 's_cleanup': 'Tidy up',},
     'de': {'tag': 'PC-PORT', 'sub': 'Dein eigener Dump, nativ auf dem PC.', 'play': 'SPIELEN', 'running': 'LÄUFT…',
            'install': 'INSTALLIEREN', 'status': 'STATUS', 'exe': 'Spiel bereit', 'noexe': 'Noch nicht installiert',
            'dlss': 'DLSS-Add-on gefunden', 'nodlss': 'Kein DLSS-Add-on', 'cache': 'Shader-Cache bereit',
@@ -79,7 +89,11 @@ TEXT = {
            'pad_layout': 'Tastenbelegung', 'button_glyphs': 'Tastensymbole', 'keyboard_player': 'Tastatur spielt als',
            'motion': 'Bewegungssteuerung', 'volume': 'Lautstärke', 'mute_unfocused': 'Im Hintergrund stumm',
            'on': 'An', 'off': 'Aus', 'window': 'Fenster', 'centre': 'Mitte', 'edges': 'Am Rand', 'unlimited': 'Unbegrenzt',
-           'auto': 'Automatisch', 'keyboard': 'Tastatur', 'player1': 'Spieler 1', 'player2': 'Spieler 2'},
+           'auto': 'Automatisch', 'keyboard': 'Tastatur', 'player1': 'Spieler 1', 'player2': 'Spieler 2',
+           'setup_tag': 'ERSTEINRICHTUNG', 'setup_a': 'Einmal einrichten,', 'setup_b': 'dann losfahren.',
+           'setup_sub': 'Baut das Spiel aus deinem eigenen Dump. Es wird nichts heruntergeladen.', 'dest': 'Installieren nach',
+           'progress': 'Fortschritt', 'working': 'BAUT…', 'failed': 'Da ging etwas schief. Protokoll:', 'need': 'Braucht etwa 55 GB frei.',
+           's_check': 'Dump prüfen', 's_dkb_data': 'Spieldaten packen', 's_dkb_translator': 'Shader-Übersetzer', 's_lift': 'Spielcode übersetzen', 's_compile': 'Kompilieren', 's_dkb_shaders': 'Shader und Tastensymbole', 's_dkb_verify': 'Abschlussprüfung', 's_cleanup': 'Aufräumen',},
     'ru': {'tag': 'ПОРТ ДЛЯ ПК', 'sub': 'Ваш собственный дамп, нативно на ПК.', 'play': 'ИГРАТЬ', 'running': 'ЗАПУЩЕНО…',
            'install': 'УСТАНОВИТЬ', 'status': 'СОСТОЯНИЕ', 'exe': 'Игра готова', 'noexe': 'Ещё не установлено',
            'dlss': 'Дополнение DLSS найдено', 'nodlss': 'Нет дополнения DLSS', 'cache': 'Кэш шейдеров готов',
@@ -92,7 +106,11 @@ TEXT = {
            'pad_layout': 'Раскладка кнопок', 'button_glyphs': 'Символы кнопок', 'keyboard_player': 'Клавиатура играет за',
            'motion': 'Управление движением', 'volume': 'Громкость', 'mute_unfocused': 'Без звука в фоне',
            'on': 'Вкл', 'off': 'Выкл', 'window': 'Окно', 'centre': 'Центр', 'edges': 'По краям', 'unlimited': 'Без ограничения',
-           'auto': 'Автоматически', 'keyboard': 'Клавиатура', 'player1': 'Игрок 1', 'player2': 'Игрок 2'},
+           'auto': 'Автоматически', 'keyboard': 'Клавиатура', 'player1': 'Игрок 1', 'player2': 'Игрок 2',
+           'setup_tag': 'ПЕРВАЯ НАСТРОЙКА', 'setup_a': 'Один раз настроить,', 'setup_b': 'и в путь.',
+           'setup_sub': 'Собирает игру из вашего дампа. Ничего не скачивается.', 'dest': 'Установить в',
+           'progress': 'Ход установки', 'working': 'СБОРКА…', 'failed': 'Что-то пошло не так. Журнал:', 'need': 'Нужно около 55 ГБ.',
+           's_check': 'Проверка дампа', 's_dkb_data': 'Упаковка данных', 's_dkb_translator': 'Транслятор шейдеров', 's_lift': 'Перевод кода игры', 's_compile': 'Компиляция', 's_dkb_shaders': 'Шейдеры и символы кнопок', 's_dkb_verify': 'Финальная проверка', 's_cleanup': 'Уборка',},
 }
 
 
@@ -149,8 +167,13 @@ def system_lang():
 class Launcher:
     W, H = 1100, 680
 
-    def __init__(self, root, folder, lang):
+    STEP_IDS = ('check', 'dkb_data', 'dkb_translator', 'lift', 'compile', 'dkb_shaders', 'dkb_verify', 'cleanup')
+
+    def __init__(self, root, folder, lang, kit=None):
         self.root, self.dir, self.t = root, folder, TEXT.get(lang, TEXT['en'])
+        self.kit, self.inst, self.steps, self.fail_log = kit, None, {}, None
+        self.events = queue.Queue()
+        self.dest_var = tk.StringVar(value=str(folder))
         self.ini = folder / 'dkb.ini'
         self.vals = {**DEFAULTS, **ini_read(self.ini)}
         self.tab = 'graphics'
@@ -163,6 +186,98 @@ class Launcher:
         root.bind('<Return>', lambda e: self.play())
         root.protocol('WM_DELETE_WINDOW', root.destroy)
         self.draw()
+
+    def draw(self):
+        if self.kit and not self.installed():
+            self.draw_setup()
+        else:
+            self.draw_launcher()
+
+    # ---- first-time setup: runs the installer with the kit's files, its JSON events drive the step list
+    def draw_setup(self):
+        c, t = self.c, self.t
+        c.delete('all')
+        c.create_oval(880, -140, 1300, 280, fill=CIRCLE, outline='')
+        c.create_oval(-100, 560, 220, 860, fill=CIRCLE, outline='')
+        self.star(110, 70, 18, STAR)
+        self.star(1080, 30, 10, STAR)
+        self.rrect(56, 52, 56 + 11 * len(t['setup_tag']) + 36, 84, 16, fill=INK, outline='')
+        self.text(74, 58, t['setup_tag'], 11, 'bold', CARD)
+        self.text(52, 100, t['setup_a'], 30, 'bold', INK)
+        self.text(52, 146, t['setup_b'], 30, 'bold', ACCENT)
+        self.text(56, 210, t['setup_sub'], 12, 'normal', INK_SOFT, width=380)
+        self.rrect(56, 270, 420, 400, 20, fill=CARD, outline='')
+        self.text(76, 286, t['dest'], 12, 'bold', INK)
+        entry = tk.Entry(self.root, textvariable=self.dest_var, font=(FONT, 11), relief='flat', bg=TINT, fg=INK)
+        c.create_window(76, 318, window=entry, anchor='nw', width=324, height=34)
+        self.text(76, 364, t['need'], 10, 'normal', MUTED)
+        busy = self.inst is not None and self.inst.poll() is None
+        tag = 'go'
+        c.create_polygon(66, 452, 396, 452, 386, 524, 56, 524, fill=ACCENT_DARK, outline='', tags=tag)
+        c.create_polygon(66, 440, 396, 440, 386, 512, 56, 512, fill=MUTED if busy else ACCENT, outline='', tags=tag)
+        self.text(226, 476, t['working'] if busy else t['install'], 26, 'bold', CARD, anchor='center', tags=tag)
+        if not busy:
+            c.tag_bind(tag, '<Button-1>', lambda e: self.install())
+        if self.fail_log:
+            self.text(56, 560, t['failed'], 11, 'bold', ACCENT_DARK)
+            self.text(56, 584, self.fail_log, 9, 'normal', INK_SOFT, width=380)
+        X0, Y0, X1, Y1 = 450, 52, 1050, 628
+        self.rrect(X0 + 4, Y0 + 8, X1 + 4, Y1 + 8, 28, fill='#f2bccf', outline='')
+        self.rrect(X0, Y0, X1, Y1, 28, fill=CARD, outline='')
+        self.text(X0 + 30, Y0 + 26, t['progress'], 20, 'bold', INK)
+        y = Y0 + 84
+        for i, sid in enumerate(self.STEP_IDS):
+            st = self.steps.get(sid, '')
+            done, active = st in ('done', 'skipped'), st == 'started'
+            if active:
+                self.rrect(X0 + 18, y - 8, X1 - 18, y + 46, 16, fill=TINT, outline='')
+            c.create_oval(X0 + 30, y, X0 + 66, y + 36, fill=OK if done else ACCENT if active else '#f1eaf5', outline='')
+            self.text(X0 + 48, y + 18, '✓' if done else str(i + 1), 12, 'bold', CARD if (done or active) else MUTED,
+                      anchor='center')
+            self.text(X0 + 84, y + 18, self.label('s_' + sid), 13, 'bold', INK, anchor='w')
+            y += 62
+
+    def install(self):
+        dest = Path(self.dest_var.get().strip() or str(self.dir))
+        k = self.kit
+        cmd = [sys.executable, '-m', 'installer', '--exefs', str(k / 'data' / 'exefs'), '--romfs', str(k / 'data' / 'romfs'),
+               '--dest', str(dest), '--translator', str(k / 'toolchain' / 'xlate' / 'totk_xlate.exe'), '--lang', 'de',
+               '--toolchain', str(k / 'toolchain' / 'llvm-mingw'), '--deps', str(k / 'toolchain' / 'deps'),
+               '--dll-dir', str(k / 'toolchain' / 'deps' / 'bin'), '--ninja', str(k / 'toolchain' / 'ninja.exe')]
+        self.dir, self.ini, self.steps, self.fail_log = dest, dest / 'dkb.ini', {}, None
+        self.inst = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                     encoding='utf-8', errors='replace',
+                                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        threading.Thread(target=self.read_events, daemon=True).start()
+        self.draw()
+        self.root.after(500, self.pump)
+
+    def read_events(self):
+        for line in self.inst.stdout:
+            line = line.strip()
+            if line.startswith('{'):
+                try:
+                    self.events.put(json.loads(line))
+                except ValueError:
+                    pass
+
+    def pump(self):
+        changed = False
+        while not self.events.empty():
+            ev = self.events.get()
+            if ev.get('type') == 'step':
+                self.steps[ev.get('step')] = ev.get('state')
+                changed = True
+            elif ev.get('type') == 'error':
+                self.fail_log = str(ev.get('params', {}).get('log', ''))
+                changed = True
+        if self.inst.poll() is None:
+            if changed:
+                self.draw()
+            self.root.after(500, self.pump)
+            return
+        self.vals = {**DEFAULTS, **ini_read(self.ini)}
+        self.draw()   # done: the launcher page (kar.exe now exists), else the setup page with the log path
 
     # drawing helpers
     def rrect(self, x0, y0, x1, y1, r, **kw):
@@ -205,7 +320,7 @@ class Launcher:
         return (self.dir / 'pipeline-keys.bin').is_file()
 
     # pages
-    def draw(self):
+    def draw_launcher(self):
         c, t = self.c, self.t
         c.delete('all')
         c.create_oval(880, -140, 1300, 280, fill=CIRCLE, outline='')
@@ -354,6 +469,7 @@ def selftest():
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--dir', type=Path)
+    ap.add_argument('--kit', type=Path)
     ap.add_argument('--lang', choices=sorted(TEXT))
     ap.add_argument('--selftest', action='store_true')
     args = ap.parse_args(argv)
@@ -366,7 +482,8 @@ def main(argv=None):
         except Exception:
             pass
     root = tk.Tk()
-    Launcher(root, (args.dir or default_dir()).resolve(), args.lang or system_lang())
+    folder = args.dir or (Path.home() / 'KirbyRecomp' if args.kit else default_dir())
+    Launcher(root, folder.resolve(), args.lang or system_lang(), args.kit.resolve() if args.kit else None)
     root.mainloop()
     return 0
 
