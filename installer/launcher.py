@@ -245,7 +245,8 @@ class Launcher:
     def install(self):
         dest = Path(self.dest_var.get().strip() or str(self.dir))
         k = self.kit
-        cmd = [sys.executable, '-m', 'installer', '--exefs', str(k / 'data' / 'exefs'), '--romfs', str(k / 'data' / 'romfs'),
+        # -u: the installer's step events arrive line by line (piped output is otherwise buffered until the end)
+        cmd = [sys.executable, '-u', '-m', 'installer', '--exefs', str(k / 'data' / 'exefs'), '--romfs', str(k / 'data' / 'romfs'),
                '--dest', str(dest), '--translator', str(k / 'toolchain' / 'xlate' / 'totk_xlate.exe'), '--lang', 'de',
                '--toolchain', str(k / 'toolchain' / 'llvm-mingw'), '--deps', str(k / 'toolchain' / 'deps'),
                '--dll-dir', str(k / 'toolchain' / 'deps' / 'bin'), '--ninja', str(k / 'toolchain' / 'ninja.exe')]
