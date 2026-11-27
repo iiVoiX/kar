@@ -30,6 +30,11 @@ INK, INK_SOFT, MUTED, STAR = '#2b2350', '#4a4170', '#6b5f94', '#ffd23f'
 CARD, LINE, TINT, OK, WARN = '#ffffff', '#ecdcf0', '#fff4f9', '#2fa36b', '#e0a100'
 FONT = 'Segoe UI' if os.name == 'nt' else 'DejaVu Sans'
 
+
+def px_font(points, weight='normal'):
+    # a size in pixels (Tk: negative), so text keeps its place on the canvas whatever the Windows scaling (125 %, 150 %)
+    return (FONT, -round(points * 96 / 72), weight)
+
 # (key in dkb.ini, cfg.c name, section, [(value, label id)]); labels are text ids below or literal names
 TABS = [
     ('display', [
@@ -208,7 +213,7 @@ class Launcher:
         self.text(56, 210, t['setup_sub'], 12, 'normal', INK_SOFT, width=380)
         self.rrect(56, 270, 420, 400, 20, fill=CARD, outline='')
         self.text(76, 286, t['dest'], 12, 'bold', INK)
-        entry = tk.Entry(self.root, textvariable=self.dest_var, font=(FONT, 11), relief='flat', bg=TINT, fg=INK)
+        entry = tk.Entry(self.root, textvariable=self.dest_var, font=px_font(11), relief='flat', bg=TINT, fg=INK)
         c.create_window(76, 318, window=entry, anchor='nw', width=324, height=34)
         self.text(76, 364, t['need'], 10, 'normal', MUTED)
         busy = self.inst is not None and self.inst.poll() is None
@@ -295,7 +300,7 @@ class Launcher:
         self.c.create_polygon(pts, fill=fill, outline=outline, width=2 if outline else 0, joinstyle='round')
 
     def text(self, x, y, s, size, weight='normal', fill=INK, anchor='nw', **kw):
-        return self.c.create_text(x, y, text=s, font=(FONT, size, weight), fill=fill, anchor=anchor, **kw)
+        return self.c.create_text(x, y, text=s, font=px_font(size, weight), fill=fill, anchor=anchor, **kw)
 
     def button(self, x0, y0, x1, y1, label, command, selected=False, size=11, r=12):
         tag = f'b{id(command)}_{x0}_{y0}'
