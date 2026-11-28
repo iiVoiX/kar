@@ -32,7 +32,10 @@
 #define AO_STATE_STOPPED 1
 #define AO_MAX 64
 
-typedef struct { uint64_t next, samples, capacity, size, offset; } AudioOutBuffer;   // 0x28 bytes
+// 0x28 bytes. The sound is size bytes from samples: Kirby Air Riders leaves offset uninitialised (a stale pointer in
+// some runs, so a check against it threw away every other buffer and the sound stuttered, RELEASE_PLAN 9.2), and
+// yuzu's AudioOut (audio_core/out/audio_out_system.cpp, AppendBuffer) reads only samples and size as well.
+typedef struct { uint64_t next, samples, capacity, size, offset; } AudioOutBuffer;
 _Static_assert(sizeof(AudioOutBuffer) == 0x28, "AudioOutBuffer");
 
 typedef struct {
@@ -52,6 +55,9 @@ typedef struct {
 } AudioOut;
 
 // The SDL stream of an AudioOut, or NULL (logged) when audio is off or no device opens.
+// KAR_AUDIO_STATS counters of the release side, logged with the append side's in play()
+static uint64_t st_idle_ns, st_releases, st_late_ns;
+
 static int heard_once;   // the game has started its sound (stats count only from there)
 
 static SDL_AudioStream *open_stream(int channels) {
@@ -120,8 +126,8 @@ static void apply_gain(AudioOut *o) {
     if (o->stream) SDL_SetAudioStreamGain(o->stream, o->volume * menu_volume());
 }
 
-// Sends an appended buffer's samples to the device. AudioOutBuffer.samples is the data pointer, size the bytes of
-// sample data; a nonzero offset (not seen so far) skips that many bytes of it.
+// Sends an appended buffer's samples to the device: size bytes from AudioOutBuffer.samples (offset is not used, see
+// AudioOutBuffer).
 static void play(AudioOut *o, const AudioOutBuffer *ab) {
     static float last_gain = -1.0f;   // follow the menu slider while playing; also with TOTK_AUDIO=none, so a test run logs it
     if (o->volume * menu_volume() != last_gain) {
@@ -129,10 +135,16 @@ static void play(AudioOut *o, const AudioOutBuffer *ab) {
         static int told_gain;   // each change of the effective gain, so a run log shows the slider and the mute work
         if (told_gain++ < 16) rt_log("audout: gain %.2f (game %.2f, menu %.2f)", last_gain, o->volume, menu_volume());
     }
-    if (!o->stream || !ab->samples || !ab->size || ab->offset >= ab->size || ab->size > (64u << 20)) return;
-    uint64_t len = ab->size - ab->offset;
-    const void *data = ipc_guest(ab->samples + ab->offset, len);
-    if (!data) return;
+    static uint64_t rej_hdr, rej_map;   // KAR_AUDIO_STATS: appended buffers not played (bad header, unmapped samples)
+    if (!o->stream || !ab->samples || !ab->size || ab->size > (64u << 20)) {
+        if (rej_hdr++ < 6) rt_log("audout: skip next %llx samples %llx cap %llx size %llx offset %llx", (unsigned long long)ab->next,
+                                  (unsigned long long)ab->samples, (unsigned long long)ab->capacity, (unsigned long long)ab->size,
+                                  (unsigned long long)ab->offset);
+        return;
+    }
+    uint64_t len = ab->size;
+    const void *data = ipc_guest(ab->samples, len);
+    if (!data) { rej_map++; return; }
     int bytes_per_ms = AO_RATE / 1000 * o->channels * 2;
     int queued = SDL_GetAudioStreamQueued(o->stream);
     if (queued > AO_MAX_QUEUE_MS * bytes_per_ms) {   // the device fell behind: start over from this buffer
@@ -146,16 +158,21 @@ static void play(AudioOut *o, const AudioOutBuffer *ab) {
         static int on = -1;
         static uint64_t t0, appends, dry;
         static int low = 1 << 30;
+        static double ms_in;
         if (on < 0) on = getenv("KAR_AUDIO_STATS") && *getenv("KAR_AUDIO_STATS") == '1';
-        if (on && heard_once) {
+        if (on) {
             uint64_t now = plat_now_ms();
             if (!t0) t0 = now;
             appends++, dry += queued == 0;
             if (queued < low) low = queued;
+            ms_in += len / (double)bytes_per_ms;
             if (now - t0 >= 5000) {
-                rt_log("audout: stats %llu buffers, %llu with the queue dry, lowest fill %.1f ms", (unsigned long long)appends,
-                       (unsigned long long)dry, low / (double)bytes_per_ms);
-                t0 = now, appends = dry = 0, low = 1 << 30;
+                rt_log("audout: stats %llu buffers (%.0f ms audio), %llu with the queue dry, lowest fill %.1f ms; %llu released,"
+                       " release thread idle %.0f ms, latest wake %.2f ms, %d queued, heard %d, skipped %llu/%llu", (unsigned long long)appends, ms_in,
+                       (unsigned long long)dry, low / (double)bytes_per_ms, (unsigned long long)st_releases, st_idle_ns / 1e6,
+                       st_late_ns / 1e6, o->nqueued, heard_once, (unsigned long long)rej_hdr, (unsigned long long)rej_map);
+                t0 = now, appends = dry = 0, low = 1 << 30, ms_in = 0;
+                st_idle_ns = st_releases = st_late_ns = 0;
             }
         }
     }
@@ -171,21 +188,35 @@ static void play(AudioOut *o, const AudioOutBuffer *ab) {
 
 static const char device_name[] = "DeviceOut";
 
-// Releases the oldest queued buffer once its samples would have played, while started.
+
+// Releases the oldest queued buffer once its samples would have played, while started. The release times follow an
+// absolute timeline (due += each buffer's length) so a late wake-up is made up on the next buffer: a relative sleep per
+// buffer only ever runs slower than the sound device, the game can only append what was released, and the device
+// queue drains until it runs dry (RELEASE_PLAN 9.2). The timeline restarts when the queue was empty or stopped.
 static void release_thread(void *p) {
     AudioOut *o = p;
+    uint64_t due = 0;
     plat_mutex_lock(&o->lock);
     while (o->running) {
         if (!o->started || !o->nqueued) {
+            uint64_t w = plat_now_ns();
             plat_cond_wait(&o->cv, &o->lock);
+            st_idle_ns += plat_now_ns() - w;
+            due = 0;
             continue;
         }
         uint64_t bytes = o->queued_bytes[0];
         uint64_t frames = bytes / (uint64_t)(o->channels * 2);
         uint64_t ns = frames * 1000000000ull / AO_RATE;
+        uint64_t now = plat_now_ns();
+        if (!due || now > due + 100000000ull) due = now;   // fresh start, or more than 100 ms behind: no catch-up burst
+        due += ns ? ns : 1000000;
         plat_mutex_unlock(&o->lock);
-        plat_sleep_ns(ns ? ns : 1000000);
+        if (due > now) plat_sleep_ns(due - now);
+        now = plat_now_ns();
         plat_mutex_lock(&o->lock);
+        if (now > due && now - due > st_late_ns) st_late_ns = now - due;
+        st_releases++;
         if (!o->running || !o->started || !o->nqueued) continue;
         uint64_t tag = o->queued[0];
         memmove(o->queued, o->queued + 1, (size_t)(o->nqueued - 1) * sizeof *o->queued);
